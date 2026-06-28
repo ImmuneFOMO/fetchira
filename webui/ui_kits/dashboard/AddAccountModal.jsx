@@ -140,7 +140,7 @@ function AddAccountModal({ onClose }) {
             invalid={touched && !label.trim()} hint={touched && !label.trim() ? 'Give this account a label' : null} />
 
           {!isWeb ? (
-            <Input label="API key" placeholder="paste secret key" value={apiKey} mono prefix="••"
+            <Input label="API key" placeholder="paste secret key" value={apiKey} mono
               type="password" onChange={(e) => setApiKey(e.target.value)}
               invalid={touched && keyMissing}
               hint={touched && keyMissing ? 'Enter a valid API key' : 'Stored locally · never displayed again'} />

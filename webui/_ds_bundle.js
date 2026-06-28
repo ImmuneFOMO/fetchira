@@ -529,7 +529,7 @@ function Input({
       background: 'var(--surface-well)',
       border: `1px solid ${invalid ? 'var(--red-500)' : focus ? 'var(--lime-500)' : 'var(--border-hairline)'}`,
       borderRadius: 'var(--r-sm)',
-      boxShadow: focus ? 'var(--glow-accent)' : 'none',
+      boxShadow: focus && !invalid ? 'var(--glow-accent)' : 'none',
       transition: 'border-color var(--dur-fast), box-shadow var(--dur-fast)',
       padding: '0 10px',
       gap: 7

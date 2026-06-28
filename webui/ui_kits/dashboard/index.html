@@ -50,10 +50,36 @@ function EmptyState({ onAdd }) {
   );
 }
 
+function OfflineToast() {
+  return (
+    <div style={{ position: 'fixed', bottom: 16, left: 0, right: 0, zIndex: 100, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.4)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
+        <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--red-500)' }} />
+        UI server offline — restart with <code style={{ color: 'var(--text-hi)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4 }}>fetchira ui</code> in your terminal
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = React.useState('overview');
   const [modal, setModal] = React.useState(false);
   const [seeded, setSeeded] = React.useState(true);
+  const [online, setOnline] = React.useState(true);
+  const everOnline = React.useRef(false); // only nag once the server has actually been reached
+
+  React.useEffect(() => {
+    window.fxSetOffline = (v) => setOnline(!v);
+    const ping = async () => {
+      try {
+        const r = await fetch('/api/state', { headers: { 'x-fetchira-token': window.FX_TOKEN } });
+        if (r.ok) { everOnline.current = true; setOnline(true); } else setOnline(false);
+      } catch (e) { setOnline(false); }
+    };
+    ping();
+    const id = setInterval(ping, 5000);
+    return () => clearInterval(id);
+  }, []);
 
   const tabs = [
     { id: 'overview', label: 'Overview' },
@@ -63,6 +89,7 @@ function App() {
 
   return (
     <React.Fragment>
+      {!online && everOnline.current && <OfflineToast />}
       <window.TopBar onAdd={() => setModal(true)} />
 
       <div style={{ position: 'sticky', top: 'var(--topbar-h)', zIndex: 15, background: 'rgba(10,12,17,0.8)', backdropFilter: 'blur(12px)', borderBottom: '1px solid var(--border-faint)', padding: '10px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -91,11 +118,17 @@ function App() {
 window.FX_TOKEN = new URLSearchParams(location.search).get('token') || '';
 
 window.apiPost = async function (path, body) {
-  const r = await fetch(path, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-fetchira-token': window.FX_TOKEN },
-    body: JSON.stringify(body || {}),
-  });
+  let r;
+  try {
+    r = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fetchira-token': window.FX_TOKEN },
+      body: JSON.stringify(body || {}),
+    });
+  } catch (e) {
+    if (window.fxSetOffline) window.fxSetOffline(true);
+    throw new Error('UI server offline — run `fetchira ui` in your terminal');
+  }
   let data = null;
   try { data = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error((data && data.error) || ('request failed (' + r.status + ')'));
