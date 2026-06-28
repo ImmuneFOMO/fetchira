@@ -95,18 +95,14 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
         "PROVIDER", "LABEL", "CRED", "REMAINING", "RESEARCH"
     );
     for a in &cfg.accounts {
-        let quota = a.quota.unwrap_or_else(|| a.provider.default_quota());
-        let period = period_key(a.reset.unwrap_or_else(|| a.provider.default_reset()));
-        let remaining = store
-            .remaining(&a.label, quota, &period)
-            .await
-            .unwrap_or(quota);
+        let ready = account_ready(&store, a).await;
         let cred = if a.provider.is_web() {
-            match store.load_session(&a.label).await {
-                Ok(Some(_)) => "session",
-                _ => "NEEDS LOGIN",
+            if ready {
+                "session"
+            } else {
+                "NEEDS LOGIN"
             }
-        } else if a.api_key.is_some() {
+        } else if ready {
             "key"
         } else {
             "NO KEY"
@@ -116,17 +112,44 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             a.provider.as_str(),
             a.label,
             cred,
-            remaining,
-            research_cell(&store, a).await,
+            remaining_cell(&store, a, ready).await,
+            research_cell(&store, a, ready).await,
             a.proxy.as_deref().unwrap_or("direct"),
         );
     }
     Ok(())
 }
 
-/// "{remaining}/{quota}/day" deep-research budget for web providers, "-" otherwise.
-async fn research_cell(store: &Store, a: &Account) -> String {
-    if !a.provider.is_web() {
+/// True once the account is usable: a key that resolves to a non-empty secret, or a captured web
+/// session. Until then its quota is meaningless, so the listings show "-" instead of a number.
+async fn account_ready(store: &Store, a: &Account) -> bool {
+    if a.provider.is_web() {
+        matches!(store.load_session(&a.label).await, Ok(Some(_)))
+    } else {
+        a.api_key
+            .as_deref()
+            .and_then(|s| config::resolve_secret(s).ok())
+            .is_some_and(|k| !k.trim().is_empty())
+    }
+}
+
+/// Remaining chat/search quota for this period, or "-" until the account is authorized.
+async fn remaining_cell(store: &Store, a: &Account, ready: bool) -> String {
+    if !ready {
+        return "-".to_string();
+    }
+    let quota = a.quota.unwrap_or_else(|| a.provider.default_quota());
+    let period = period_key(a.reset.unwrap_or_else(|| a.provider.default_reset()));
+    store
+        .remaining(&a.label, quota, &period)
+        .await
+        .unwrap_or(quota)
+        .to_string()
+}
+
+/// "{remaining}/{quota}/day" deep-research budget for authorized web providers, "-" otherwise.
+async fn research_cell(store: &Store, a: &Account, ready: bool) -> String {
+    if !ready || !a.provider.is_web() {
         return "-".to_string();
     }
     let dq = a.dr_quota.unwrap_or_else(|| a.provider.dr_quota());
@@ -348,18 +371,14 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
         "PROVIDER", "LABEL", "STATUS", "REMAINING", "RESEARCH"
     );
     for a in &cfg.accounts {
-        let quota = a.quota.unwrap_or_else(|| a.provider.default_quota());
-        let period = period_key(a.reset.unwrap_or_else(|| a.provider.default_reset()));
-        let remaining = store
-            .remaining(&a.label, quota, &period)
-            .await
-            .unwrap_or(quota);
+        let ready = account_ready(&store, a).await;
         let status = if a.provider.is_web() {
-            match store.load_session(&a.label).await {
-                Ok(Some(_)) => "logged in",
-                _ => "needs login",
+            if ready {
+                "logged in"
+            } else {
+                "needs login"
             }
-        } else if a.api_key.is_some() {
+        } else if ready {
             "key set"
         } else {
             "no key"
@@ -369,8 +388,8 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
             a.provider.as_str(),
             a.label,
             status,
-            remaining,
-            research_cell(&store, a).await
+            remaining_cell(&store, a, ready).await,
+            research_cell(&store, a, ready).await
         );
     }
     println!();

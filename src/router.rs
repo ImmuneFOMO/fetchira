@@ -124,11 +124,19 @@ impl Router {
                     String::new(),
                 )
             } else {
-                let key = resolve_secret(
-                    acc.api_key
-                        .as_deref()
-                        .ok_or_else(|| Error::Config(format!("{} missing api_key", acc.label)))?,
-                )?;
+                let Some(key) = acc
+                    .api_key
+                    .as_deref()
+                    .and_then(|s| resolve_secret(s).ok())
+                    .filter(|k| !k.trim().is_empty())
+                else {
+                    tracing::warn!(
+                        label = %acc.label,
+                        "no usable API key; set it or run `fetchira add {}`",
+                        acc.provider.as_str()
+                    );
+                    continue;
+                };
                 let client = match &proxy_url {
                     Some(p) => proxy::build_client(Some(p))?,
                     None => direct.clone(),
