@@ -8,7 +8,7 @@ use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
 use crate::providers::{self, Capability, Input, LiveQuota, Provider, ProviderKind};
 use crate::proxy;
-use crate::usage::{period_key, RouteLog, Store};
+use crate::usage::{period_key, DebugLog, RouteLog, Store};
 use crate::web;
 
 /// An account's transport: an API client (reqwest) or a cookie-authed impersonating client (wreq).
@@ -56,6 +56,8 @@ pub struct Router {
     // Short-lived cache of provider-reported quota, keyed by "{label}|{deep}", so polling the
     // dashboard or `usage` doesn't hit grok's rate-limit endpoint on every call.
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
+    // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
+    debug: Option<i64>,
 }
 
 impl Router {
@@ -64,10 +66,15 @@ impl Router {
             buckets,
             store,
             live: Mutex::new(HashMap::new()),
+            debug: None,
         }
     }
 
     pub async fn build(cfg: Config, store: Store) -> Result<Self> {
+        let debug = cfg
+            .debug_log
+            .enabled
+            .then_some(cfg.debug_log.retention_hours);
         // Only fetch the proxy list if a "pool" account still lacks a (cached) assignment —
         // otherwise every server launch would re-download it and block the MCP handshake.
         let mut needs_pool = false;
@@ -159,6 +166,7 @@ impl Router {
             buckets,
             store,
             live: Mutex::new(HashMap::new()),
+            debug,
         })
     }
 
@@ -213,6 +221,30 @@ impl Router {
                 };
                 let latency = t0.elapsed().as_millis() as i64;
                 let acct = strip_dr(&blabel);
+                // Firehose: every attempt (success or failure, incl. a 403 body) lands here.
+                if let Some(retention) = self.debug {
+                    let err = res.as_ref().err().map(|e| e.to_string());
+                    let req = describe_input(cap, input);
+                    let _ = self
+                        .store
+                        .log_debug(
+                            &DebugLog {
+                                capability: cap.as_str(),
+                                provider: kind.as_str(),
+                                label: acct,
+                                status: match &res {
+                                    Ok(_) => 200,
+                                    Err(e) => err_code(e),
+                                },
+                                latency_ms: latency,
+                                request: &req,
+                                response: res.as_ref().ok().map(|o| o.text.as_str()),
+                                error: err.as_deref(),
+                            },
+                            retention,
+                        )
+                        .await;
+                }
                 match res {
                     Ok(o) => {
                         // The reservation already charged 1; settle the rest for costlier calls.
@@ -371,6 +403,31 @@ impl Router {
 /// Display label for the route log: drop the `#dr` budget suffix back to the account label.
 fn strip_dr(label: &str) -> &str {
     label.strip_suffix("#dr").unwrap_or(label)
+}
+
+/// HTTP-ish status for the debug log: the provider's real code when it has one, else 429/402 for
+/// the rate/quota cases and 0 for transport/shape errors.
+fn err_code(e: &Error) -> i64 {
+    match e {
+        Error::Provider { status, .. } => *status as i64,
+        Error::RateLimit(_) => 429,
+        Error::QuotaExceeded(_) => 402,
+        _ => 0,
+    }
+}
+
+/// The request side of a debug entry: the meaningful inputs, as compact JSON.
+fn describe_input(cap: Capability, input: &Input) -> String {
+    serde_json::json!({
+        "capability": cap.as_str(),
+        "query": input.query,
+        "url": input.url,
+        "model": input.model,
+        "mode": input.mode,
+        "session": input.session,
+        "max_results": input.max_results,
+    })
+    .to_string()
 }
 
 /// (db label, quota, reset) for a bucket+capability. Web deep_research uses a separate

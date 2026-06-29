@@ -9,6 +9,8 @@ use crate::providers::ProviderKind;
 pub struct Config {
     #[serde(default = "default_db")]
     pub db_path: String,
+    #[serde(default, skip_serializing_if = "DebugLog::is_default")]
+    pub debug_log: DebugLog,
     #[serde(default, skip_serializing_if = "ProxyPool::is_empty")]
     pub proxy_pool: ProxyPool,
     #[serde(default, rename = "account")]
@@ -19,6 +21,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             db_path: default_db(),
+            debug_log: DebugLog::default(),
             proxy_pool: ProxyPool::default(),
             accounts: Vec::new(),
         }
@@ -27,6 +30,39 @@ impl Default for Config {
 
 fn default_db() -> String {
     "usage.db".into()
+}
+
+/// Full request/response capture for debugging, kept in the `debug_log` table. Bounded by
+/// `retention_hours` plus a fixed row + per-entry size cap (see `usage`), so it can't run away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DebugLog {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_retention")]
+    pub retention_hours: i64,
+}
+
+impl Default for DebugLog {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_hours: default_retention(),
+        }
+    }
+}
+
+impl DebugLog {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_retention() -> i64 {
+    24
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
