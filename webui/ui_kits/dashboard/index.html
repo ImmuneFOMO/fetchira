@@ -25,6 +25,7 @@
 <script type="text/babel" src="OverviewTab.jsx"></script>
 <script type="text/babel" src="AccountsTab.jsx"></script>
 <script type="text/babel" src="ActivityTab.jsx"></script>
+<script type="text/babel" src="DebugTab.jsx"></script>
 <script type="text/babel" src="AddAccountModal.jsx"></script>
 
 <script type="text/babel">
@@ -94,6 +95,7 @@ function App() {
     { id: 'overview', label: 'Overview' },
     { id: 'accounts', label: 'Accounts', count: window.FX.accounts.length },
     { id: 'activity', label: 'Activity' },
+    { id: 'debug', label: 'Debug' },
   ];
 
   return (
@@ -113,7 +115,8 @@ function App() {
         {!seeded ? <EmptyState onAdd={() => setModal(true)} />
           : tab === 'overview' ? <window.OverviewTab />
           : tab === 'accounts' ? <window.AccountsTab onAdd={() => setModal(true)} />
-          : <window.ActivityTab />}
+          : tab === 'activity' ? <window.ActivityTab />
+          : <window.DebugTab />}
       </main>
 
       {modal && <window.AddAccountModal onClose={() => setModal(false)} />}

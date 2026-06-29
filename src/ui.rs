@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -26,7 +26,7 @@ use crate::cli;
 use crate::config;
 use crate::providers::{Capability, Input, ProviderKind};
 use crate::router::Router;
-use crate::usage::{RouteRow, Store};
+use crate::usage::{DebugRow, RouteRow, Store};
 
 #[derive(RustEmbed)]
 #[folder = "webui/"]
@@ -69,6 +69,8 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     let app = AxumRouter::new()
         .route("/api/state", get(api_state))
         .route("/api/events", get(api_events))
+        .route("/api/debug", get(api_debug))
+        .route("/api/debug/{id}", get(api_debug_one))
         .route("/api/account/add", post(api_add))
         .route("/api/account/remove", post(api_remove))
         .route("/api/account/login", post(api_login))
@@ -224,6 +226,60 @@ async fn api_events(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Debug firehose feed: recent attempts (`after=0`) or just new ones (`after=<id>`), each with a
+/// body preview. The full request/response/error is fetched per-row from `/api/debug/{id}`.
+async fn api_debug(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(resp) = guard(&st, &headers) {
+        return resp;
+    }
+    let after: i64 = q.get("after").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let limit: i64 = q
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
+    let rows = if after > 0 {
+        st.store.debug_since(after, limit).await
+    } else {
+        st.store.recent_debug(limit).await.map(|mut r| {
+            r.reverse(); // ascending, so the client appends and tracks the max id
+            r
+        })
+    };
+    match rows {
+        Ok(rows) => {
+            let max_id = rows.last().map(|r| r.id).unwrap_or(after);
+            let entries: Vec<Value> = rows.iter().map(debug_to_entry).collect();
+            Json(json!({ "rows": entries, "maxId": max_id })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_debug_one(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+) -> Response {
+    if let Some(resp) = guard(&st, &headers) {
+        return resp;
+    }
+    match st.store.debug_get(id).await {
+        Ok(Some(r)) => Json(json!({
+            "id": r.id, "ts": r.ts, "capability": r.capability, "provider": r.provider,
+            "label": r.label, "status": r.status, "latencyMs": r.latency_ms,
+            "request": r.request, "response": r.response, "error": r.error,
+        }))
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -401,6 +457,31 @@ fn route_to_entry(r: &RouteRow) -> Value {
             "account": acct_num(&r.label), "status": r.status, "latencyMs": r.latency_ms,
         })
     }
+}
+
+/// A debug-feed row: metadata + small request inline, plus a one-line preview of the body. The
+/// full response/error is loaded lazily when a row is expanded.
+fn debug_to_entry(r: &DebugRow) -> Value {
+    let body = r.response.as_deref().or(r.error.as_deref()).unwrap_or("");
+    json!({
+        "id": r.id,
+        "time": r.ts.get(11..19).unwrap_or("").to_string(),
+        "capability": r.capability,
+        "provider": r.provider,
+        "account": acct_num(&r.label),
+        "status": r.status,
+        "latencyMs": r.latency_ms,
+        "ok": r.status == 200,
+        "request": r.request,
+        "preview": preview(body),
+    })
+}
+
+fn preview(s: &str) -> String {
+    s.chars()
+        .take(180)
+        .collect::<String>()
+        .replace(['\n', '\r'], " ")
 }
 
 fn acct_num(label: &str) -> i64 {

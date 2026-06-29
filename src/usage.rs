@@ -39,6 +39,37 @@ pub struct RouteLog<'a> {
     pub fail_code: Option<i64>,
 }
 
+/// One full request/response capture (the debug firehose — every attempt, success or failure).
+pub struct DebugRow {
+    pub id: i64,
+    pub ts: String,
+    pub capability: String,
+    pub provider: String,
+    pub label: String,
+    pub status: i64,
+    pub latency_ms: i64,
+    pub request: String,
+    pub response: Option<String>,
+    pub error: Option<String>,
+}
+
+/// What the router hands to `log_debug` after every provider attempt.
+pub struct DebugLog<'a> {
+    pub capability: &'a str,
+    pub provider: &'a str,
+    pub label: &'a str,
+    pub status: i64,
+    pub latency_ms: i64,
+    pub request: &'a str,
+    pub response: Option<&'a str>,
+    pub error: Option<&'a str>,
+}
+
+/// Per-field char cap and row cap for the debug log. The product (~0.5 GB) is the hard ceiling
+/// regardless of `retention_hours`, so a burst can't fill the disk before the time sweep runs.
+const DEBUG_BODY_CAP: usize = 128 * 1024;
+const DEBUG_MAX_ROWS: i64 = 4000;
+
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
@@ -89,6 +120,22 @@ impl Store {
                 latency_ms INTEGER NOT NULL,
                 fail_from  TEXT,
                 fail_code  INTEGER
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS debug_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts         TEXT    NOT NULL,
+                capability TEXT    NOT NULL,
+                provider   TEXT    NOT NULL,
+                label      TEXT    NOT NULL,
+                status     INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                request    TEXT    NOT NULL,
+                response   TEXT,
+                error      TEXT
             )",
         )
         .execute(&pool)
@@ -311,6 +358,109 @@ impl Store {
             .await?;
         Ok(row.get("m"))
     }
+
+    pub async fn log_debug(&self, e: &DebugLog<'_>, retention_hours: i64) -> Result<()> {
+        let res = sqlx::query(
+            "INSERT INTO debug_log
+                (ts, capability, provider, label, status, latency_ms, request, response, error)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(e.capability)
+        .bind(e.provider)
+        .bind(e.label)
+        .bind(e.status)
+        .bind(e.latency_ms)
+        .bind(clip(e.request))
+        .bind(e.response.map(clip))
+        .bind(e.error.map(clip))
+        .execute(&self.pool)
+        .await?;
+        // Amortized eviction: drop rows past the row cap or older than the retention window.
+        let id = res.last_insert_rowid();
+        if id % 50 == 0 {
+            let cutoff =
+                (Utc::now() - chrono::Duration::hours(retention_hours.max(0))).to_rfc3339();
+            sqlx::query("DELETE FROM debug_log WHERE id <= ? OR ts < ?")
+                .bind(id - DEBUG_MAX_ROWS)
+                .bind(cutoff)
+                .execute(&self.pool)
+                .await
+                .ok();
+        }
+        Ok(())
+    }
+
+    /// Newest-first page for the Debug tab's initial load. Bodies are returned in full; the
+    /// handler trims them to previews and serves the full row from `debug_get`.
+    pub async fn recent_debug(&self, limit: i64) -> Result<Vec<DebugRow>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+             FROM debug_log ORDER BY id DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(debug_row).collect())
+    }
+
+    /// New rows since `after_id`, oldest-first, for incremental polling.
+    pub async fn debug_since(&self, after_id: i64, limit: i64) -> Result<Vec<DebugRow>> {
+        let rows = sqlx::query(
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+             FROM debug_log WHERE id > ? ORDER BY id ASC LIMIT ?",
+        )
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(debug_row).collect())
+    }
+
+    pub async fn debug_get(&self, id: i64) -> Result<Option<DebugRow>> {
+        let row = sqlx::query(
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+             FROM debug_log WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(debug_row))
+    }
+
+    pub async fn max_debug_id(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COALESCE(MAX(id), 0) AS m FROM debug_log")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get("m"))
+    }
+}
+
+/// Truncate at a char boundary so a giant scrape can't bloat one row, marking what was dropped.
+fn clip(s: &str) -> String {
+    if s.len() <= DEBUG_BODY_CAP {
+        return s.to_string();
+    }
+    let mut end = DEBUG_BODY_CAP;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[+{} bytes truncated]", &s[..end], s.len() - end)
+}
+
+fn debug_row(r: &sqlx::sqlite::SqliteRow) -> DebugRow {
+    DebugRow {
+        id: r.get("id"),
+        ts: r.get("ts"),
+        capability: r.get("capability"),
+        provider: r.get("provider"),
+        label: r.get("label"),
+        status: r.get("status"),
+        latency_ms: r.get("latency_ms"),
+        request: r.get("request"),
+        response: r.get("response"),
+        error: r.get("error"),
+    }
 }
 
 fn route_row(r: &sqlx::sqlite::SqliteRow) -> RouteRow {
@@ -383,6 +533,57 @@ mod tests {
         assert_eq!(store.max_route_id().await.unwrap(), recent[1].id);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn debug_log_roundtrips() {
+        let path = std::env::temp_dir().join(format!("fetchira_debug_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+
+        store
+            .log_debug(
+                &DebugLog {
+                    capability: "search",
+                    provider: "grok_web",
+                    label: "grok-1",
+                    status: 403,
+                    latency_ms: 812,
+                    request: r#"{"query":"hi"}"#,
+                    response: None,
+                    error: Some("grok anti-bot rejected this request"),
+                },
+                24,
+            )
+            .await
+            .unwrap();
+
+        let recent = store.recent_debug(10).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].status, 403);
+        assert_eq!(
+            recent[0].error.as_deref(),
+            Some("grok anti-bot rejected this request")
+        );
+        assert!(recent[0].response.is_none());
+
+        let id = recent[0].id;
+        assert_eq!(store.max_debug_id().await.unwrap(), id);
+        assert!(store.debug_since(id, 10).await.unwrap().is_empty());
+        assert_eq!(store.debug_get(id).await.unwrap().unwrap().label, "grok-1");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clip_truncates_on_char_boundary() {
+        let short = "é".repeat(10);
+        assert_eq!(clip(&short), short);
+        // A 4-byte char repeated past the cap: clipping must not split it mid-codepoint.
+        let big = "𝓍".repeat(DEBUG_BODY_CAP); // 4 bytes each
+        let out = clip(&big);
+        assert!(out.contains("truncated"));
+        assert!(out.starts_with('𝓍'));
     }
 
     #[tokio::test]

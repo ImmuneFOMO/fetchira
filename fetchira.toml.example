@@ -2,6 +2,12 @@
 # ($FETCHIRA_HOME or ~/.config/fetchira), so it's found no matter where an MCP client launches the binary.
 db_path = "usage.db"
 
+# Full request/response debug log (the dashboard's Debug tab). On by default; bounded to the
+# last `retention_hours` (and a fixed row + size cap). Set enabled = false to stop recording.
+# [debug_log]
+# enabled = true
+# retention_hours = 24
+
 # Optional: a Webshare proxy pool. Accounts with proxy = "pool" get a sticky proxy from it.
 # [proxy_pool]
 # webshare_url = "https://proxy.webshare.io/api/v2/proxy/list/download/<token>/-/any/username/direct/-/?plan_id=<id>"
