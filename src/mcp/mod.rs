@@ -28,6 +28,8 @@ pub struct SearchArgs {
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
     /// deep_research to heavy then expert); perplexity: "reasoning"/"deep research".
     pub mode: Option<String>,
+    /// Local file paths to upload and attach to the message (images, pdf, text). grok_web only.
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -117,6 +119,7 @@ impl Fetchira {
             session,
             model: args.model,
             mode: args.mode,
+            attachments: args.attachments,
             ..Default::default()
         };
         self.run(Capability::Search, input, forced).await
@@ -150,6 +153,7 @@ impl Fetchira {
             session,
             model: args.model,
             mode: args.mode,
+            attachments: args.attachments,
             ..Default::default()
         };
         self.run(Capability::DeepResearch, input, forced).await

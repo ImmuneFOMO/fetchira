@@ -60,6 +60,8 @@ pub struct Input {
     pub model: Option<String>,
     /// Provider-specific mode (e.g. grok "expert", perplexity "deep research").
     pub mode: Option<String>,
+    /// Local file paths to upload and attach to the message (grok_web only).
+    pub attachments: Option<Vec<String>>,
 }
 
 impl Input {
