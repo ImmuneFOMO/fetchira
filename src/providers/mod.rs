@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::Reset;
 use crate::error::{Error, Result};
 
+pub(crate) mod chatgpt_browser;
+mod chatgpt_sentinel;
+mod chatgpt_web;
 mod exa;
 mod firecrawl;
 mod gemini_web;
@@ -28,6 +31,7 @@ pub enum ProviderKind {
     GeminiWeb,
     GrokWeb,
     PerplexityWeb,
+    ChatgptWeb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,7 @@ pub enum Capability {
     Read,
     DeepResearch,
     Browser,
+    Image,
 }
 
 impl Capability {
@@ -45,6 +50,7 @@ impl Capability {
             Capability::Read => "read",
             Capability::DeepResearch => "deep_research",
             Capability::Browser => "browser",
+            Capability::Image => "create_image",
         }
     }
 }
@@ -105,6 +111,7 @@ impl ProviderKind {
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::PerplexityWeb => "perplexity_web",
+            ProviderKind::ChatgptWeb => "chatgpt_web",
         }
     }
 
@@ -120,6 +127,7 @@ impl ProviderKind {
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::PerplexityWeb => "https://www.perplexity.ai",
+            ProviderKind::ChatgptWeb => "https://chatgpt.com",
         }
     }
 
@@ -135,14 +143,21 @@ impl ProviderKind {
                 | (Firecrawl, Search | Read)
                 | (Parallel, Search | DeepResearch)
                 | (Steel, Browser)
-                | (GeminiWeb | GrokWeb | PerplexityWeb, Search | DeepResearch)
+                | (
+                    GeminiWeb | GrokWeb | PerplexityWeb | ChatgptWeb,
+                    Search | DeepResearch
+                )
+                | (ChatgptWeb, Image)
         )
     }
 
     pub fn is_web(self) -> bool {
         matches!(
             self,
-            ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::PerplexityWeb
+            ProviderKind::GeminiWeb
+                | ProviderKind::GrokWeb
+                | ProviderKind::PerplexityWeb
+                | ProviderKind::ChatgptWeb
         )
     }
 
@@ -160,6 +175,7 @@ impl ProviderKind {
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
             ProviderKind::PerplexityWeb => 300,
+            ProviderKind::ChatgptWeb => 100,
         }
     }
 
@@ -178,15 +194,18 @@ impl ProviderKind {
             ProviderKind::GeminiWeb => 10,
             ProviderKind::PerplexityWeb => 5,
             ProviderKind::GrokWeb => 3,
+            // ChatGPT Plus deep research is a monthly bucket (~25/mo); the server reports the live
+            // remaining count in `conversation/init`, so this is just the failover ceiling.
+            ProviderKind::ChatgptWeb => 25,
             _ => self.default_quota(),
         }
     }
 
     pub fn dr_reset(self) -> Reset {
-        if self.is_web() {
-            Reset::Daily
-        } else {
-            self.default_reset()
+        match self {
+            ProviderKind::ChatgptWeb => Reset::Monthly,
+            _ if self.is_web() => Reset::Daily,
+            _ => self.default_reset(),
         }
     }
 
@@ -203,6 +222,7 @@ impl ProviderKind {
             PerplexityWeb,
             GeminiWeb,
             GrokWeb,
+            ChatgptWeb,
         ]
     }
 
@@ -219,6 +239,9 @@ impl ProviderKind {
             ProviderKind::PerplexityWeb => "your logged-in Perplexity (search + deep research)",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
+            ProviderKind::ChatgptWeb => {
+                "your logged-in ChatGPT (chat + web search + deep research)"
+            }
         }
     }
 
@@ -249,10 +272,20 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
             PerplexityWeb,
             GeminiWeb,
             GrokWeb,
+            ChatgptWeb,
         ],
         Capability::Read => &[Jina, Firecrawl],
-        Capability::DeepResearch => &[Parallel, Exa, Tavily, PerplexityWeb, GeminiWeb, GrokWeb],
+        Capability::DeepResearch => &[
+            Parallel,
+            Exa,
+            Tavily,
+            PerplexityWeb,
+            GeminiWeb,
+            GrokWeb,
+            ChatgptWeb,
+        ],
         Capability::Browser => &[Steel],
+        Capability::Image => &[ChatgptWeb],
     }
 }
 
@@ -262,6 +295,35 @@ pub struct LiveQuota {
     pub remaining: i64,
     pub total: i64,
     pub window_secs: i64,
+}
+
+/// One tool/feature's live allowance for the account's tier (e.g. deep_research, image_gen).
+#[derive(Clone, Serialize)]
+pub struct FeatureLimit {
+    pub feature: String,
+    pub remaining: i64,
+    /// ISO-8601 instant the allowance resets (absolute, not a rolling window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_after: Option<String>,
+}
+
+/// The provider's live per-tier limits: a subscription label plus per-feature remaining counts.
+/// Generic across web providers; only chatgpt_web populates it today (others plug in via
+/// `Provider::live_limits`).
+#[derive(Clone, Serialize, Default)]
+pub struct LiveLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    pub features: Vec<FeatureLimit>,
+}
+
+impl LiveLimits {
+    pub fn remaining(&self, feature: &str) -> Option<i64> {
+        self.features
+            .iter()
+            .find(|f| f.feature == feature)
+            .map(|f| f.remaining)
+    }
 }
 
 /// A provider endpoint: its kind plus a base URL (overridable so tests can point at a mock).
@@ -301,9 +363,10 @@ impl Provider {
             ProviderKind::Firecrawl => firecrawl::call(b, key, client, cap, input).await,
             ProviderKind::Parallel => parallel::call(b, key, client, cap, input).await,
             ProviderKind::Steel => steel::call(b, key, client, cap, input).await,
-            ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::PerplexityWeb => {
-                Err(Error::Unsupported(self.kind.as_str()))
-            }
+            ProviderKind::GeminiWeb
+            | ProviderKind::GrokWeb
+            | ProviderKind::PerplexityWeb
+            | ProviderKind::ChatgptWeb => Err(Error::Unsupported(self.kind.as_str())),
         }
     }
 
@@ -319,6 +382,7 @@ impl Provider {
             ProviderKind::GeminiWeb => gemini_web::call(b, client, cap, input).await,
             ProviderKind::GrokWeb => grok_web::call(b, client, cap, input).await,
             ProviderKind::PerplexityWeb => perplexity_web::call(b, client, cap, input).await,
+            ProviderKind::ChatgptWeb => chatgpt_web::call(b, client, cap, input).await,
             _ => Err(Error::Unsupported(self.kind.as_str())),
         }
     }
@@ -340,6 +404,15 @@ impl Provider {
         grok_web::rate_limit(&self.base, client, "grok-4")
             .await
             .ok()
+    }
+
+    /// Live per-tier tool/model limits, when the provider exposes them. Best-effort: `None` if
+    /// unsupported or the fetch fails. Generic hook — others (grok/gemini/perplexity) can plug in.
+    pub async fn live_limits(&self, client: &wreq::Client) -> Option<LiveLimits> {
+        match self.kind {
+            ProviderKind::ChatgptWeb => chatgpt_web::limits(&self.base, client).await.ok(),
+            _ => None,
+        }
     }
 }
 

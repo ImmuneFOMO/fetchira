@@ -14,7 +14,7 @@ pub async fn call(
         Capability::Search => search(base, key, client, input, "basic").await,
         Capability::DeepResearch => research(base, key, client, input).await,
         Capability::Read => extract(base, key, client, input).await,
-        Capability::Browser => Err(Error::Unsupported("tavily")),
+        _ => Err(Error::Unsupported("tavily")),
     }
 }
 

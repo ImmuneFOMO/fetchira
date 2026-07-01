@@ -123,6 +123,17 @@ function AccountsTab({ onAdd }) {
                   <td style={{ padding: '12px 14px' }}>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{r.provider}</div>
+                    {r.limits && (
+                      <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 280 }}>
+                        {r.limits.tier && <Badge tone="cyan" variant="outline">{r.limits.tier}</Badge>}
+                        {(r.limits.features || []).map((f) => (
+                          <span key={f.feature} title={f.resetAfter ? 'resets ' + f.resetAfter : ''}
+                            style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px' }}>
+                            {f.feature} <b style={{ color: 'var(--text-hi)' }}>{f.remaining}</b>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />

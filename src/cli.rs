@@ -117,6 +117,25 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             a.proxy.as_deref().unwrap_or("direct"),
         );
     }
+
+    // Live per-tier tool limits, fetched straight from providers that report them (chatgpt_web).
+    let router = crate::router::Router::build(cfg, store).await?;
+    for v in router.usage_snapshot().await? {
+        let Some(ll) = v.limits else { continue };
+        println!(
+            "\nlive limits — {} ({})",
+            v.label,
+            ll.tier.as_deref().unwrap_or("?")
+        );
+        for f in &ll.features {
+            let reset = f
+                .reset_after
+                .as_deref()
+                .map(|s| format!("  · resets {}", &s[..s.len().min(10)]))
+                .unwrap_or_default();
+            println!("  {:20} {:>5}{}", f.feature, f.remaining, reset);
+        }
+    }
     Ok(())
 }
 

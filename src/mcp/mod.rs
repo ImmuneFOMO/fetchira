@@ -23,7 +23,10 @@ pub struct SearchArgs {
     /// its history (implies the same provider). Web providers only.
     pub session: Option<String>,
     /// Provider-specific model selector (e.g. gemini "3.1 pro"/"flash", perplexity "gpt-5",
-    /// grok "grok-4"). Ignored by the API providers.
+    /// grok "grok-4"). For chatgpt_web this is two axes: a model ("gpt-5.5"/"gpt-5.4"/"o3"), a
+    /// thinking level ("instant"/"medium"/"high"), or both ("gpt-5.4 high"). Levels are read live
+    /// and vary per model (o3 only offers medium); an unknown name returns the actual options.
+    /// Ignored by the API providers.
     pub model: Option<String>,
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
     /// deep_research to heavy then expert); perplexity: "reasoning"/"deep research".
@@ -44,6 +47,14 @@ pub struct BrowserArgs {
     pub url: String,
     /// Reserved for multi-step automation; ignored in v1.
     pub actions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ImageArgs {
+    /// What to draw.
+    pub prompt: String,
+    /// Force a specific provider (only chatgpt_web generates images today).
+    pub provider: Option<ProviderKind>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -104,7 +115,7 @@ fn route(
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (perplexity_web, gemini_web, grok_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat."
+        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (perplexity_web, gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing."
     )]
     pub async fn search(
         &self,
@@ -137,7 +148,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web). May take minutes. For gemini_web this returns a research PLAN plus a `session`; pass that `session` with query \"start\" (or an adjustment) to run the full report. Pass a `session` to continue any web research thread."
+        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). May take minutes. For gemini_web this returns a research PLAN plus a `session`; pass that `session` with query \"start\" to run it. For chatgpt_web it kicks off ChatGPT Deep Research, waits briefly, then — if still running — returns a `session`; call deep_research again with that `session` to fetch the finished report (pass `mode=\"background\"` to return the session immediately without waiting). Pass a `session` to continue any web research thread."
     )]
     pub async fn deep_research(
         &self,
@@ -184,6 +195,20 @@ impl Fetchira {
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
         })
     }
+
+    #[tool(
+        description = "Generate an image from a text prompt via your logged-in ChatGPT (chatgpt_web). Returns markdown `![](url)`; the URL is a session-scoped chatgpt.com link, not a public CDN URL."
+    )]
+    pub async fn create_image(
+        &self,
+        Parameters(args): Parameters<ImageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let input = Input {
+            query: Some(args.prompt),
+            ..Default::default()
+        };
+        self.run(Capability::Image, input, args.provider).await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -193,7 +218,7 @@ impl ServerHandler for Fetchira {
             .with_server_info(Implementation::new("fetchira", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Quota-aware router over free web-search/scrape providers. \
-                 Tools: search, read, deep_research, browser, usage. Pass `provider` to \
+                 Tools: search, read, deep_research, browser, create_image, usage. Pass `provider` to \
                  force a specific backend; otherwise the least-exhausted one is chosen.",
             )
     }

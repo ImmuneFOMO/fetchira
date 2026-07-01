@@ -6,15 +6,16 @@ use serde::Serialize;
 
 use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
-use crate::providers::{self, Capability, Input, LiveQuota, Provider, ProviderKind};
+use crate::providers::{self, Capability, Input, LiveLimits, LiveQuota, Provider, ProviderKind};
 use crate::proxy;
 use crate::usage::{period_key, DebugLog, RouteLog, Store};
 use crate::web;
 
 /// An account's transport: an API client (reqwest) or a cookie-authed impersonating client (wreq).
+/// Web carries the raw cookies too, for providers that must drive a real browser (chatgpt_web).
 pub enum Conn {
     Api(reqwest::Client),
-    Web(wreq::Client),
+    Web(wreq::Client, Vec<web::Cookie>),
 }
 
 pub struct Bucket {
@@ -48,6 +49,9 @@ pub struct UsageView {
     pub proxy: String,
     /// Rolling-window length when the figure comes live from the provider (grok); else `None`.
     pub window_secs: Option<i64>,
+    /// Live per-tier tool/model allowances (chatgpt_web), attached to a provider's main view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<LiveLimits>,
 }
 
 pub struct Router {
@@ -56,6 +60,8 @@ pub struct Router {
     // Short-lived cache of provider-reported quota, keyed by "{label}|{deep}", so polling the
     // dashboard or `usage` doesn't hit grok's rate-limit endpoint on every call.
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
+    // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. `None` caches a miss.
+    live_limits: Mutex<HashMap<String, (Instant, Option<LiveLimits>)>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
     debug: Option<i64>,
 }
@@ -66,6 +72,7 @@ impl Router {
             buckets,
             store,
             live: Mutex::new(HashMap::new()),
+            live_limits: Mutex::new(HashMap::new()),
             debug: None,
         }
     }
@@ -122,14 +129,8 @@ impl Router {
                     continue;
                 };
                 let sess = web::parse_session(&raw);
-                (
-                    Conn::Web(web::build_client(
-                        &sess.cookies,
-                        &sess.headers,
-                        proxy_url.as_deref(),
-                    )?),
-                    String::new(),
-                )
+                let client = web::build_client(&sess.cookies, &sess.headers, proxy_url.as_deref())?;
+                (Conn::Web(client, sess.cookies), String::new())
             } else {
                 let Some(key) = acc
                     .api_key
@@ -166,6 +167,7 @@ impl Router {
             buckets,
             store,
             live: Mutex::new(HashMap::new()),
+            live_limits: Mutex::new(HashMap::new()),
             debug,
         })
     }
@@ -194,7 +196,20 @@ impl Router {
                 }
                 let (blabel, bquota, breset) = budget(b, cap);
                 let period = period_key(breset);
-                let rem = self.store.remaining(&blabel, bquota, &period).await?;
+                let mut rem = self.store.remaining(&blabel, bquota, &period).await?;
+                // For tool-gated capabilities, trust the provider's live allowance over the soft
+                // counter: skip a bucket the provider says is exhausted (proactive failover).
+                if rem > 0 {
+                    if let Some(feature) = live_feature(cap) {
+                        if let Some(live) = self
+                            .live_limits_for(b)
+                            .await
+                            .and_then(|l| l.remaining(feature))
+                        {
+                            rem = live;
+                        }
+                    }
+                }
                 if rem > 0 {
                     cands.push((i, rem, blabel, bquota, period));
                 }
@@ -217,7 +232,21 @@ impl Router {
                 let t0 = Instant::now();
                 let res = match &b.conn {
                     Conn::Api(c) => b.provider.call(&b.key, c, cap, input).await,
-                    Conn::Web(c) => b.provider.call_web(c, cap, input).await,
+                    // chatgpt.com gates generation behind an anti-bot defense pure HTTP can't pass, so
+                    // it drives a real browser with the captured cookies. A deep-research poll is a
+                    // plain GET (not gated), so resume it over HTTP instead of relaunching a browser.
+                    Conn::Web(c, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
+                        if input
+                            .session
+                            .as_deref()
+                            .is_some_and(|s| s.starts_with("dr|poll|"))
+                        {
+                            b.provider.call_web(c, cap, input).await
+                        } else {
+                            providers::chatgpt_browser::run(cookies, cap, input).await
+                        }
+                    }
+                    Conn::Web(c, _) => b.provider.call_web(c, cap, input).await,
                 };
                 let latency = t0.elapsed().as_millis() as i64;
                 let acct = strip_dr(&blabel);
@@ -319,10 +348,12 @@ impl Router {
         let mut out = Vec::with_capacity(self.buckets.len());
         for b in &self.buckets {
             let proxy = b.proxy.clone().unwrap_or_else(|| "direct".to_string());
+            let ll = self.live_limits_for(b).await;
             let mut mv = self
                 .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
                 .await?;
             self.patch_live(b, false, &mut mv).await;
+            mv.limits = ll.clone();
             out.push(mv);
             // Web providers track deep_research against a separate daily budget.
             if b.provider.kind.is_web() {
@@ -337,6 +368,12 @@ impl Router {
                     )
                     .await?;
                 self.patch_live(b, true, &mut dv).await;
+                // Prefer the provider's live deep-research allowance over the soft counter.
+                if let Some(rem) = ll.as_ref().and_then(|l| l.remaining("deep_research")) {
+                    dv.remaining = rem;
+                    dv.used = (dv.quota - rem).max(0);
+                    dv.exhausted = rem == 0;
+                }
                 out.push(dv);
             }
         }
@@ -346,7 +383,7 @@ impl Router {
     /// Replace the soft local counter with the provider's live figure when it reports one (grok),
     /// caching it briefly. Best-effort: a failed fetch leaves the soft view untouched.
     async fn patch_live(&self, b: &Bucket, deep: bool, v: &mut UsageView) {
-        let Conn::Web(c) = &b.conn else { return };
+        let Conn::Web(c, _) = &b.conn else { return };
         let key = format!("{}|{}", b.label, deep);
         let cached = self.live.lock().ok().and_then(|m| {
             m.get(&key)
@@ -370,6 +407,26 @@ impl Router {
         v.used = (lq.total - lq.remaining).max(0);
         v.exhausted = lq.remaining == 0;
         v.window_secs = Some(lq.window_secs);
+    }
+
+    /// Live per-tier limits for a web bucket, cached 20s (a miss is cached too, so a provider
+    /// without them isn't re-polled on every snapshot).
+    async fn live_limits_for(&self, b: &Bucket) -> Option<LiveLimits> {
+        let Conn::Web(c, _) = &b.conn else {
+            return None;
+        };
+        if let Some(hit) = self.live_limits.lock().ok().and_then(|m| {
+            m.get(&b.label)
+                .filter(|(t, _)| t.elapsed() < Duration::from_secs(20))
+                .map(|(_, v)| v.clone())
+        }) {
+            return hit;
+        }
+        let fresh = b.provider.live_limits(c).await;
+        if let Ok(mut m) = self.live_limits.lock() {
+            m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
+        }
+        fresh
     }
 
     async fn view(
@@ -396,6 +453,7 @@ impl Router {
             exhausted: u.exhausted,
             proxy: proxy.to_string(),
             window_secs: None,
+            limits: None,
         })
     }
 }
@@ -432,6 +490,16 @@ fn describe_input(cap: Capability, input: &Input) -> String {
 
 /// (db label, quota, reset) for a bucket+capability. Web deep_research uses a separate
 /// `<label>#dr` daily budget so a research doesn't deplete the chat counter.
+/// The provider feature whose live allowance gates a capability (for proactive failover). `None`
+/// means use only the soft counter (chat/search caps are effectively unlimited on paid tiers).
+fn live_feature(cap: Capability) -> Option<&'static str> {
+    match cap {
+        Capability::DeepResearch => Some("deep_research"),
+        Capability::Image => Some("image_gen"),
+        _ => None,
+    }
+}
+
 fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
     if b.provider.kind.is_web() && cap == Capability::DeepResearch {
         (format!("{}#dr", b.label), b.dr_quota, b.dr_reset)

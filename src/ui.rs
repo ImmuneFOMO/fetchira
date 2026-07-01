@@ -590,6 +590,14 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "key": key,
                 "web": web,
                 "loggedIn": logged,
+                "limits": v.limits.as_ref().map(|ll| json!({
+                    "tier": ll.tier,
+                    "features": ll.features.iter().map(|f| json!({
+                        "feature": f.feature,
+                        "remaining": f.remaining,
+                        "resetAfter": f.reset_after,
+                    })).collect::<Vec<_>>(),
+                })),
             })
         })
         .collect();

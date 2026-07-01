@@ -118,14 +118,14 @@ pub fn build_client(
     Ok(b.build()?)
 }
 
-enum BrowserKind {
+pub(crate) enum BrowserKind {
     Chromium,
     Firefox,
 }
 
-struct Browser {
-    kind: BrowserKind,
-    bin: PathBuf,
+pub(crate) struct Browser {
+    pub kind: BrowserKind,
+    pub bin: PathBuf,
 }
 
 // Candidates are either absolute paths (checked as-is, macOS) or bare names (resolved on $PATH,
@@ -167,7 +167,7 @@ fn find_bin(cands: &[&str]) -> Option<PathBuf> {
 
 /// Find a usable browser. `FETCHIRA_BROWSER=chrome|firefox` forces one; otherwise Chrome is
 /// tried first and Firefox second.
-fn detect_browser() -> Option<Browser> {
+pub(crate) fn detect_browser() -> Option<Browser> {
     let chromium = || {
         find_bin(CHROMIUM_BINS).map(|bin| Browser {
             kind: BrowserKind::Chromium,
@@ -197,6 +197,13 @@ fn login_target(kind: ProviderKind) -> Result<(&'static str, &'static str, &'sta
             "__Secure-next-auth.session-token",
         ),
         ProviderKind::GrokWeb => ("https://grok.com/", "grok.com", "sso"),
+        ProviderKind::ChatgptWeb => (
+            // NextAuth splits the large session token into `.0`/`.1` chunks — there is no
+            // un-suffixed cookie, so wait for the first chunk as the "logged-in" signal.
+            "https://chatgpt.com/",
+            "chatgpt.com",
+            "__Secure-next-auth.session-token.0",
+        ),
         other => return Err(Error::Unsupported(other.as_str())),
     })
 }
@@ -255,7 +262,12 @@ async fn capture_chromium(
     domain: &str,
     auth: &str,
 ) -> Result<Session> {
-    let port = 9222u16;
+    // A free ephemeral port — 9222 collides with any other Chrome already exposing a debug port
+    // (the user's main browser, an automation instance), which resets the CDP connection.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(9222);
     let mut child = tokio::process::Command::new(bin)
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(format!("--remote-debugging-port={port}"))

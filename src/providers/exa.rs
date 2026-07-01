@@ -19,7 +19,7 @@ pub async fn call(
         Capability::Search => search(base, key, client, input).await,
         Capability::Read => contents(base, key, client, input).await,
         Capability::DeepResearch => research(base, key, client, input).await,
-        Capability::Browser => Err(Error::Unsupported("exa")),
+        _ => Err(Error::Unsupported("exa")),
     }
 }
 
