@@ -81,6 +81,11 @@ impl Fetchira {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(match self.router.call(cap, &input, forced).await {
             Ok(reply) => {
+                if let Some(img) = reply.image {
+                    return Ok(CallToolResult::success(vec![Content::image(
+                        img.b64, img.mime,
+                    )]));
+                }
                 let mut text = reply.text;
                 if let Some(s) = reply.session {
                     text.push_str(&format!(
@@ -148,7 +153,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). May take minutes. For gemini_web this returns a research PLAN plus a `session`; pass that `session` with query \"start\" to run it. For chatgpt_web it kicks off ChatGPT Deep Research, waits briefly, then — if still running — returns a `session`; call deep_research again with that `session` to fetch the finished report (pass `mode=\"background\"` to return the session immediately without waiting). Pass a `session` to continue any web research thread."
+        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). May take minutes. For gemini_web this returns a research PLAN plus a `session`; pass that `session` with query \"start\" to run it. For chatgpt_web it kicks off ChatGPT Deep Research (its own research model — `model` is ignored), waits briefly, then — if still running — returns a `session`; call deep_research again with that `session` to fetch the finished report (pass `mode=\"background\"` to return the session immediately without waiting). Pass a `session` to continue any web research thread."
     )]
     pub async fn deep_research(
         &self,
@@ -197,7 +202,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate an image from a text prompt via your logged-in ChatGPT (chatgpt_web). Returns markdown `![](url)`; the URL is a session-scoped chatgpt.com link, not a public CDN URL."
+        description = "Generate an image from a text prompt via your logged-in ChatGPT (chatgpt_web). Returns the image itself as bytes (base64 PNG), not a link."
     )]
     pub async fn create_image(
         &self,

@@ -6,7 +6,9 @@ use serde::Serialize;
 
 use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
-use crate::providers::{self, Capability, Input, LiveLimits, LiveQuota, Provider, ProviderKind};
+use crate::providers::{
+    self, Capability, Input, LiveLimits, LiveQuota, OutImage, Provider, ProviderKind,
+};
 use crate::proxy;
 use crate::usage::{period_key, DebugLog, RouteLog, Store};
 use crate::web;
@@ -35,6 +37,7 @@ pub struct Bucket {
 pub struct Reply {
     pub text: String,
     pub session: Option<String>,
+    pub image: Option<OutImage>,
 }
 
 #[derive(Serialize)]
@@ -300,6 +303,7 @@ impl Router {
                         return Ok(Reply {
                             text: o.text,
                             session,
+                            image: o.image,
                         });
                     }
                     Err(e) => {

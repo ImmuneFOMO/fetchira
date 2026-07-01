@@ -86,6 +86,15 @@ pub struct Outcome {
     pub cost: i64,
     /// A token the caller can pass back as `Input.session` to continue this conversation.
     pub session: Option<String>,
+    /// A generated image returned as bytes instead of `text` (create_image only).
+    pub image: Option<OutImage>,
+}
+
+/// A base64-encoded image plus its MIME type, carried out-of-band from `text`.
+#[derive(Debug)]
+pub struct OutImage {
+    pub mime: String,
+    pub b64: String,
 }
 
 impl Outcome {
@@ -94,6 +103,7 @@ impl Outcome {
             text,
             cost,
             session: None,
+            image: None,
         }
     }
 }

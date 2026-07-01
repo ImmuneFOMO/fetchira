@@ -11,7 +11,7 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-use super::{chatgpt_web, uuid4, Capability, Input, Outcome};
+use super::{chatgpt_web, uuid4, Capability, Input, OutImage, Outcome};
 use crate::error::{Error, Result};
 use crate::web::{detect_browser, Cookie};
 
@@ -154,10 +154,13 @@ async fn drive(
         return Ok(out);
     }
 
-    // Create image: wait for the rendered result and return its (session-scoped chatgpt.com) URL.
+    // Create image: wait for the rendered result, then read its bytes from inside the page — the CDN
+    // URL is session-gated, so an out-of-band GET 403s.
     if matches!(cap, Capability::Image) {
-        let url = wait_for_image(&mut ws, IMAGE_WAIT).await?;
-        return Ok(Outcome::new(format!("![generated image]({url})"), 1));
+        let src = wait_for_image(&mut ws, IMAGE_WAIT).await?;
+        let mut out = Outcome::new(String::new(), 1);
+        out.image = Some(fetch_image(&mut ws, &src).await?);
+        return Ok(out);
     }
 
     // Chat / web search: the turn finishes in seconds — wait, then read the clean message back.
@@ -283,7 +286,7 @@ async fn scan_picker(ws: &mut Ws) -> Result<Vec<PickItem>> {
     let js = r#"(()=>{const out=[];const seen=new Set();
         for(const e of document.querySelectorAll('[role="menuitemradio"],[role="menuitem"][aria-haspopup="menu"]')){
             const r=e.getBoundingClientRect();if(r.width<=0||r.height<=0)continue;
-            const label=(e.textContent||'').trim();if(!label)continue;
+            const t=e.querySelector('.truncate');const label=((t?t.textContent:e.textContent)||'').trim();if(!label)continue;
             const radio=e.getAttribute('role')==='menuitemradio';
             const key=label+radio;if(seen.has(key))continue;seen.add(key);
             out.push({label,x:r.left+r.width/2,y:r.top+r.height/2,radio});
@@ -449,9 +452,9 @@ async fn wait_for_cid(ws: &mut Ws, secs: u64) -> Result<String> {
 }
 
 /// Poll for the finished generated image and return its `src`. The thumbnails carry `alt=""`; the
-/// rendered result is the `alt="Generated image"` element once it has decoded.
+/// rendered result's alt is `Generated image: <description>`, so match on that prefix.
 async fn wait_for_image(ws: &mut Ws, secs: u64) -> Result<String> {
-    let js = r#"(()=>{const i=document.querySelector('img[alt="Generated image"]');
+    let js = r#"(()=>{const i=[...document.querySelectorAll('img[alt^="Generated image"]')].pop();
         return (i&&i.complete&&i.naturalWidth>200)?i.src:null;})()"#;
     for _ in 0..secs {
         if let Some(s) = eval(ws, js).await?.as_str() {
@@ -460,6 +463,28 @@ async fn wait_for_image(ws: &mut Ws, secs: u64) -> Result<String> {
         sleep(Duration::from_secs(1)).await;
     }
     Err(Error::Timeout("chatgpt_web: no image"))
+}
+
+/// Fetch the rendered image inside the page (its session cookies satisfy the gate) and split the
+/// resulting `data:<mime>;base64,<data>` URL into mime + b64. `eval` already awaits the promise.
+async fn fetch_image(ws: &mut Ws, src: &str) -> Result<OutImage> {
+    let s = serde_json::to_string(src).unwrap_or_default();
+    let js = format!(
+        r#"(async()=>{{
+            const b=await fetch({s}).then(r=>r.blob());
+            return await new Promise(res=>{{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.readAsDataURL(b);}});
+        }})()"#
+    );
+    let data = eval(ws, &js).await?;
+    let (mime, b64) = data
+        .as_str()
+        .and_then(|u| u.strip_prefix("data:"))
+        .and_then(|r| r.split_once(";base64,"))
+        .ok_or(Error::BadResponse("chatgpt_web: image bytes"))?;
+    Ok(OutImage {
+        mime: mime.to_string(),
+        b64: b64.to_string(),
+    })
 }
 
 async fn wait_until(ws: &mut Ws, cond: &str, secs: u64) -> Result<bool> {
