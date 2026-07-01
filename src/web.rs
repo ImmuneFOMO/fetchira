@@ -288,6 +288,13 @@ async fn capture_chromium(
     let mut src = Cdp { ws, id: 1 };
     send_cmd(&mut src.ws, 1, "Network.enable", Value::Null).await?;
     let session = capture(&mut src, domain, auth).await;
+    // Capture done → close the window ourselves so the user isn't left with a stray browser (and
+    // tempted to close it mid-capture). Browser.close quits cleanly; kill is the backstop.
+    let _ = timeout(
+        Duration::from_secs(3),
+        send_cmd(&mut src.ws, src.id + 1, "Browser.close", Value::Null),
+    )
+    .await;
     let _ = child.kill().await;
     session
 }

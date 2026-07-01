@@ -373,7 +373,7 @@ async fn do_login(
     label: &str,
 ) -> anyhow::Result<()> {
     println!(
-        "opening a browser to log into {} ({label}) — finish login in the window…",
+        "opening a browser to log into {} ({label}) — finish login; the window closes itself once you're in…",
         kind.as_str()
     );
     let session = web::login(home, kind, label).await?;
