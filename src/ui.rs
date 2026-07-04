@@ -537,6 +537,88 @@ fn mime_for(path: &str) -> &'static str {
 }
 
 /// Build the `window.FX` shape the dashboard expects, from the live usage + route log.
+/// One model/mode summed across a provider's accounts for the Overview tile.
+struct AggModel {
+    id: String,
+    name: String,
+    levels: Vec<String>,
+    remaining: Option<i64>,
+    total: Option<i64>,
+    window_secs: Option<i64>,
+    reset_after: Option<String>,
+    // Locked only if EVERY account has it locked; one unlocked account makes it usable.
+    all_locked: bool,
+}
+
+impl AggModel {
+    fn seed(m: &crate::providers::ModelInfo) -> Self {
+        Self {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            levels: m.levels.clone(),
+            remaining: None,
+            total: None,
+            window_secs: m.window_secs,
+            reset_after: m.reset_after.clone(),
+            all_locked: true,
+        }
+    }
+
+    fn merge(&mut self, m: &crate::providers::ModelInfo) {
+        self.remaining = add_opt(self.remaining, m.remaining);
+        self.total = add_opt(self.total, m.total);
+        self.window_secs = self.window_secs.or(m.window_secs);
+        if self.reset_after.is_none() {
+            self.reset_after = m.reset_after.clone();
+        }
+        if !m.locked {
+            self.all_locked = false;
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "levels": self.levels,
+            "remaining": self.remaining,
+            "total": self.total,
+            "windowSecs": self.window_secs,
+            "resetAfter": self.reset_after,
+            "locked": self.all_locked,
+        })
+    }
+}
+
+/// Sum two optional counts, treating `None` as "no number" (not zero).
+fn add_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), None) => Some(x),
+        (None, y) => y,
+    }
+}
+
+/// Serialize a provider's live model catalog for the dashboard (camelCase keys, matching the
+/// hand-built limits JSON). A locked entry (`total: 0`) renders as 0/0.
+fn models_json(models: &[crate::providers::ModelInfo]) -> Vec<Value> {
+    models
+        .iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "name": m.name,
+                "levels": m.levels,
+                "remaining": m.remaining,
+                "total": m.total,
+                "windowSecs": m.window_secs,
+                "resetAfter": m.reset_after,
+                "locked": m.locked,
+            })
+        })
+        .collect()
+}
+
 async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
     let views = inner.router.usage_snapshot().await?;
 
@@ -595,8 +677,11 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                     "features": ll.features.iter().map(|f| json!({
                         "feature": f.feature,
                         "remaining": f.remaining,
+                        "total": f.total,
+                        "windowSecs": f.window_secs,
                         "resetAfter": f.reset_after,
                     })).collect::<Vec<_>>(),
+                    "models": models_json(&ll.models),
                 })),
             })
         })
@@ -624,6 +709,72 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             e.has_dr = true;
             e.dr_used += d.used;
             e.dr_quota += d.quota;
+            e.dr_window_secs = e.dr_window_secs.or(d.window_secs);
+            if e.dr_period.is_empty() {
+                e.dr_period = d.period.clone();
+            }
+        }
+        // The absolute deep-research reset (chatgpt reports one); grok is a rolling window instead.
+        if e.dr_reset_after.is_none() {
+            e.dr_reset_after = v
+                .limits
+                .as_ref()
+                .and_then(|l| l.feature("deep_research"))
+                .and_then(|f| f.reset_after.clone());
+        }
+    }
+
+    // Per-provider model catalog, SUMMED across the provider's accounts (like the quota tiles):
+    // per model id remaining/total add up, and it stays locked only if every account has it locked.
+    let mut cat_by_provider: HashMap<&str, (Vec<String>, HashMap<String, AggModel>)> =
+        HashMap::new();
+    for v in &mains {
+        let Some(ll) = &v.limits else { continue };
+        let (order, by_id) = cat_by_provider.entry(v.provider).or_default();
+        for m in &ll.models {
+            by_id
+                .entry(m.id.clone())
+                .or_insert_with(|| {
+                    order.push(m.id.clone());
+                    AggModel::seed(m)
+                })
+                .merge(m);
+        }
+    }
+    let catalogs: HashMap<&str, Vec<Value>> = cat_by_provider
+        .iter()
+        .map(|(prov, (order, by_id))| {
+            let models = order
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .map(AggModel::to_json)
+                .collect();
+            (*prov, models)
+        })
+        .collect();
+
+    // Other capability limits worth surfacing (create image, file upload). These report a remaining
+    // count + reset but no ceiling, so they render as info rows, not fuel-gauge bars. Summed by name.
+    let mut feats_by_provider: HashMap<&str, Vec<Value>> = HashMap::new();
+    for v in &mains {
+        let Some(ll) = &v.limits else { continue };
+        let e = feats_by_provider.entry(v.provider).or_default();
+        for (name, label) in [
+            ("image_gen", "create image"),
+            ("file_upload", "file upload"),
+        ] {
+            let Some(f) = ll.feature(name) else { continue };
+            match e.iter_mut().find(|r| r["label"] == label) {
+                Some(row) => {
+                    row["remaining"] =
+                        json!(row["remaining"].as_i64().unwrap_or(0) + f.remaining.max(0));
+                }
+                None => e.push(json!({
+                    "label": label,
+                    "remaining": f.remaining,
+                    "resetAt": f.reset_after,
+                })),
+            }
         }
     }
 
@@ -659,8 +810,60 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                     tile["webSession"] = json!(true);
                     tile["loggedIn"] = json!(a.logged);
                 }
+                // Each limit becomes its own cube bar (with its real window + reset); count-less
+                // models (chatgpt/gemini) fall to a text catalog line.
+                let models = catalogs.get(name).cloned().unwrap_or_default();
+                let mut bars: Vec<Value> = Vec::new();
+                let mut catalog: Vec<Value> = Vec::new();
+                let mut has_model_bar = false;
+                for m in &models {
+                    if m["total"].is_i64() && m["remaining"].is_i64() {
+                        has_model_bar = true;
+                        let total = m["total"].as_i64().unwrap_or(0);
+                        let rem = m["remaining"].as_i64().unwrap_or(0);
+                        bars.push(limit_bar(
+                            m["name"].as_str().unwrap_or(""),
+                            (total - rem).max(0),
+                            total,
+                            m["windowSecs"].as_i64(),
+                            None,
+                            None,
+                            m["locked"].as_bool().unwrap_or(false),
+                        ));
+                    } else {
+                        catalog.push(json!({ "name": m["name"], "levels": m["levels"] }));
+                    }
+                }
+                // Account-level quota bar for API providers only — that's their real key quota. A web
+                // provider's account counter is just a soft failover placeholder; showing it as a
+                // "messages/search" limit misleads (chatgpt caps are per-model, gemini has none), so
+                // web cards show only real live limits (grok modes, deep research) + the model catalog.
+                if !has_model_bar && !a.web {
+                    bars.push(limit_bar(
+                        "quota",
+                        a.used,
+                        a.quota,
+                        a.window_secs,
+                        Some(&a.period),
+                        None,
+                        false,
+                    ));
+                }
                 if a.has_dr {
-                    tile["dr"] = json!({ "used": a.dr_used, "quota": a.dr_quota });
+                    bars.push(limit_bar(
+                        "deep research",
+                        a.dr_used,
+                        a.dr_quota,
+                        a.dr_window_secs,
+                        Some(&a.dr_period),
+                        a.dr_reset_after.as_deref(),
+                        a.dr_quota == 0,
+                    ));
+                }
+                tile["limits"] = json!(bars);
+                tile["catalog"] = json!(catalog);
+                if let Some(fs) = feats_by_provider.get(name) {
+                    tile["features"] = json!(fs);
                 }
                 tile
             })
@@ -763,6 +966,9 @@ struct Agg {
     has_dr: bool,
     dr_used: i64,
     dr_quota: i64,
+    dr_window_secs: Option<i64>,
+    dr_period: String,
+    dr_reset_after: Option<String>,
 }
 
 impl Agg {
@@ -778,6 +984,9 @@ impl Agg {
             has_dr: false,
             dr_used: 0,
             dr_quota: 0,
+            dr_window_secs: None,
+            dr_period: String::new(),
+            dr_reset_after: None,
         }
     }
 }
@@ -818,6 +1027,62 @@ fn reset_window(period: &str) -> &'static str {
     } else {
         "monthly"
     }
+}
+
+/// One limit as a cube-bar descriptor for the dashboard: value + its own window + reset date.
+fn limit_bar(
+    label: &str,
+    used: i64,
+    quota: i64,
+    window_secs: Option<i64>,
+    period: Option<&str>,
+    reset_after: Option<&str>,
+    locked: bool,
+) -> Value {
+    let window = match window_secs {
+        Some(s) => window_label(s),
+        None => period.map(reset_window).unwrap_or("").to_string(),
+    };
+    json!({
+        "label": label,
+        "used": used,
+        "quota": quota,
+        "window": window,
+        "resetAt": reset_at(window_secs, period, reset_after),
+        "locked": locked,
+    })
+}
+
+/// The absolute reset *instant* as an RFC3339 timestamp (UTC) — the browser renders it in the
+/// viewer's own timezone. From an ISO `reset_after` (chatgpt, exact time), else the next period
+/// boundary (midnight UTC). A rolling window (grok) has no fixed instant — the window label carries it.
+fn reset_at(
+    window_secs: Option<i64>,
+    period: Option<&str>,
+    reset_after: Option<&str>,
+) -> Option<String> {
+    if window_secs.is_some() {
+        return None;
+    }
+    if let Some(iso) = reset_after {
+        return Some(iso.to_string());
+    }
+    let now = chrono::Utc::now().date_naive();
+    let boundary = match period.map(reset_window) {
+        Some("daily") => now.succ_opt(),
+        Some("monthly") => {
+            let (y, m) = if now.month() == 12 {
+                (now.year() + 1, 1)
+            } else {
+                (now.year(), now.month() + 1)
+            };
+            chrono::NaiveDate::from_ymd_opt(y, m, 1)
+        }
+        _ => None,
+    };
+    boundary
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc().to_rfc3339())
 }
 
 fn resets_in(period: &str) -> Option<String> {
@@ -889,8 +1154,58 @@ fn desc_of(provider: &str) -> &'static str {
         "firecrawl" => "Crawl + scrape API",
         "steel" => "Headless browser sessions",
         "perplexity_web" => "Browser session · search + deep research",
-        "gemini_web" => "Browser session · search + #dr",
-        "grok_web" => "Browser session · search + #dr",
+        "gemini_web" => "Browser session · search + deep research",
+        "grok_web" => "Browser session · search + deep research",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ModelInfo;
+
+    fn mi(id: &str, remaining: Option<i64>, total: Option<i64>, locked: bool) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            name: id.into(),
+            levels: Vec::new(),
+            remaining,
+            total,
+            window_secs: None,
+            reset_after: None,
+            locked,
+        }
+    }
+
+    #[test]
+    fn agg_sums_and_unlocks_if_any_account_can() {
+        // Same mode across two accounts: one paid (5/20), one free+locked (0/0).
+        let paid = mi("expert", Some(5), Some(20), false);
+        let free = mi("expert", Some(0), Some(0), true);
+        let mut agg = AggModel::seed(&paid);
+        agg.merge(&paid);
+        agg.merge(&free);
+        assert_eq!(agg.remaining, Some(25 - 20)); // 5 + 0
+        assert_eq!(agg.total, Some(20)); // 20 + 0
+        assert!(!agg.all_locked); // one account can use it
+    }
+
+    #[test]
+    fn agg_locked_when_all_locked_and_none_stays_none() {
+        let locked = mi("heavy", Some(0), Some(0), true);
+        let mut h = AggModel::seed(&locked);
+        h.merge(&locked);
+        h.merge(&locked);
+        assert!(h.all_locked);
+        assert_eq!(h.remaining, Some(0));
+
+        // gemini reports no count on any account -> stays None (not summed to 0).
+        let no_count = mi("pro", None, None, false);
+        let mut p = AggModel::seed(&no_count);
+        p.merge(&no_count);
+        p.merge(&no_count);
+        assert_eq!(p.remaining, None);
+        assert!(!p.all_locked);
     }
 }

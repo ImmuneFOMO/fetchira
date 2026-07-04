@@ -187,22 +187,43 @@ pub(crate) fn detect_browser() -> Option<Browser> {
     }
 }
 
-/// (login URL, registrable domain, auth-cookie name) per web provider.
-fn login_target(kind: ProviderKind) -> Result<(&'static str, &'static str, &'static str)> {
+// (url, cookie-domain, auth-cookie, optional page-eval that must be true for a *real* login —
+// Google keeps its auth cookie while signed out, so the cookie alone isn't proof).
+type LoginTarget = (
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+);
+
+fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
     Ok(match kind {
-        ProviderKind::GeminiWeb => ("https://gemini.google.com/", "google.com", "__Secure-1PSID"),
+        // Google keeps `__Secure-1PSID` even when signed out (remembered account), so the cookie
+        // alone isn't proof — gate on the page's `SNlM0e` token, which is empty until truly signed in
+        // (and is exactly what the provider needs).
+        ProviderKind::GeminiWeb => (
+            "https://gemini.google.com/",
+            "google.com",
+            "__Secure-1PSID",
+            Some(
+                "(()=>{try{return!!(window.WIZ_global_data&&WIZ_global_data.SNlM0e&&\
+                 WIZ_global_data.SNlM0e.length>0)}catch(e){return false}})()",
+            ),
+        ),
         ProviderKind::PerplexityWeb => (
             "https://www.perplexity.ai/",
             "perplexity.ai",
             "__Secure-next-auth.session-token",
+            None,
         ),
-        ProviderKind::GrokWeb => ("https://grok.com/", "grok.com", "sso"),
+        ProviderKind::GrokWeb => ("https://grok.com/", "grok.com", "sso", None),
         ProviderKind::ChatgptWeb => (
             // NextAuth splits the large session token into `.0`/`.1` chunks — there is no
             // un-suffixed cookie, so wait for the first chunk as the "logged-in" signal.
             "https://chatgpt.com/",
             "chatgpt.com",
             "__Secure-next-auth.session-token.0",
+            None,
         ),
         other => return Err(Error::Unsupported(other.as_str())),
     })
@@ -225,7 +246,7 @@ pub async fn login(home: &Path, kind: ProviderKind, label: &str) -> Result<Sessi
                 .into(),
         )
     })?;
-    let (url, domain, auth) = login_target(kind)?;
+    let (url, domain, auth, check) = login_target(kind)?;
     let fut = async {
         match browser.kind {
             BrowserKind::Chromium => {
@@ -235,6 +256,7 @@ pub async fn login(home: &Path, kind: ProviderKind, label: &str) -> Result<Sessi
                     url,
                     domain,
                     auth,
+                    check,
                 )
                 .await
             }
@@ -261,6 +283,7 @@ async fn capture_chromium(
     url: &str,
     domain: &str,
     auth: &str,
+    login_check: Option<&str>,
 ) -> Result<Session> {
     // A free ephemeral port — 9222 collides with any other Chrome already exposing a debug port
     // (the user's main browser, an automation instance), which resets the CDP connection.
@@ -276,6 +299,9 @@ async fn capture_chromium(
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
+        // Without this Chrome binds Google's session to the device TPM key (DBSC), so the exported
+        // cookies can't be replayed over HTTP — /app comes back logged-out and RotateCookies 401s.
+        .arg("--disable-features=DeviceBoundSessionCredentials,StandardDeviceBoundSessionCredentials")
         .arg(format!("--app={url}"))
         // Chrome (and the GoogleUpdater it spawns) is noisy on stderr — keep it off the terminal.
         .stdout(Stdio::null())
@@ -287,7 +313,14 @@ async fn capture_chromium(
     let (ws, _) = tokio_tungstenite::connect_async(ws_url.as_str()).await?;
     let mut src = Cdp { ws, id: 1 };
     send_cmd(&mut src.ws, 1, "Network.enable", Value::Null).await?;
+    // The auth cookie alone can be present while signed out (Google), so wait for a real login.
+    if let Some(check) = login_check {
+        wait_logged_in(&mut src, check).await?;
+    }
+    // Capture first (on the stable signed-in page), then swap the page for our confirmation so the
+    // user isn't left staring at the provider UI while the window closes.
     let session = capture(&mut src, domain, auth).await;
+    show_done(&mut src).await;
     // Capture done → close the window ourselves so the user isn't left with a stray browser (and
     // tempted to close it mid-capture). Browser.close quits cleanly; kill is the backstop.
     let _ = timeout(
@@ -297,6 +330,45 @@ async fn capture_chromium(
     .await;
     let _ = child.kill().await;
     session
+}
+
+/// Replace the current page with a fetchira "login done" confirmation (best-effort). Overwriting the
+/// document leaves cookies untouched, so the capture that follows still sees the session.
+async fn show_done(src: &mut Cdp) {
+    let js = r#"document.open();document.write('<meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0b0d;color:#e8e8ea;font-family:system-ui,-apple-system,sans-serif"><div style="text-align:center"><div style="font-size:64px;line-height:1;color:#3ddc84">&#10003;</div><h2 style="margin:16px 0 6px;font-weight:600">fetchira &mdash; login captured</h2><p style="margin:0;opacity:.6">You can close this window.</p></div></body>');document.close();"#;
+    src.id += 1;
+    let _ = send_cmd(
+        &mut src.ws,
+        src.id,
+        "Runtime.evaluate",
+        json!({ "expression": js }),
+    )
+    .await;
+}
+
+/// Poll the page until `check` (a JS expression) evaluates true — a real signed-in state, since
+/// some providers keep an auth cookie while signed out. The caller's outer timeout bounds the wait.
+async fn wait_logged_in(src: &mut Cdp, check: &str) -> Result<()> {
+    src.id += 1;
+    let _ = send_cmd(&mut src.ws, src.id, "Runtime.enable", Value::Null).await;
+    loop {
+        src.id += 1;
+        // Tolerate transient eval errors: the page reloads several times during sign-in and the JS
+        // context is briefly gone. The caller's timeout bounds the overall wait.
+        if let Ok(res) = send_cmd(
+            &mut src.ws,
+            src.id,
+            "Runtime.evaluate",
+            json!({ "expression": check, "returnByValue": true }),
+        )
+        .await
+        {
+            if res["result"]["value"].as_bool() == Some(true) {
+                return Ok(());
+            }
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
 }
 
 async fn capture_firefox(

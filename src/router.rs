@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
 use crate::providers::{
-    self, Capability, Input, LiveLimits, LiveQuota, OutImage, Provider, ProviderKind,
+    self, Capability, Input, LiveLimits, LiveQuota, ModelInfo, OutImage, Provider, ProviderKind,
 };
 use crate::proxy;
 use crate::usage::{period_key, DebugLog, RouteLog, Store};
@@ -132,7 +132,21 @@ impl Router {
                     continue;
                 };
                 let sess = web::parse_session(&raw);
-                let client = web::build_client(&sess.cookies, &sess.headers, proxy_url.as_deref())?;
+                // Gemini 401s the exported session if the full cookie set is replayed; Google's
+                // rotate only tolerates the two __Secure-1PSID(TS) cookies (HanaokaYuzu).
+                let filtered: Vec<web::Cookie>;
+                let jar: &[web::Cookie] = if acc.provider == ProviderKind::GeminiWeb {
+                    filtered = sess
+                        .cookies
+                        .iter()
+                        .filter(|c| c.name == "__Secure-1PSID" || c.name == "__Secure-1PSIDTS")
+                        .cloned()
+                        .collect();
+                    &filtered
+                } else {
+                    &sess.cookies
+                };
+                let client = web::build_client(jar, &sess.headers, proxy_url.as_deref())?;
                 (Conn::Web(client, sess.cookies), String::new())
             } else {
                 let Some(key) = acc
@@ -201,8 +215,10 @@ impl Router {
                 let period = period_key(breset);
                 let mut rem = self.store.remaining(&blabel, bquota, &period).await?;
                 // For tool-gated capabilities, trust the provider's live allowance over the soft
-                // counter: skip a bucket the provider says is exhausted (proactive failover).
-                if rem > 0 {
+                // counter: skip a bucket the provider says is exhausted (proactive failover). Only
+                // when auto-choosing — a *forced* provider is attempted regardless (limits may be
+                // stale), so an explicit request can still go through or surface a real rate-limit.
+                if rem > 0 && forced.is_none() {
                     if let Some(feature) = live_feature(cap) {
                         if let Some(live) = self
                             .live_limits_for(b)
@@ -310,18 +326,23 @@ impl Router {
                         // The reserved unit never became real usage — give it back.
                         let _ = self.store.refund(&blabel, &period, 1).await;
                         match e {
-                            Error::RateLimit(_) | Error::QuotaExceeded(_) => {
+                            Error::RateLimit(msg) => {
                                 let _ = self
                                     .store
                                     .mark_exhausted(kind.as_str(), &blabel, &period)
                                     .await;
-                                let code = if matches!(e, Error::RateLimit(_)) {
-                                    429
-                                } else {
-                                    402
-                                };
-                                prev_fail = Some((acct.to_string(), code));
-                                last_err = Some(e);
+                                prev_fail = Some((acct.to_string(), 429));
+                                let hint = self.reset_hint(b, cap).await;
+                                last_err = Some(Error::RateLimit(enrich_limit(msg, hint)));
+                            }
+                            Error::QuotaExceeded(msg) => {
+                                let _ = self
+                                    .store
+                                    .mark_exhausted(kind.as_str(), &blabel, &period)
+                                    .await;
+                                prev_fail = Some((acct.to_string(), 402));
+                                let hint = self.reset_hint(b, cap).await;
+                                last_err = Some(Error::QuotaExceeded(enrich_limit(msg, hint)));
                             }
                             Error::Provider { .. }
                             | Error::Transport(_)
@@ -372,11 +393,19 @@ impl Router {
                     )
                     .await?;
                 self.patch_live(b, true, &mut dv).await;
-                // Prefer the provider's live deep-research allowance over the soft counter.
-                if let Some(rem) = ll.as_ref().and_then(|l| l.remaining("deep_research")) {
-                    dv.remaining = rem;
-                    dv.used = (dv.quota - rem).max(0);
-                    dv.exhausted = rem == 0;
+                // Prefer the provider's live deep-research allowance over the soft counter. A live
+                // `total` (grok, tier-aware) overrides the ceiling too, so a locked tier reads 0/0
+                // instead of the nominal daily budget.
+                if let Some(f) = ll.as_ref().and_then(|l| l.feature("deep_research")) {
+                    dv.remaining = f.remaining.max(0);
+                    if let Some(t) = f.total {
+                        dv.quota = t;
+                    }
+                    dv.used = (dv.quota - dv.remaining).max(0);
+                    dv.exhausted = dv.remaining == 0 || dv.quota == 0;
+                    if let Some(w) = f.window_secs {
+                        dv.window_secs = Some(w);
+                    }
                 }
                 out.push(dv);
             }
@@ -431,6 +460,19 @@ impl Router {
             m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
         }
         fresh
+    }
+
+    /// When a gated call is rate-limited, a "resets …" note from the provider's live limit for that
+    /// feature (an absolute reset for chatgpt, a rolling window for grok). `None` if unavailable.
+    async fn reset_hint(&self, b: &Bucket, cap: Capability) -> Option<String> {
+        let feature = live_feature(cap)?;
+        let ll = self.live_limits_for(b).await?;
+        let f = ll.feature(feature)?;
+        if let Some(iso) = f.reset_after.as_deref() {
+            return Some(format!("resets at {iso}"));
+        }
+        f.window_secs
+            .map(|w| format!("resets within ~{}", human_dur(w)))
     }
 
     async fn view(
@@ -504,6 +546,108 @@ fn live_feature(cap: Capability) -> Option<&'static str> {
     }
 }
 
+/// A compact, LLM-friendly rendering of the usage snapshot for the MCP `usage` tool: web sessions
+/// with their live model/mode catalog + limits (exactly what to pass to search/deep_research), then
+/// one terse API-key line. Far fewer tokens than the full JSON, and doubles as a selection cheatsheet
+/// — the dashboard / `fetchira list` keep the detailed view.
+pub fn compact_usage(views: &[UsageView]) -> String {
+    let dr: HashMap<&str, &UsageView> = views
+        .iter()
+        .filter_map(|v| v.label.strip_suffix("#dr").map(|b| (b, v)))
+        .collect();
+    let mut web = String::new();
+    let mut api: Vec<String> = Vec::new();
+    for v in views {
+        if v.label.ends_with("#dr") {
+            continue;
+        }
+        if !v.provider.ends_with("_web") {
+            api.push(format!("{} {}", v.provider, v.remaining));
+            continue;
+        }
+        let tier = v
+            .limits
+            .as_ref()
+            .and_then(|l| l.tier.as_deref())
+            .unwrap_or("—");
+        web.push_str(&format!("  {}/{} · {tier}\n", v.provider, v.label));
+        match v.limits.as_ref().filter(|l| !l.models.is_empty()) {
+            Some(ll) => {
+                let parts: Vec<String> = ll.models.iter().map(fmt_model).collect();
+                web.push_str(&format!("    models: {}\n", parts.join(" · ")));
+            }
+            None => web.push_str("    models: (none — check `fetchira login`)\n"),
+        }
+        if let Some(ll) = v.limits.as_ref().filter(|l| !l.features.is_empty()) {
+            let feats: Vec<String> = ll
+                .features
+                .iter()
+                .map(|f| match f.total {
+                    Some(t) => format!("{} {}/{}", f.feature, f.remaining, t),
+                    None => format!("{} {}", f.feature, f.remaining),
+                })
+                .collect();
+            web.push_str(&format!("    limits: {}\n", feats.join(" · ")));
+        } else if let Some(d) = dr.get(v.label.as_str()) {
+            web.push_str(&format!(
+                "    deep_research (soft): {}/{}\n",
+                d.remaining, d.quota
+            ));
+        }
+    }
+    format!(
+        "web sessions — live models + limits (pass a model/mode back to search/deep_research):\n{web}\napi keys: {}\n\ntip: an unknown model/mode makes the tool return the live options; the router also auto-fails-over on its own.",
+        api.join(" · ")
+    )
+}
+
+/// One model/mode as a compact token: `name[levels] value·window`, `LOCKED` when the tier can't use it.
+fn fmt_model(m: &ModelInfo) -> String {
+    let levels = if m.levels.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", m.levels.join("/"))
+    };
+    let val = if m.locked {
+        " LOCKED".to_string()
+    } else {
+        match (m.remaining, m.total) {
+            (Some(r), Some(t)) => format!(" {r}/{t}"),
+            (Some(r), None) => format!(" {r}"),
+            _ => String::new(),
+        }
+    };
+    let win = m
+        .window_secs
+        .map(|w| format!("·{}h", w / 3600))
+        .unwrap_or_default();
+    format!("{}{levels}{val}{win}", m.name)
+}
+
+/// Append the reset window + a pick-another hint to a rate/quota message (the "try something else,
+/// here's when it's back" behaviour agents get on a live limit).
+fn enrich_limit(msg: String, hint: Option<String>) -> String {
+    match hint {
+        Some(h) => format!("{msg} — {h}; try another provider or mode"),
+        None => format!("{msg} — try another provider or mode"),
+    }
+}
+
+/// Coarse human duration for a rolling window: "24h", "2h", "30m".
+fn human_dur(secs: i64) -> String {
+    if secs <= 0 {
+        "now".to_string()
+    } else if secs % 86400 == 0 {
+        format!("{}d", secs / 86400)
+    } else if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
     if b.provider.kind.is_web() && cap == Capability::DeepResearch {
         (format!("{}#dr", b.label), b.dr_quota, b.dr_reset)
@@ -528,4 +672,67 @@ async fn sticky_pool(
     *assigned += 1;
     store.assign_proxy(label, &p).await?;
     Ok(Some(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mi(
+        name: &str,
+        levels: &[&str],
+        r: Option<i64>,
+        t: Option<i64>,
+        w: Option<i64>,
+        locked: bool,
+    ) -> ModelInfo {
+        ModelInfo {
+            id: name.to_ascii_lowercase(),
+            name: name.into(),
+            levels: levels.iter().map(|s| s.to_string()).collect(),
+            remaining: r,
+            total: t,
+            window_secs: w,
+            reset_after: None,
+            locked,
+        }
+    }
+
+    #[test]
+    fn fmt_model_renders_each_shape() {
+        // rolling-window live count
+        assert_eq!(
+            fmt_model(&mi("Fast", &[], Some(7), Some(7), Some(86400), false)),
+            "Fast 7/7·24h"
+        );
+        // locked mode -> LOCKED, no numbers
+        assert_eq!(
+            fmt_model(&mi("Heavy", &[], Some(0), Some(0), None, true)),
+            "Heavy LOCKED"
+        );
+        // catalog-only with thinking levels (chatgpt)
+        assert_eq!(
+            fmt_model(&mi(
+                "GPT-5.5",
+                &["instant", "medium", "high"],
+                None,
+                None,
+                None,
+                false
+            )),
+            "GPT-5.5[instant/medium/high]"
+        );
+        // no live count (gemini)
+        assert_eq!(
+            fmt_model(&mi(
+                "Pro",
+                &["standard", "extended"],
+                None,
+                None,
+                None,
+                false
+            )),
+            "Pro[standard/extended]"
+        );
+    }
 }

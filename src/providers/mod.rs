@@ -66,6 +66,9 @@ pub struct Input {
     pub model: Option<String>,
     /// Provider-specific mode (e.g. grok "expert", perplexity "deep research").
     pub mode: Option<String>,
+    /// A local file to attach to the chat turn (the `upload` tool). The provider uploads it, then
+    /// references it in the send so the model can see it. gemini_web / grok_web only.
+    pub file: Option<std::path::PathBuf>,
 }
 
 impl Input {
@@ -157,7 +160,7 @@ impl ProviderKind {
                     GeminiWeb | GrokWeb | PerplexityWeb | ChatgptWeb,
                     Search | DeepResearch
                 )
-                | (ChatgptWeb, Image)
+                | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
     }
 
@@ -295,7 +298,9 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
             ChatgptWeb,
         ],
         Capability::Browser => &[Steel],
-        Capability::Image => &[ChatgptWeb],
+        // grok generates in-process and is region-agnostic; gemini image-gen is EU-gated (falls back
+        // to text) so it sits behind grok; chatgpt is the browser fallback.
+        Capability::Image => &[GrokWeb, GeminiWeb, ChatgptWeb],
     }
 }
 
@@ -312,27 +317,78 @@ pub struct LiveQuota {
 pub struct FeatureLimit {
     pub feature: String,
     pub remaining: i64,
+    /// Ceiling for this window when the provider reports one (grok); `None` keeps the soft quota.
+    /// `Some(0)` means the feature is locked on this tier — display as 0/0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
+    /// Rolling-window length in seconds (grok's per-model windows); `None` for fixed resets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<i64>,
     /// ISO-8601 instant the allowance resets (absolute, not a rolling window).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_after: Option<String>,
 }
 
-/// The provider's live per-tier limits: a subscription label plus per-feature remaining counts.
-/// Generic across web providers; only chatgpt_web populates it today (others plug in via
-/// `Provider::live_limits`).
+impl FeatureLimit {
+    /// A feature with only a remaining count (chatgpt's shape): no ceiling/window/reset.
+    pub fn simple(feature: impl Into<String>, remaining: i64, reset_after: Option<String>) -> Self {
+        Self {
+            feature: feature.into(),
+            remaining,
+            total: None,
+            window_secs: None,
+            reset_after,
+        }
+    }
+}
+
+/// One selectable model or mode in a provider's live catalog, with its per-entry allowance.
+/// `total == Some(0)` / `locked` marks an entry the current tier can't select (shown as 0/0).
+#[derive(Clone, Serialize)]
+pub struct ModelInfo {
+    /// The selector an agent passes back (a grok mode, a chatgpt slug, a gemini id).
+    pub id: String,
+    /// Display name ("Expert", "GPT-5.5", "3.1 Pro").
+    pub name: String,
+    /// Thinking levels for this model ("instant"/"medium"/"high", "standard"/"extended"); empty if none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub levels: Vec<String>,
+    /// Live remaining; `None` when the provider exposes no count (gemini).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<i64>,
+    /// Ceiling; `Some(0)` = locked on this tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
+    /// Rolling-window length in seconds (grok), else `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<i64>,
+    /// ISO-8601 reset instant (chatgpt), else `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_after: Option<String>,
+    /// Not selectable on the current tier (entitlement-gated). Display as 0/0.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+}
+
+/// The provider's live per-tier limits: a subscription label, per-feature remaining counts, and the
+/// selectable model/mode catalog. Generic across web providers (chatgpt/grok fill limits, gemini
+/// fills the catalog only — it exposes no live count).
 #[derive(Clone, Serialize, Default)]
 pub struct LiveLimits {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     pub features: Vec<FeatureLimit>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelInfo>,
 }
 
 impl LiveLimits {
     pub fn remaining(&self, feature: &str) -> Option<i64> {
-        self.features
-            .iter()
-            .find(|f| f.feature == feature)
-            .map(|f| f.remaining)
+        self.feature(feature).map(|f| f.remaining)
+    }
+
+    pub fn feature(&self, feature: &str) -> Option<&FeatureLimit> {
+        self.features.iter().find(|f| f.feature == feature)
     }
 }
 
@@ -402,25 +458,26 @@ impl Provider {
     /// grok-4-heavy (Heavy) when the account has it, else grok-4 (Expert). Best-effort: `None` if
     /// unsupported or the request fails.
     pub async fn live_quota(&self, client: &wreq::Client, deep: bool) -> Option<LiveQuota> {
-        if self.kind != ProviderKind::GrokWeb {
+        // grok's main (Fast) counter only. Deep-research now comes through `live_limits` (its
+        // `deep_research` feature), which is tier-aware — a lapsed sub reads 0/0 there, whereas the
+        // rate-limit endpoint returns a model's nominal ceiling regardless of entitlement.
+        if self.kind != ProviderKind::GrokWeb || deep {
             return None;
         }
-        if deep {
-            match grok_web::rate_limit(&self.base, client, "grok-4-heavy").await {
-                Ok(lq) if lq.total > 0 => return Some(lq),
-                _ => {}
-            }
-        }
-        grok_web::rate_limit(&self.base, client, "grok-4")
+        // Search routes to Fast (grok-4-auto), so the main counter tracks that model — matching the
+        // Fast row in the catalog. (Paid: 50/2h; free: 7/24h.)
+        grok_web::rate_limit(&self.base, client, "grok-4-auto")
             .await
             .ok()
     }
 
-    /// Live per-tier tool/model limits, when the provider exposes them. Best-effort: `None` if
-    /// unsupported or the fetch fails. Generic hook — others (grok/gemini/perplexity) can plug in.
+    /// Live per-tier tool/model limits + the selectable model catalog, when the provider exposes
+    /// them. Best-effort: `None` if unsupported or the fetch fails.
     pub async fn live_limits(&self, client: &wreq::Client) -> Option<LiveLimits> {
         match self.kind {
             ProviderKind::ChatgptWeb => chatgpt_web::limits(&self.base, client).await.ok(),
+            ProviderKind::GrokWeb => grok_web::limits(&self.base, client).await.ok(),
+            ProviderKind::GeminiWeb => gemini_web::limits(&self.base, client).await.ok(),
             _ => None,
         }
     }
@@ -469,6 +526,40 @@ fn with_sources(answer: String, sources: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("{answer}\n\nSources:\n{list}")
+}
+
+/// Read a local attachment for the upload tool: `(filename, mime, bytes)`. Guessing the MIME from
+/// the extension is enough for these web endpoints.
+pub(crate) fn read_attachment(path: &std::path::Path) -> Result<(String, String, Vec<u8>)> {
+    let bytes = std::fs::read(path).map_err(|e| Error::Provider {
+        provider: "upload",
+        status: 0,
+        body: format!("cannot read {}: {e}", path.display()),
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let mime = mime_of(&name);
+    Ok((name, mime, bytes))
+}
+
+fn mime_of(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "log" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// A uuid4-shaped correlation id (lowercase). No dependency: derived from time + a counter,

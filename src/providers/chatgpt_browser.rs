@@ -56,15 +56,14 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
         .kill_on_drop(true)
         .spawn()?;
 
-    // A non-`dr|` session is a chat conversation id to continue (the router sends dr polls to HTTP).
-    let resume = input.session.as_deref().filter(|s| !s.starts_with("dr|"));
     let out = drive(
         port,
         cookies,
         cap,
         input.model.as_deref(),
         search,
-        resume,
+        input.session.as_deref(),
+        input.file.as_deref(),
         &query,
     )
     .await;
@@ -73,15 +72,24 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     port: u16,
     cookies: &[Cookie],
     cap: Capability,
     model: Option<&str>,
     search: bool,
-    resume: Option<&str>,
+    session: Option<&str>,
+    file: Option<&Path>,
     query: &str,
 ) -> Result<Outcome> {
+    // Deep research has a plan step: kickoff drafts a plan (parked), then `dr|plan|<cid>` + "start"
+    // approves it. A non-`dr|` session is a chat conversation to continue (dr polls go to HTTP).
+    let dr_plan_cid = session.and_then(|s| s.strip_prefix("dr|plan|"));
+    let approve =
+        matches!(cap, Capability::DeepResearch) && dr_plan_cid.is_some() && is_start_word(query);
+    let resume = session.filter(|s| !s.starts_with("dr|"));
+
     let ws_url = wait_for_page(port).await?;
     let (mut ws, _) = connect_async(ws_url.as_str()).await?;
     cmd(&mut ws, "Network.enable", json!({})).await?;
@@ -92,9 +100,10 @@ async fn drive(
         json!({ "cookies": cdp_cookies(cookies) }),
     )
     .await?;
-    let url = match resume {
-        Some(c) => format!("https://chatgpt.com/c/{c}"),
-        None => "https://chatgpt.com/".to_string(),
+    let url = match (approve.then_some(dr_plan_cid).flatten(), resume) {
+        (Some(cid), _) => format!("https://chatgpt.com/c/{cid}"),
+        (None, Some(c)) => format!("https://chatgpt.com/c/{c}"),
+        (None, None) => "https://chatgpt.com/".to_string(),
     };
     cmd(&mut ws, "Page.navigate", json!({ "url": url })).await?;
 
@@ -111,6 +120,11 @@ async fn drive(
         return Err(login_err());
     }
     sleep(Duration::from_millis(800)).await;
+
+    // Approve a parked deep-research plan: click its Start button, then hand back a poll session.
+    if let Some(cid) = approve.then_some(dr_plan_cid).flatten() {
+        return start_dr_plan(&mut ws, cid).await;
+    }
 
     // Continuing a conversation: note the newest existing answer so we wait for the *new* reply.
     let baseline = match resume {
@@ -132,6 +146,10 @@ async fn drive(
         enable_tool(&mut ws, "web search").await?;
     }
 
+    if let Some(path) = file {
+        attach_file(&mut ws, path).await?;
+    }
+
     if send_prompt(&mut ws, query).await? != "sent" {
         return Err(Error::BadResponse("chatgpt_web: composer drive failed"));
     }
@@ -141,9 +159,23 @@ async fn drive(
         None => wait_for_cid(&mut ws, 60).await?,
     };
 
-    // Deep research runs for minutes; the browser only kicks it off. Polling is a plain GET (not
-    // gated), so the router resumes the `dr|poll|<cid>` session through the HTTP path.
+    // Deep research: ChatGPT drafts a plan in an embedded widget and waits (it only auto-starts in a
+    // focused tab). Read the plan and hand it back parked so the agent can approve or revise it —
+    // the render, and the whole run, happen over the HTTP poll the router resumes on `dr|poll|`.
     if matches!(cap, Capability::DeepResearch) {
+        if let Some(plan) = await_dr_plan(&mut ws).await? {
+            let mut out = Outcome::new(
+                format!(
+                    "ChatGPT drafted a deep-research plan:\n\n{}\n\nReply with this session + query \
+                     \"start\" to run it, or send a revised research request to replace the plan.",
+                    plan.text
+                ),
+                1,
+            );
+            out.session = Some(format!("dr|plan|{cid}"));
+            return Ok(out);
+        }
+        // No plan surfaced (a narrow query can start researching directly) — poll for the report.
         let mut out = Outcome::new(
             "Deep research started. Call deep_research again with this session to fetch the report \
              when ready (~5-30 min)."
@@ -192,6 +224,41 @@ fn cdp_cookies(cookies: &[Cookie]) -> Vec<Value> {
             v
         })
         .collect()
+}
+
+/// Attach a local file to the composer over CDP (`DOM.setFileInputFiles` on the hidden file input),
+/// then wait for the upload to settle — ChatGPT rejects a send while an attachment is still uploading.
+async fn attach_file(ws: &mut Ws, path: &Path) -> Result<()> {
+    let abs = path.to_string_lossy().to_string();
+    let doc = cmd(ws, "DOM.getDocument", json!({"depth": -1, "pierce": true})).await?;
+    let root = doc
+        .pointer("/root/nodeId")
+        .and_then(|x| x.as_i64())
+        .ok_or(Error::BadResponse("chatgpt_web: no document"))?;
+    let q = cmd(
+        ws,
+        "DOM.querySelector",
+        json!({"nodeId": root, "selector": "input[type=file]"}),
+    )
+    .await?;
+    let node = q.get("nodeId").and_then(|x| x.as_i64()).unwrap_or(0);
+    if node == 0 {
+        return Err(Error::BadResponse("chatgpt_web: no file input in composer"));
+    }
+    cmd(
+        ws,
+        "DOM.setFileInputFiles",
+        json!({"files": [abs], "nodeId": node}),
+    )
+    .await?;
+    // The send button stays disabled until the attachment finishes uploading; since the prompt text
+    // is typed afterwards, an enabled send button is a clean "upload done" signal.
+    let ready = r#"(()=>{const b=document.querySelector('[data-testid="send-button"]');return !!b&&!b.disabled;})()"#;
+    if wait_until(ws, ready, 40).await? {
+        Ok(())
+    } else {
+        Err(Error::Timeout("chatgpt_web: file upload did not complete"))
+    }
 }
 
 async fn send_prompt(ws: &mut Ws, query: &str) -> Result<String> {
@@ -508,16 +575,22 @@ async fn eval(ws: &mut Ws, expr: &str) -> Result<Value> {
 }
 
 async fn cmd(ws: &mut Ws, method: &str, params: Value) -> Result<Value> {
-    static ID: AtomicU64 = AtomicU64::new(1);
-    let id = ID.fetch_add(1, Ordering::Relaxed);
-    ws.send(Message::Text(
-        json!({ "id": id, "method": method, "params": params })
-            .to_string()
-            .into(),
-    ))
-    .await?;
-    while let Some(frame) = ws.next().await {
-        if let Message::Text(txt) = frame? {
+    cmd_on(ws, None, method, params).await
+}
+
+static CDP_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Like `cmd` but optionally targets an attached (OOPIF) session by id. Responses carry the same
+/// globally-unique `id`, so matching by id works regardless of which session answered.
+async fn cmd_on(ws: &mut Ws, sess: Option<&str>, method: &str, params: Value) -> Result<Value> {
+    let id = CDP_ID.fetch_add(1, Ordering::Relaxed);
+    let mut frame = json!({ "id": id, "method": method, "params": params });
+    if let Some(s) = sess {
+        frame["sessionId"] = json!(s);
+    }
+    ws.send(Message::Text(frame.to_string().into())).await?;
+    while let Some(f) = ws.next().await {
+        if let Message::Text(txt) = f? {
             let msg: Value = serde_json::from_str(txt.as_str())?;
             if msg["id"].as_u64() == Some(id) {
                 if msg.get("error").is_some() {
@@ -528,6 +601,165 @@ async fn cmd(ws: &mut Ws, method: &str, params: Value) -> Result<Value> {
         }
     }
     Err(Error::BadResponse("cdp connection closed"))
+}
+
+/// Evaluate `expr` inside a specific execution context of an attached session.
+async fn eval_ctx(ws: &mut Ws, sess: &str, ctx: i64, expr: &str) -> Result<Value> {
+    let r = cmd_on(
+        ws,
+        Some(sess),
+        "Runtime.evaluate",
+        json!({ "expression": expr, "contextId": ctx, "returnByValue": true }),
+    )
+    .await?;
+    Ok(r.pointer("/result/value").cloned().unwrap_or(Value::Null))
+}
+
+struct DrPlan {
+    text: String,
+    start_x: f64,
+    start_y: f64,
+}
+
+/// The deep-research query words that approve the current plan (anything else is treated as a
+/// revised research request).
+fn is_start_word(q: &str) -> bool {
+    matches!(
+        q.trim().to_ascii_lowercase().as_str(),
+        "start" | "go" | "run" | "approve" | "yes" | "ok" | ""
+    )
+}
+
+/// Drop the widget's button/countdown footer, leaving just the plan title + steps.
+fn clean_plan(txt: &str) -> String {
+    for marker in ["\nEdit\nCancel", "\nEdit\n", "\nPlan starts in"] {
+        if let Some(i) = txt.find(marker) {
+            return txt[..i].trim().to_string();
+        }
+    }
+    txt.trim().to_string()
+}
+
+/// Attach to the deep-research sandbox iframe (a separate cross-origin target) and return its CDP
+/// session id, plus the iframe element's top-page offset (to turn in-frame coords into page coords).
+async fn dr_sandbox(ws: &mut Ws) -> Result<Option<(String, f64, f64)>> {
+    let tgts = cmd(ws, "Target.getTargets", json!({})).await?;
+    let tid = tgts
+        .pointer("/targetInfos")
+        .and_then(|x| x.as_array())
+        .into_iter()
+        .flatten()
+        .find(|ti| {
+            ti.get("url")
+                .and_then(|x| x.as_str())
+                .is_some_and(|u| u.contains("connector_openai_deep_research"))
+        })
+        .and_then(|ti| {
+            ti.get("targetId")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+        });
+    let Some(tid) = tid else { return Ok(None) };
+    let at = cmd(
+        ws,
+        "Target.attachToTarget",
+        json!({"targetId": tid, "flatten": true}),
+    )
+    .await?;
+    let Some(sid) = at
+        .get("sessionId")
+        .and_then(|x| x.as_str())
+        .map(String::from)
+    else {
+        return Ok(None);
+    };
+    let _ = cmd_on(ws, Some(&sid), "Page.enable", json!({})).await;
+    let off = eval(ws, r#"(()=>{const f=[...document.querySelectorAll('iframe')].find(f=>/connector_openai_deep_research/.test(f.src));if(!f)return null;const r=f.getBoundingClientRect();return [r.left,r.top];})()"#).await?;
+    let (ox, oy) = off
+        .as_array()
+        .filter(|a| a.len() == 2)
+        .map(|a| (a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0)))
+        .unwrap_or((0.0, 0.0));
+    Ok(Some((sid, ox, oy)))
+}
+
+/// Find the plan card (rendered in a same-origin child frame of the sandbox) and read its text plus
+/// the Start button's page coordinates.
+async fn read_dr_plan(ws: &mut Ws, sid: &str, ox: f64, oy: f64) -> Result<Option<DrPlan>> {
+    let tree = cmd_on(ws, Some(sid), "Page.getFrameTree", json!({})).await?;
+    let mut frames = Vec::new();
+    fn collect(f: &Value, out: &mut Vec<String>) {
+        if let Some(id) = f.pointer("/frame/id").and_then(|x| x.as_str()) {
+            out.push(id.to_string());
+        }
+        if let Some(ch) = f.get("childFrames").and_then(|x| x.as_array()) {
+            ch.iter().for_each(|c| collect(c, out));
+        }
+    }
+    collect(tree.get("frameTree").unwrap_or(&Value::Null), &mut frames);
+    for fid in &frames {
+        let iw = cmd_on(
+            ws,
+            Some(sid),
+            "Page.createIsolatedWorld",
+            json!({"frameId": fid, "worldName": "fx"}),
+        )
+        .await?;
+        let ctx = match iw.pointer("/executionContextId").and_then(|x| x.as_i64()) {
+            Some(c) => c,
+            None => continue,
+        };
+        let v = eval_ctx(ws, sid, ctx, r#"JSON.stringify({txt:(document.body.innerText||''),btn:(()=>{const b=[...document.querySelectorAll('button,[role=button]')].find(b=>/^Start/.test((b.textContent||'').trim()));if(!b)return null;const r=b.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2];})()})"#).await?;
+        let parsed: Value = v
+            .as_str()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null);
+        if let Some(btn) = parsed.get("btn").and_then(|x| x.as_array()) {
+            let bx = btn.first().and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let by = btn.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let txt = parsed.get("txt").and_then(|x| x.as_str()).unwrap_or("");
+            return Ok(Some(DrPlan {
+                text: clean_plan(txt),
+                start_x: ox + bx,
+                start_y: oy + by,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Poll for the deep-research plan card to render (it appears a few seconds after kickoff).
+async fn await_dr_plan(ws: &mut Ws) -> Result<Option<DrPlan>> {
+    let mut sess: Option<(String, f64, f64)> = None;
+    for _ in 0..16 {
+        if sess.is_none() {
+            sess = dr_sandbox(ws).await.unwrap_or(None);
+        }
+        if let Some((sid, ox, oy)) = &sess {
+            if let Some(plan) = read_dr_plan(ws, sid, *ox, *oy).await? {
+                return Ok(Some(plan));
+            }
+        }
+        sleep(Duration::from_secs(3)).await;
+    }
+    Ok(None)
+}
+
+/// Approve a parked plan: click its Start button, then hand back the poll session. Best-effort — if
+/// the plan card is gone (already started/expired), the poll still fetches the eventual report.
+async fn start_dr_plan(ws: &mut Ws, cid: &str) -> Result<Outcome> {
+    if let Some(plan) = await_dr_plan(ws).await? {
+        click_at(ws, plan.start_x, plan.start_y).await?;
+        sleep(Duration::from_secs(3)).await;
+    }
+    let mut out = Outcome::new(
+        "Deep research is now running. Call deep_research again with this session to fetch the \
+         report when ready (~5-30 min)."
+            .into(),
+        1,
+    );
+    out.session = Some(format!("dr|poll|{cid}"));
+    Ok(out)
 }
 
 /// Save a screenshot of the headless page (debugging the driver).

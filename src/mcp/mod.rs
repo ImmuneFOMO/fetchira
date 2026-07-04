@@ -13,8 +13,10 @@ use crate::router::Router;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SearchArgs {
-    /// The search query (or a follow-up message when `session` is set).
-    pub query: String,
+    /// The search query (or a follow-up message when `session` is set). Optional only when polling a
+    /// running deep-research `session` for its report.
+    #[serde(default)]
+    pub query: Option<String>,
     /// Force a specific provider instead of letting the router choose.
     pub provider: Option<ProviderKind>,
     /// Maximum number of results (default 5, capped at 20).
@@ -53,7 +55,18 @@ pub struct BrowserArgs {
 pub struct ImageArgs {
     /// What to draw.
     pub prompt: String,
-    /// Force a specific provider (only chatgpt_web generates images today).
+    /// Force a specific provider (gemini_web / grok_web generate in-process over HTTP; chatgpt_web
+    /// drives the browser). Otherwise the router picks the least-exhausted one and fails over.
+    pub provider: Option<ProviderKind>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct UploadArgs {
+    /// Absolute path to the local file or image to attach.
+    pub path: String,
+    /// Your prompt/question about the attached file.
+    pub prompt: String,
+    /// Which logged-in web session to use: grok_web, chatgpt_web, or gemini_web (defaults to grok_web).
     pub provider: Option<ProviderKind>,
 }
 
@@ -128,7 +141,7 @@ impl Fetchira {
     ) -> Result<CallToolResult, ErrorData> {
         let (forced, session) = route(args.provider, args.session);
         let input = Input {
-            query: Some(args.query),
+            query: args.query,
             max_results: args.max_results,
             session,
             model: args.model,
@@ -153,7 +166,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). May take minutes. For gemini_web this returns a research PLAN plus a `session`; pass that `session` with query \"start\" to run it. For chatgpt_web it kicks off ChatGPT Deep Research (its own research model — `model` is ignored), waits briefly, then — if still running — returns a `session`; call deep_research again with that `session` to fetch the finished report (pass `mode=\"background\"` to return the session immediately without waiting). Pass a `session` to continue any web research thread."
+        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). May take minutes. gemini_web and chatgpt_web both return a research PLAN plus a `session` first: pass that `session` with query \"start\" to run it, or with a revised research request to replace the plan. gemini returns the finished report in the same call; chatgpt then runs for ~5-30 min, so after \"start\" it hands back a `session` you call again to fetch the report (chatgpt uses its own research model — `model` is ignored). Pass a `session` to continue any web research thread."
     )]
     pub async fn deep_research(
         &self,
@@ -161,7 +174,7 @@ impl Fetchira {
     ) -> Result<CallToolResult, ErrorData> {
         let (forced, session) = route(args.provider, args.session);
         let input = Input {
-            query: Some(args.query),
+            query: args.query,
             max_results: args.max_results,
             session,
             model: args.model,
@@ -186,7 +199,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Show remaining free quota per account and provider for the current period, plus each account's assigned proxy."
+        description = "Show remaining free quota per account and provider for the current period, plus each account's assigned proxy. For logged-in web sessions (grok/gemini/chatgpt) also includes live per-tier limits and the selectable model/mode catalog with thinking levels — a locked mode (e.g. grok Expert/Heavy on a lapsed sub) reads 0/0."
     )]
     pub async fn usage(
         &self,
@@ -194,7 +207,7 @@ impl Fetchira {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(match self.router.usage_snapshot().await {
             Ok(views) => {
-                let text = serde_json::to_string_pretty(&views).unwrap_or_default();
+                let text = crate::router::compact_usage(&views);
                 CallToolResult::success(vec![Content::text(text)])
             }
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
@@ -202,7 +215,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate an image from a text prompt via your logged-in ChatGPT (chatgpt_web). Returns the image itself as bytes (base64 PNG), not a link."
+        description = "Generate an image from a text prompt via a logged-in web session (gemini_web / grok_web / chatgpt_web). Returns the image itself as bytes (base64), not a link. Force one with `provider`; otherwise the router chooses and fails over."
     )]
     pub async fn create_image(
         &self,
@@ -213,6 +226,30 @@ impl Fetchira {
             ..Default::default()
         };
         self.run(Capability::Image, input, args.provider).await
+    }
+
+    #[tool(
+        description = "Attach a local file or image to a chat turn and ask about it, via a logged-in web session (grok_web, chatgpt_web, or gemini_web). `path` is an absolute local file path, `prompt` your question; returns the model's answer. Force one with `provider` (defaults to grok_web)."
+    )]
+    pub async fn upload(
+        &self,
+        Parameters(args): Parameters<UploadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let provider = args.provider.unwrap_or(ProviderKind::GrokWeb);
+        if !matches!(
+            provider,
+            ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "upload supports gemini_web, grok_web, or chatgpt_web only".to_string(),
+            )]));
+        }
+        let input = Input {
+            query: Some(args.prompt),
+            file: Some(std::path::PathBuf::from(args.path)),
+            ..Default::default()
+        };
+        self.run(Capability::Search, input, Some(provider)).await
     }
 }
 

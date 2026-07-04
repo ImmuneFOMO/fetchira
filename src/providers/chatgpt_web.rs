@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 
 use super::chatgpt_sentinel::Ctx;
 use super::{
-    chatgpt_sentinel, uuid4, with_sources, Capability, FeatureLimit, Input, LiveLimits, Outcome,
+    chatgpt_sentinel, uuid4, with_sources, Capability, FeatureLimit, Input, LiveLimits, ModelInfo,
+    Outcome,
 };
 use crate::error::{Error, Result};
 
@@ -544,10 +545,12 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
         serde_json::from_str(&resp.text().await?).unwrap_or(Value::Null)
     };
 
-    let feat = |v: &Value, name_key: &str| FeatureLimit {
-        feature: v[name_key].as_str().unwrap_or_default().to_string(),
-        remaining: v["remaining"].as_i64().unwrap_or(-1),
-        reset_after: v["reset_after"].as_str().map(str::to_string),
+    let feat = |v: &Value, name_key: &str| {
+        FeatureLimit::simple(
+            v[name_key].as_str().unwrap_or_default(),
+            v["remaining"].as_i64().unwrap_or(-1),
+            v["reset_after"].as_str().map(str::to_string),
+        )
     };
     let mut features: Vec<FeatureLimit> = Vec::new();
     if let Some(arr) = init["limits_progress"].as_array() {
@@ -557,16 +560,119 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
     if let Some(arr) = init["model_limits"].as_array() {
         features.extend(arr.iter().filter_map(|v| {
             let slug = v["model_slug"].as_str()?;
-            Some(FeatureLimit {
-                feature: format!("model:{slug}"),
-                remaining: v["remaining"].as_i64().unwrap_or(-1),
-                reset_after: v["reset_after"].as_str().map(str::to_string),
-            })
+            Some(FeatureLimit::simple(
+                format!("model:{slug}"),
+                v["remaining"].as_i64().unwrap_or(-1),
+                v["reset_after"].as_str().map(str::to_string),
+            ))
         }));
     }
 
     let tier = account_tier(base, client, &auth).await;
-    Ok(LiveLimits { tier, features })
+    let models = model_catalog(base, client, &auth).await;
+    Ok(LiveLimits {
+        tier,
+        features,
+        models,
+    })
+}
+
+/// The composer's selectable chat models, from `GET /backend-api/models`'s `categories` (the picker
+/// structure), collapsed to the DOM vocab an agent passes to `search`: a base model
+/// (gpt-5.5/gpt-5.4/gpt-5.3/o3) + its intelligence levels (instant/medium/high). We deliberately
+/// use `categories`, NOT the flat `models[]` — that list is a different (HTTP-send) taxonomy with
+/// non-composer lanes (deep-research/agent/mini) and `standard/extended` labels the browser
+/// `select_model` doesn't accept. Best-effort; empty on any failure.
+async fn model_catalog(base: &str, client: &wreq::Client, auth: &str) -> Vec<ModelInfo> {
+    let text = async {
+        client
+            .get(format!(
+                "{base}/backend-api/models?history_and_training_disabled=false"
+            ))
+            .header("authorization", auth)
+            .send()
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()
+    }
+    .await
+    .unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let Some(cats) = v["categories"].as_array() else {
+        return Vec::new();
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut levels_by_id: std::collections::HashMap<String, Vec<&'static str>> =
+        std::collections::HashMap::new();
+    for c in cats {
+        let Some((id, levels)) = c["category"].as_str().and_then(composer_model) else {
+            continue;
+        };
+        let acc = levels_by_id.entry(id.clone()).or_insert_with(|| {
+            order.push(id.clone());
+            Vec::new()
+        });
+        for l in levels {
+            if !acc.contains(&l) {
+                acc.push(l);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|id| {
+            let mut levels: Vec<String> = levels_by_id
+                .remove(&id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            levels.sort_by_key(|l| match l.as_str() {
+                "instant" => 0,
+                "medium" => 1,
+                "high" => 2,
+                _ => 3,
+            });
+            let name = if id.starts_with("gpt") {
+                id.to_uppercase()
+            } else {
+                id.clone()
+            };
+            ModelInfo {
+                id,
+                name,
+                levels,
+                remaining: None,
+                total: None,
+                window_secs: None,
+                reset_after: None,
+                locked: false,
+            }
+        })
+        .collect()
+}
+
+/// Map a `/backend-api/models` category to (composer model id, its intelligence levels). `_instant`
+/// → the instant level; `_reasoning` → medium+high (the DOM splits reasoning into two). `gpt_5_auto`
+/// and unknowns are skipped (Auto isn't a distinct DOM model).
+fn composer_model(cat: &str) -> Option<(String, Vec<&'static str>)> {
+    if cat == "o3" {
+        return Some(("o3".to_string(), Vec::new()));
+    }
+    let (base, instant) = match (cat.strip_suffix("_instant"), cat.strip_suffix("_reasoning")) {
+        (Some(b), _) => (b, true),
+        (_, Some(b)) => (b, false),
+        _ => return None,
+    };
+    let n = base.strip_prefix("gpt_5_")?;
+    let levels = if instant {
+        vec!["instant"]
+    } else {
+        vec!["medium", "high"]
+    };
+    Some((format!("gpt-5.{n}"), levels))
 }
 
 async fn account_tier(base: &str, client: &wreq::Client, auth: &str) -> Option<String> {

@@ -129,7 +129,13 @@ function AccountsTab({ onAdd }) {
                         {(r.limits.features || []).map((f) => (
                           <span key={f.feature} title={f.resetAfter ? 'resets ' + f.resetAfter : ''}
                             style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px' }}>
-                            {f.feature} <b style={{ color: 'var(--text-hi)' }}>{f.remaining}</b>
+                            {f.feature} <b style={{ color: 'var(--text-hi)' }}>{f.total != null ? f.remaining + '/' + f.total : f.remaining}</b>
+                          </span>
+                        ))}
+                        {(r.limits.models || []).map((m) => (
+                          <span key={m.id} title={m.windowSecs ? 'rolling ' + Math.round(m.windowSecs / 3600) + 'h' : (m.resetAfter ? 'resets ' + m.resetAfter : (m.locked ? 'locked on this tier' : ''))}
+                            style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: m.locked ? 'var(--text-faint)' : 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px', opacity: m.locked ? 0.65 : 1 }}>
+                            {m.name}{m.levels && m.levels.length ? ' ·' + m.levels.join('/') : ''} <b style={{ color: m.locked ? 'var(--text-faint)' : 'var(--text-hi)' }}>{m.locked ? '0/0' : (m.total != null ? m.remaining + '/' + m.total : (m.remaining != null ? m.remaining : '—'))}</b>
                           </span>
                         ))}
                       </div>

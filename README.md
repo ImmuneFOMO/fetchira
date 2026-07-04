@@ -11,8 +11,9 @@ scrape tier, and spends them so you don't have to think about it.
 
 A handful of services give away a real amount of free web search every month — Serper,
 Tavily, Exa, Parallel for search, Jina and Firecrawl for reading pages, Steel for headless
-browsing. Your logged-in Gemini, Perplexity and Grok web sessions add even more. Used
-together they cover a lot of an agent's research, for free.
+browsing. Your logged-in Gemini, Perplexity, Grok and ChatGPT web sessions add even more —
+search, multi-step deep research, image generation and file Q&A. Used together they cover a
+lot of an agent's research, for free.
 
 The catch is the bookkeeping. Each provider has its own API, its own key, its own quota and
 its own reset window. To actually lean on the free tiers you have to remember which key goes
@@ -33,11 +34,13 @@ manage accounts without touching a config file.
 
 | Capability | The agent calls | fetchira routes to (in preference order) |
 |---|---|---|
-| **search** | `search` | serper → tavily → exa → parallel → perplexity_web → gemini_web → grok_web |
+| **search** | `search` | serper → tavily → exa → parallel → perplexity_web → gemini_web → grok_web → chatgpt_web |
 | **read** | `read` | jina → firecrawl |
-| **deep research** | `deep_research` | parallel → exa → tavily → perplexity_web → gemini_web → grok_web |
+| **deep research** | `deep_research` | parallel → exa → tavily → perplexity_web → gemini_web → grok_web → chatgpt_web |
+| **image** | `create_image` | grok_web → gemini_web → chatgpt_web |
+| **file Q&A** | `upload` | grok_web / gemini_web / chatgpt_web (attach a local file, ask about it) |
 | **browser** | `browser` | steel |
-| **usage** | `usage` | remaining quota per account + assigned proxy |
+| **usage** | `usage` | remaining quota + live per-tier limits and model/mode catalog per account |
 
 - **Quota-aware routing.** Every call goes to the account with the most free quota left for
   that capability. A `429`/`402` marks that budget exhausted for the period and the router
@@ -49,9 +52,11 @@ manage accounts without touching a config file.
   them by remaining quota.
 - **A sticky proxy per account.** Give each account its own outbound IP (`proxy = "pool"` from
   a Webshare pool, or a pinned URL) so multiple free accounts don't share one address.
-- **Web sessions, not just API keys.** gemini_web / perplexity_web / grok_web authenticate with
-  your real logged-in browser cookies and return a synthesized answer with sources — including
-  Gemini's multi-step Deep Research. See [Web sessions](#web-sessions) below.
+- **Web sessions, not just API keys.** gemini_web / perplexity_web / grok_web / chatgpt_web
+  authenticate with your real logged-in browser cookies and return a synthesized answer with
+  sources — plus multi-step Deep Research (Gemini and ChatGPT), image generation and file Q&A.
+  `usage` reports each session's live per-tier limits and its selectable model/mode catalog. See
+  [Web sessions](#web-sessions) below.
 - **A local dashboard.** Live quota, a streaming route log, and full account management in the
   browser — covered next.
 
@@ -198,13 +203,14 @@ so the agent knows when and how to use the tools.
 
 ## Web sessions
 
-gemini_web, perplexity_web and grok_web use your **logged-in browser cookies** instead of an API
-key, via a Chrome-impersonating client. One-time setup per provider:
+gemini_web, perplexity_web, grok_web and chatgpt_web use your **logged-in browser cookies** instead
+of an API key, via a Chrome-impersonating client. One-time setup per provider:
 
 ```sh
 fetchira login perplexity_web   # opens a browser; log in, then it captures the session
 fetchira login gemini_web
 fetchira login grok_web
+fetchira login chatgpt_web
 ```
 
 `fetchira login <provider>` launches a real browser against a dedicated profile, waits for you to
@@ -236,8 +242,19 @@ search { "query": "...", "provider": "gemini_web" }                       // -> 
 search { "query": "follow-up", "session": "gemini_web:c_…,r_…" }          // continues the chat
 ```
 
-**Gemini Deep Research** runs the real multi-step flow — `deep_research` returns a plan, then you
-send `"start"` on the same session to run it (~1-3 min) and get the full report.
+**Deep Research** (Gemini and ChatGPT) runs the real multi-step flow — `deep_research` returns a
+plan plus a `session`; send `"start"` on that session to run it (or a revised request to replace the
+plan). Gemini returns the report in the same call (~1-3 min); ChatGPT then runs for ~5-30 min, so it
+hands back a `session` you call again to fetch the finished report.
+
+**Images and file Q&A.** `create_image` generates from a text prompt — grok and gemini render
+in-process over HTTP, chatgpt drives the browser; it returns the image bytes, not a link. `upload`
+attaches a local file or image to a turn and asks about it. Both take an optional `provider` and fail
+over like everything else.
+
+**Live limits.** `usage` polls each web session for its real per-tier limits and the model/mode
+catalog it can select (with thinking levels) — a mode locked by your subscription (e.g. Grok
+Expert/Heavy on a lapsed plan) shows as `0/0`.
 
 Caveats, inherent to reverse-engineered web access:
 - **Sessions expire.** Cloudflare's `cf_clearance` lasts ~30 min to a few hours and cannot be
@@ -246,6 +263,9 @@ Caveats, inherent to reverse-engineered web access:
 - **Grok is intermittent.** fetchira forges the anti-bot `x-statsig-id` per request, which gets
   past grok.com, but grok is aggressive on IP reputation and rate. Better odds: a fresh login, a
   residential `proxy`, and no bursting. The router fails over when grok blocks.
+- **ChatGPT drives a real browser.** chatgpt.com gates every send behind a Turnstile challenge pure
+  HTTP can't pass, so chatgpt_web submits through the logged-in browser profile (reads like limits
+  stay pure HTTP). It needs Chrome/Chromium available; deep-research polls resume over plain HTTP.
 - Browser login needs Chrome/Chromium/Edge/Brave or Firefox installed (Linux names like
   `google-chrome`, `chromium`, `firefox` are resolved on `$PATH`). With none — or a headless box —
   use `fetchira session` instead. The first build compiles BoringSSL (needs `cmake` + a C/C++

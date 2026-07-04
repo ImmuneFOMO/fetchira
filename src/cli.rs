@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -90,12 +91,27 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let store = open_store(home, &cfg).await?;
+    // Render REMAINING/RESEARCH from the same live snapshot the dashboard uses, so a lapsed sub
+    // reads 0/0 here too (a bucket the router couldn't build — no session/key — is absent = "-").
+    let accounts = cfg.accounts.clone();
+    let router = crate::router::Router::build(cfg, store).await?;
+    let views = router.usage_snapshot().await?;
+    let mut mains: HashMap<&str, &crate::router::UsageView> = HashMap::new();
+    let mut drs: HashMap<&str, &crate::router::UsageView> = HashMap::new();
+    for v in &views {
+        match v.label.strip_suffix("#dr") {
+            Some(base) => drs.insert(base, v),
+            None => mains.insert(v.label.as_str(), v),
+        };
+    }
+
     println!(
         "{:15} {:14} {:12} {:>10} {:>13}  PROXY",
         "PROVIDER", "LABEL", "CRED", "REMAINING", "RESEARCH"
     );
-    for a in &cfg.accounts {
-        let ready = account_ready(&store, a).await;
+    for a in &accounts {
+        let main = mains.get(a.label.as_str());
+        let ready = main.is_some();
         let cred = if a.provider.is_web() {
             if ready {
                 "session"
@@ -107,21 +123,28 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
         } else {
             "NO KEY"
         };
+        let remaining = main
+            .map(|v| v.remaining.to_string())
+            .unwrap_or_else(|| "-".into());
+        let research = match (a.provider.is_web().then_some(()), drs.get(a.label.as_str())) {
+            (Some(_), Some(v)) => format!("{}/{}/day", v.remaining, v.quota),
+            _ => "-".to_string(),
+        };
         println!(
             "{:15} {:14} {:12} {:>10} {:>13}  {}",
             a.provider.as_str(),
             a.label,
             cred,
-            remaining_cell(&store, a, ready).await,
-            research_cell(&store, a, ready).await,
+            remaining,
+            research,
             a.proxy.as_deref().unwrap_or("direct"),
         );
     }
 
-    // Live per-tier tool limits, fetched straight from providers that report them (chatgpt_web).
-    let router = crate::router::Router::build(cfg, store).await?;
-    for v in router.usage_snapshot().await? {
-        let Some(ll) = v.limits else { continue };
+    // Live per-tier tool limits + model catalog, fetched straight from the providers that report
+    // them (chatgpt tier/features, grok per-mode limits, gemini model list).
+    for v in &views {
+        let Some(ll) = &v.limits else { continue };
         println!(
             "\nlive limits — {} ({})",
             v.label,
@@ -135,8 +158,37 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
                 .unwrap_or_default();
             println!("  {:20} {:>5}{}", f.feature, f.remaining, reset);
         }
+        for m in &ll.models {
+            let cap = match (m.remaining, m.total) {
+                (Some(r), Some(t)) => format!("{r}/{t}"),
+                (Some(r), None) => r.to_string(),
+                _ => "—".to_string(),
+            };
+            let levels = if m.levels.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", m.levels.join("/"))
+            };
+            let window = m
+                .window_secs
+                .map(|w| format!("  · {}", dur(w)))
+                .unwrap_or_default();
+            let lock = if m.locked { "  (locked)" } else { "" };
+            println!("  · {:12} {:>7}{levels}{window}{lock}", m.name, cap);
+        }
     }
     Ok(())
+}
+
+/// Coarse duration for a rolling window ("24h", "2h").
+fn dur(secs: i64) -> String {
+    if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 /// True once the account is usable: a key that resolves to a non-empty secret, or a captured web
