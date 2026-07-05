@@ -150,7 +150,7 @@ async fn result(base: &str, key: &str, client: &reqwest::Client, id: &str) -> Re
 /// Live $ balance via the dashboard's cookie session (the api-key can't read it — api.parallel.ai's
 /// balance is OAuth-only). `billing_overview` → `{balance: <cents>}`; a search is $0.005, so cents·2
 /// = searches.
-pub async fn balance(client: &wreq::Client) -> Result<LiveBalance> {
+pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String, String)>)> {
     let resp = client
         .post("https://platform.parallel.ai/api/acc_svc/billing_overview")
         .header("content-type", "application/json")
@@ -169,9 +169,10 @@ pub async fn balance(client: &wreq::Client) -> Result<LiveBalance> {
             body: resp.text().await.unwrap_or_default(),
         });
     }
+    let updates = crate::web::set_cookie_updates(resp.headers());
     let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
         .map_err(|_| Error::BadResponse("parallel"))?;
-    Ok(parse_balance(&v))
+    Ok((parse_balance(&v), updates))
 }
 
 // No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.

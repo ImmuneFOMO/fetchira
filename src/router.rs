@@ -525,9 +525,16 @@ impl Router {
             Some(bal) => bal,
             None => {
                 // exa/parallel read their $ balance through the dashboard cookie session; the rest
-                // (serper/tavily/firecrawl/jina/steel) through the api-key.
+                // (serper/tavily/firecrawl/jina/steel) through the api-key. The dashboard re-issues a
+                // rolling NextAuth token on every fetch, so re-save it to keep the session alive.
                 let fresh = match &b.balance_conn {
-                    Some(wc) => b.provider.live_balance_web(wc).await,
+                    Some(wc) => match b.provider.live_balance_web(wc).await {
+                        Some((bal, updates)) => {
+                            self.refresh_session(b, &updates).await;
+                            Some(bal)
+                        }
+                        None => None,
+                    },
                     None => b.provider.live_balance(&b.key, c).await,
                 };
                 if let Ok(mut m) = self.balance.lock() {
@@ -542,6 +549,37 @@ impl Router {
         v.remaining = bal.remaining.max(0);
         v.used = (v.quota - v.remaining).max(0);
         v.exhausted = v.remaining <= 0;
+    }
+
+    /// Re-save a `balance_session` account's stored cookies with the rolling token the dashboard
+    /// just re-issued (any `Set-Cookie` whose value changed), so polling the balance keeps the
+    /// NextAuth session from expiring.
+    async fn refresh_session(&self, b: &Bucket, updates: &[(String, String)]) {
+        if updates.is_empty() {
+            return;
+        }
+        let Ok(Some(raw)) = self.store.load_session(&b.label).await else {
+            return;
+        };
+        let mut sess = web::parse_session(&raw);
+        let mut changed = false;
+        for (name, val) in updates {
+            for c in sess.cookies.iter_mut().filter(|c| &c.name == name) {
+                if &c.value != val {
+                    c.value = val.clone();
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return;
+        }
+        if let Ok(json) = serde_json::to_string(&sess) {
+            let _ = self
+                .store
+                .save_session(&b.label, b.provider.kind.as_str(), &json)
+                .await;
+        }
     }
 
     /// Live per-tier limits for a web bucket, cached 20s (a miss is cached too, so a provider

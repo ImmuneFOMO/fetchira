@@ -67,6 +67,20 @@ pub fn parse_session(raw: &str) -> Session {
         .unwrap_or_default()
 }
 
+/// Name=value of every `Set-Cookie` in a response. NextAuth re-issues the session token on each
+/// authed call; capturing + re-saving it keeps a cookie session from expiring.
+pub fn set_cookie_updates(headers: &wreq::header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .get_all(wreq::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|c| {
+            let (name, val) = c.split(';').next()?.split_once('=')?;
+            Some((name.trim().to_string(), val.trim().to_string()))
+        })
+        .collect()
+}
+
 /// Build a Chrome-impersonating client with the captured cookies + headers (and optional
 /// sticky proxy) baked in. The long timeout covers deep-research turns that run for minutes.
 pub fn build_client(

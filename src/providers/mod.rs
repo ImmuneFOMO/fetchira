@@ -710,7 +710,10 @@ impl Provider {
 
     /// Live balance for a `balance_session` provider (exa/parallel), read through its dashboard's
     /// cookie session (the `client` carries the captured cookies). Best-effort.
-    pub async fn live_balance_web(&self, client: &wreq::Client) -> Option<LiveBalance> {
+    pub async fn live_balance_web(
+        &self,
+        client: &wreq::Client,
+    ) -> Option<(LiveBalance, Vec<(String, String)>)> {
         match self.kind {
             ProviderKind::Parallel => parallel::balance(client).await.ok(),
             ProviderKind::Exa => exa::balance(client).await.ok(),
