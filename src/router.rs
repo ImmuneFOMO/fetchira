@@ -144,21 +144,7 @@ impl Router {
                     continue;
                 };
                 let sess = web::parse_session(&raw);
-                // Gemini 401s the exported session if the full cookie set is replayed; Google's
-                // rotate only tolerates the two __Secure-1PSID(TS) cookies (HanaokaYuzu).
-                let filtered: Vec<web::Cookie>;
-                let jar: &[web::Cookie] = if acc.provider == ProviderKind::GeminiWeb {
-                    filtered = sess
-                        .cookies
-                        .iter()
-                        .filter(|c| c.name == "__Secure-1PSID" || c.name == "__Secure-1PSIDTS")
-                        .cloned()
-                        .collect();
-                    &filtered
-                } else {
-                    &sess.cookies
-                };
-                let client = web::build_client(jar, &sess.headers, proxy_url.as_deref())?;
+                let client = web::build_client(&sess.cookies, &sess.headers, proxy_url.as_deref())?;
                 (Conn::Web(client, sess.cookies), String::new())
             } else {
                 let Some(key) = acc

@@ -36,13 +36,14 @@ pub async fn call(
     };
 
     // Preflight www.google.com to seed the NID/consent cookies Google expects alongside the
-    // session; without it /app can render logged-out. The client carries only __Secure-1PSID /
-    // __Secure-1PSIDTS (router-filtered) — sending the full captured set 401s Google's rotate.
+    // session; without it /app can render logged-out.
     let _ = client.get("https://www.google.com").send().await;
 
-    // Scrape the session token from the /app bootstrap. If it renders logged-out (the rotating
-    // __Secure-1PSIDTS is stale/absent), mint a fresh one via RotateCookies and retry ONCE. Doing
-    // the rotate unconditionally clobbers a just-captured valid 1PSIDTS and logs the session out.
+    // Scrape the session token from the /app bootstrap. The full captured cookie set must be sent —
+    // trimming it to __Secure-1PSID(TS) makes /app 302 to /sorry (Google's anti-abuse interstitial),
+    // which reads as logged-out. If it does render logged-out (a stale/absent rotating __Secure-1PSIDTS),
+    // mint a fresh one via RotateCookies and retry ONCE. Doing the rotate unconditionally clobbers a
+    // just-captured valid 1PSIDTS and logs the session out.
     let mut page = client
         .get(format!("{base}/app"))
         .send()
@@ -50,9 +51,6 @@ pub async fn call(
         .text()
         .await
         .unwrap_or_default();
-    // Google dropped `SNlM0e` from the signed-in bootstrap (Apr 2026); a live session still carries
-    // the other boot tokens (cfb2h/FdrFJe/TuX5cc), so gate the login on those. Only if none appear
-    // do we treat it as signed-out and mint a fresh companion cookie via RotateCookies, once.
     if !logged_in(&page) {
         let _ = client
             .post("https://accounts.google.com/RotateCookies")
