@@ -110,14 +110,18 @@ function CapabilityMatrix() {
 function LimitRow({ label, used, quota, window, resetAt, locked, off, approx, usd }) {
   const q = quota || 0;
   const remaining = Math.max(0, q - (used || 0));
-  // Top-up $ providers have no ceiling to drain — show the real balance, not a fuel gauge.
+  // Top-up $ providers have no ceiling to drain, so the bar is always full ("tank fuelled") — it's
+  // there for visual parity with the credit providers; the real figure is the $ balance.
   if (usd != null) {
     return (
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)' }}>{label === 'quota' ? 'balance' : label}</span>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-          <b style={{ color: 'var(--text-hi)' }}>${usd.toFixed(2)}</b> · ≈ {remaining.toLocaleString()} left
-        </span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)' }}>{label === 'quota' ? 'balance' : label}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+            <b style={{ color: 'var(--text-hi)' }}>${usd.toFixed(2)}</b> · ≈ {remaining.toLocaleString()} left
+          </span>
+        </div>
+        <QuotaMeter used={remaining} quota={q} variant="segments" segments={18} showValues={false} state={off ? 'off' : 'ok'} />
       </div>
     );
   }
