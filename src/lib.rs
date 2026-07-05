@@ -3,7 +3,6 @@ pub mod config;
 pub mod error;
 pub mod httptrace;
 pub mod mcp;
-pub mod price;
 pub mod providers;
 pub mod proxy;
 pub mod router;

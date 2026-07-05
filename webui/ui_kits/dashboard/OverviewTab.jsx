@@ -23,25 +23,19 @@ function fmtReset(iso) {
   return 'resets ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
 }
 
-const fmtUsd = (n) => '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-// Header odometer + at-a-glance tank + dead-ends. "est. retail" is an honest what-you-didn't-pay
-// estimate, not a real bill.
+// At-a-glance: total remaining capacity across all accounts + routing reliability. No savings/$
+// claim — fetchira can't tell a free tier from a paid/topped-up account, so it never guesses that.
 function SavingsStrip() {
-  const sv = window.FX.savings || {};
   const de = window.FX.deadEnds || {};
   const totalRemaining = window.FX.totalRemaining || 0;
-  const providers = (window.FX.groups || []).reduce((n, g) => n + g.providers.length, 0);
   const clean = (de.ranOut || 0) === 0;
   return (
-    <Card accent="accent" pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-mid)', lineHeight: 1.5 }}>
-        You pooled <b style={{ color: 'var(--text-hi)' }}>{(sv.pooledRequests || 0).toLocaleString()}</b> free requests across <b style={{ color: 'var(--text-hi)' }}>{providers}</b> providers — <b style={{ color: 'var(--lime-500)' }}>~{fmtUsd(sv.estRetailUsd)}</b> <span style={{ color: 'var(--text-faint)' }}>est. retail</span> you didn't pay · <b style={{ color: 'var(--text-hi)' }}>{(sv.keysBilled || 0).toLocaleString()}</b> keys billed
-      </div>
-      <div style={{ display: 'flex', borderTop: '1px solid var(--border-faint)', paddingTop: 14 }}>
+    <Card accent="accent" pad={16}>
+      <div style={{ display: 'flex' }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
           <span style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-hi)' }}>{totalRemaining.toLocaleString()}</span>
-          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>free requests still in the tank</span>
+          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>requests still in the tank</span>
         </div>
         <div style={{ width: 1, background: 'var(--border-faint)', margin: '0 18px' }} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
@@ -134,7 +128,7 @@ function CapabilityMatrix() {
 // One limit = its own cube bar (each mode/model/feature has its own quota + reset cadence).
 // Fuel-gauge fill: the bar shows what's LEFT (full when fresh), so we feed the meter `remaining`
 // as its fill and force the colour from the real remaining (green → amber → red as it drains).
-function LimitRow({ label, used, quota, window, resetAt, locked, off }) {
+function LimitRow({ label, used, quota, window, resetAt, locked, off, approx }) {
   const q = quota || 0;
   const remaining = Math.max(0, q - (used || 0));
   const remFrac = q > 0 ? remaining / q : 0;
@@ -145,7 +139,7 @@ function LimitRow({ label, used, quota, window, resetAt, locked, off }) {
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: locked ? 'var(--text-faint)' : 'var(--text-mid)' }}>{label}</span>
         <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-          <span>{locked ? '0/0' : <><b style={{ color: 'var(--text-hi)' }}>{remaining.toLocaleString()}</b> / {q.toLocaleString()}</>}</span>
+          <span>{locked ? '0/0' : <>{approx ? '≈ ' : ''}<b style={{ color: 'var(--text-hi)' }}>{remaining.toLocaleString()}</b> / {q.toLocaleString()}</>}</span>
           {meta && <span>{meta}</span>}
         </span>
       </div>

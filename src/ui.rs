@@ -854,7 +854,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 // "messages/search" limit misleads (chatgpt caps are per-model, gemini has none), so
                 // web cards show only real live limits (grok modes, deep research) + the model catalog.
                 if !has_model_bar && !a.web {
-                    bars.push(limit_bar(
+                    let mut q = limit_bar(
                         "quota",
                         a.used,
                         a.quota,
@@ -862,7 +862,12 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                         Some(&a.period),
                         None,
                         false,
-                    ));
+                    );
+                    // Estimate providers (a $/token→ops conversion) show "≈" — the count isn't exact.
+                    if approx_quota(name) {
+                        q["approx"] = json!(true);
+                    }
+                    bars.push(q);
                 }
                 if a.has_dr {
                     bars.push(limit_bar(
@@ -958,18 +963,12 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
-    // One pass over the route log: savings odometer (what the pooled free tiers would have cost at
-    // list price), dead-end tally (ops that ran out with no success — ~0 by design), and per-account
-    // op rate for the burn radar.
-    let mut est_retail = 0.0f64;
-    let mut pooled = 0i64;
+    // One pass over the route log: dead-end tally (ops that ran out with no success — ~0 by design)
+    // and per-account op rate for the burn radar.
     let mut ran_out = 0i64;
     let mut op_rate: HashMap<&str, (i64, i64, i64)> = HashMap::new(); // count, first_epoch, last_epoch
     for r in &routes {
-        if r.status == 200 {
-            est_retail += crate::price::retail_usd(&r.provider, &r.capability);
-            pooled += 1;
-        } else if r.status == 429 || r.status == 402 {
+        if r.status == 429 || r.status == 402 {
             ran_out += 1;
         }
         if let Ok(d) = DateTime::parse_from_rfc3339(&r.ts) {
@@ -1046,7 +1045,6 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         "usage": usage,
         "summary": { "accounts": mains.len(), "healthy": healthy, "needsLogin": needs_login, "exhausted": exhausted },
         "totalRemaining": total_remaining,
-        "savings": { "estRetailUsd": (est_retail * 100.0).round() / 100.0, "pooledRequests": pooled, "keysBilled": 0 },
         "deadEnds": { "routed": routes.len(), "ranOut": ran_out },
         "burn": burn,
         "capabilities": capabilities,
@@ -1240,6 +1238,12 @@ fn group_color(provider: &str) -> &'static str {
         "browser" => "var(--green-500)",
         _ => "var(--amber-500)",
     }
+}
+
+/// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance, jina =
+/// token wallet) rather than an exact request count — shown with a leading "≈".
+fn approx_quota(provider: &str) -> bool {
+    matches!(provider, "parallel" | "exa" | "steel" | "jina")
 }
 
 fn desc_of(provider: &str) -> &'static str {
