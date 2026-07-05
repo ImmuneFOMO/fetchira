@@ -12,6 +12,7 @@ mod gemini_web;
 mod grok_statsig;
 mod grok_web;
 mod jina;
+pub(crate) mod niche;
 mod parallel;
 mod perplexity_web;
 mod serper;
@@ -69,6 +70,16 @@ pub struct Input {
     /// A local file to attach to the chat turn (the `upload` tool). The provider uploads it, then
     /// references it in the send so the model can see it. gemini_web / grok_web only.
     pub file: Option<std::path::PathBuf>,
+    /// Cross-provider research niche: `web` (default), `news`, or `academic`. The router steers to a
+    /// backend that serves it and each provider maps it to its native vertical (else query-rewrite).
+    pub topic: Option<String>,
+    /// Recency filter: `day`/`week`/`month`/`year` or an ISO date; mapped per provider (else `after:`).
+    pub recency: Option<String>,
+    /// Restrict to these domains (a `-` prefix excludes); native filter where supported, else `site:`.
+    pub domains: Option<Vec<String>>,
+    /// Deep-research depth: `standard` (default) or `deep` (slower/pricier — exa deep-reasoning,
+    /// parallel pro tier, grok heavy). Deep-research only.
+    pub depth: Option<String>,
 }
 
 impl Input {
@@ -317,6 +328,26 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
         // to text) so it sits behind grok; chatgpt is the browser fallback.
         Capability::Image => &[GrokWeb, GeminiWeb, ChatgptWeb],
     }
+}
+
+/// `order(cap)` re-ranked for a research niche: academic floats Exa (papers) then Serper (scholar)
+/// to the front, news floats Serper then Tavily. Only reorders providers already serving the cap;
+/// `None`/`web` is the plain order. Quota-aware failover still runs within the returned list.
+pub fn order_for(cap: Capability, topic: Option<&str>) -> Vec<ProviderKind> {
+    use ProviderKind::*;
+    let mut list = order(cap).to_vec();
+    let front: &[ProviderKind] = match topic {
+        Some("academic") => &[Exa, Serper],
+        Some("news") => &[Serper, Tavily],
+        _ => return list,
+    };
+    for &p in front.iter().rev() {
+        if let Some(i) = list.iter().position(|&k| k == p) {
+            list.remove(i);
+            list.insert(0, p);
+        }
+    }
+    list
 }
 
 /// Live remaining budget reported by the provider itself (only grok exposes one today).
@@ -650,4 +681,35 @@ async fn check(provider: &'static str, resp: reqwest::Response) -> Result<reqwes
             body,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ProviderKind::*;
+
+    #[test]
+    fn order_for_floats_niche_providers() {
+        // academic -> Exa then Serper to the front, rest of the order preserved
+        let acad = order_for(Capability::Search, Some("academic"));
+        assert_eq!(acad[0], Exa);
+        assert_eq!(acad[1], Serper);
+        assert_eq!(acad.len(), order(Capability::Search).len());
+        // news -> Serper then Tavily
+        let news = order_for(Capability::Search, Some("news"));
+        assert_eq!(&news[..2], &[Serper, Tavily]);
+        // web / none leaves the base order untouched
+        assert_eq!(
+            order_for(Capability::Search, None),
+            order(Capability::Search)
+        );
+        assert_eq!(
+            order_for(Capability::Search, Some("web")),
+            order(Capability::Search)
+        );
+        // only reorders providers already present for the cap (Serper isn't a DeepResearch backend)
+        let dr = order_for(Capability::DeepResearch, Some("academic"));
+        assert_eq!(dr[0], Exa);
+        assert!(!dr.contains(&Serper));
+    }
 }

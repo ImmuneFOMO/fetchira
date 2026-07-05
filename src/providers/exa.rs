@@ -1,12 +1,7 @@
-use std::time::Duration;
-
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, LiveBalance, Outcome};
+use super::{check, fmt_hits, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
-
-const POLL: Duration = Duration::from_secs(3);
-const MAX_POLLS: u32 = 60;
 
 pub async fn call(
     base: &str,
@@ -27,15 +22,47 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
     let resp = client
         .post(format!("{base}/search"))
         .header("x-api-key", key)
-        .json(&json!({
-            "query": input.need_query()?,
-            "numResults": input.results(),
-            "contents": { "text": { "maxCharacters": 500 } },
-        }))
+        .json(&search_body(input, 500)?)
         .send()
         .await?;
     let v: Value = check("exa", resp).await?.json().await?;
-    let hits = v["results"]
+    Ok(Outcome::new(fmt_hits(&hits(&v)), 1))
+}
+
+fn search_body(input: &Input, max_chars: u32) -> Result<Value> {
+    let mut body = json!({
+        "query": input.need_query()?,
+        "numResults": input.results(),
+        "contents": { "text": { "maxCharacters": max_chars } },
+    });
+    if let Some(cat) = input.topic.as_deref().and_then(|t| match t {
+        "news" => Some("news"),
+        "academic" => Some("research paper"),
+        _ => None,
+    }) {
+        body["category"] = json!(cat);
+    }
+    if let Some(d) = input
+        .recency
+        .as_deref()
+        .and_then(super::niche::recency_date)
+    {
+        body["startPublishedDate"] = json!(d);
+    }
+    if let Some(domains) = &input.domains {
+        let (inc, exc) = super::niche::split_domains(domains);
+        if !inc.is_empty() {
+            body["includeDomains"] = json!(inc);
+        }
+        if !exc.is_empty() {
+            body["excludeDomains"] = json!(exc);
+        }
+    }
+    Ok(body)
+}
+
+fn hits(v: &Value) -> Vec<Hit> {
+    v["results"]
         .as_array()
         .map(|a| {
             a.iter()
@@ -44,10 +71,9 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
                     url: s(o, "url"),
                     snippet: s(o, "text"),
                 })
-                .collect::<Vec<_>>()
+                .collect()
         })
-        .unwrap_or_default();
-    Ok(Outcome::new(fmt_hits(&hits), 1))
+        .unwrap_or_default()
 }
 
 async fn contents(
@@ -75,47 +101,28 @@ async fn contents(
     Ok(Outcome::new(text, 1))
 }
 
+// The async `/research/v1` job endpoint is EOL; deep research now runs synchronously through
+// `/search` with the `deep-reasoning` type (also the `depth=deep` path).
 async fn research(
     base: &str,
     key: &str,
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let start = client
-        .post(format!("{base}/research/v1"))
+    let resp = client
+        .post(format!("{base}/search"))
         .header("x-api-key", key)
-        .json(&json!({ "instructions": input.need_query()?, "model": "exa-research" }))
+        .json(&research_body(input)?)
         .send()
         .await?;
-    let v: Value = check("exa", start).await?.json().await?;
-    let id = v["researchId"]
-        .as_str()
-        .ok_or(Error::BadResponse("exa"))?
-        .to_string();
+    let v: Value = check("exa", resp).await?.json().await?;
+    Ok(Outcome::new(fmt_hits(&hits(&v)), 1))
+}
 
-    for _ in 0..MAX_POLLS {
-        tokio::time::sleep(POLL).await;
-        let resp = client
-            .get(format!("{base}/research/v1/{id}"))
-            .header("x-api-key", key)
-            .send()
-            .await?;
-        let v: Value = check("exa", resp).await?.json().await?;
-        match v["status"].as_str().unwrap_or_default() {
-            "completed" => {
-                let text = v
-                    .get("output")
-                    .or_else(|| v.get("data"))
-                    .or_else(|| v.get("report"))
-                    .map(value_to_text)
-                    .unwrap_or_else(|| value_to_text(&v));
-                return Ok(Outcome::new(text, 1));
-            }
-            "failed" | "canceled" | "cancelled" => return Err(Error::BadResponse("exa")),
-            _ => continue,
-        }
-    }
-    Err(Error::Timeout("exa"))
+fn research_body(input: &Input) -> Result<Value> {
+    let mut body = search_body(input, 8000)?;
+    body["type"] = json!("deep-reasoning");
+    Ok(body)
 }
 
 /// Live $ balance via the dashboard's cookie session (the api-key has no balance endpoint — exa is a
@@ -159,5 +166,48 @@ mod tests {
         let b = parse_balance(&json!({"orbCreditsInCents": 1766.99, "orbInvoiceDebt": 0}));
         assert_eq!(b.remaining, 2524); // $17.67 / $0.007
         assert_eq!(b.total, 2524);
+    }
+
+    #[test]
+    fn plain_search_body_unchanged() {
+        let b = search_body(
+            &Input {
+                query: Some("crispr".into()),
+                ..Default::default()
+            },
+            500,
+        )
+        .unwrap();
+        assert_eq!(b["query"], "crispr");
+        assert!(b.get("category").is_none());
+        assert!(b.get("startPublishedDate").is_none());
+        assert!(b.get("includeDomains").is_none());
+    }
+
+    #[test]
+    fn niche_maps_to_native_params() {
+        let input = Input {
+            query: Some("crispr".into()),
+            topic: Some("academic".into()),
+            recency: Some("2024-01-01".into()),
+            domains: Some(vec!["nature.com".into(), "-reddit.com".into()]),
+            ..Default::default()
+        };
+        let b = search_body(&input, 500).unwrap();
+        assert_eq!(b["category"], "research paper");
+        assert_eq!(b["startPublishedDate"], "2024-01-01");
+        assert_eq!(b["includeDomains"], json!(["nature.com"]));
+        assert_eq!(b["excludeDomains"], json!(["reddit.com"]));
+    }
+
+    #[test]
+    fn research_is_synchronous_deep() {
+        let b = research_body(&Input {
+            query: Some("q".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(b["type"], "deep-reasoning");
+        assert_eq!(b["contents"]["text"]["maxCharacters"], 8000);
     }
 }

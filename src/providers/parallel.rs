@@ -23,15 +23,11 @@ pub async fn call(
 }
 
 async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let q = input.need_query()?;
     let resp = client
         .post(format!("{base}/v1beta/search"))
         .header("x-api-key", key)
-        .json(&json!({
-            "objective": q,
-            "search_queries": [q],
-            "max_results": input.results(),
-        }))
+        .header("parallel-beta", "search-extract-2025-10-10")
+        .json(&search_body(input)?)
         .send()
         .await?;
     let v: Value = check("parallel", resp).await?.json().await?;
@@ -56,6 +52,37 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
         })
         .unwrap_or_default();
     Ok(Outcome::new(fmt_hits(&hits), 1))
+}
+
+// domains map to the native `source_policy`; topic/recency have no clean param, so they fold into
+// the objective via `rewrite_query`. Common (no-niche) case builds the exact body as before.
+fn search_body(input: &Input) -> Result<Value> {
+    let q = input.need_query()?;
+    if !super::niche::any(input) {
+        return Ok(json!({
+            "objective": q,
+            "search_queries": [q],
+            "max_results": input.results(),
+        }));
+    }
+    let folded = super::niche::rewrite_query(input);
+    let mut body = json!({
+        "objective": folded,
+        "search_queries": [folded],
+        "max_results": input.results(),
+    });
+    if let Some(domains) = &input.domains {
+        let (inc, exc) = super::niche::split_domains(domains);
+        let mut sp = json!({});
+        if !inc.is_empty() {
+            sp["include_domains"] = json!(inc);
+        }
+        if !exc.is_empty() {
+            sp["exclude_domains"] = json!(exc);
+        }
+        body["source_policy"] = sp;
+    }
+    Ok(body)
 }
 
 async fn research(
@@ -149,6 +176,37 @@ fn parse_balance(v: &Value) -> LiveBalance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niche_domains_to_source_policy() {
+        let input = Input {
+            query: Some("crispr".into()),
+            domains: Some(vec!["nature.com".into(), "-reddit.com".into()]),
+            recency: Some("week".into()),
+            ..Default::default()
+        };
+        let body = search_body(&input).unwrap();
+        assert_eq!(
+            body["source_policy"]["include_domains"],
+            json!(["nature.com"])
+        );
+        assert_eq!(
+            body["source_policy"]["exclude_domains"],
+            json!(["reddit.com"])
+        );
+        assert!(body["objective"].as_str().unwrap().contains("after:"));
+    }
+
+    #[test]
+    fn plain_search_body_unchanged() {
+        let input = Input {
+            query: Some("crispr".into()),
+            ..Default::default()
+        };
+        let body = search_body(&input).unwrap();
+        assert_eq!(body["objective"], "crispr");
+        assert!(body.get("source_policy").is_none());
+    }
 
     #[test]
     fn cents_to_searches() {

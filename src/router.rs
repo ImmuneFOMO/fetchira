@@ -7,8 +7,8 @@ use serde::Serialize;
 use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
 use crate::providers::{
-    self, Capability, Input, LiveBalance, LiveLimits, LiveQuota, ModelInfo, OutImage, Provider,
-    ProviderKind,
+    self, order_for, Capability, Input, LiveBalance, LiveLimits, LiveQuota, ModelInfo, OutImage,
+    Provider, ProviderKind,
 };
 use crate::proxy;
 use crate::usage::{period_key, DebugLog, RouteLog, Store};
@@ -224,7 +224,7 @@ impl Router {
         // The most recent failed attempt in this call, so a later success records the failover hop.
         let mut prev_fail: Option<(String, i64)> = None;
 
-        for &kind in providers::order(cap) {
+        for &kind in &order_for(cap, input.topic.as_deref()) {
             if matches!(forced, Some(f) if f != kind) {
                 continue;
             }

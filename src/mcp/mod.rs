@@ -33,6 +33,22 @@ pub struct SearchArgs {
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
     /// deep_research to heavy then expert); perplexity: "reasoning"/"deep research".
     pub mode: Option<String>,
+    /// Research niche: "web" (default), "news", or "academic" — steers to a fitting backend
+    /// (academic → scholar/exa papers, news → news sources).
+    pub topic: Option<String>,
+    /// Recency filter: "day"/"week"/"month"/"year" or an ISO date (e.g. "2024-01-01").
+    pub recency: Option<String>,
+    /// Restrict to these domains; prefix one with "-" to exclude it (e.g. ["nature.com","-reddit.com"]).
+    pub domains: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ResearchArgs {
+    #[serde(flatten)]
+    pub base: SearchArgs,
+    /// Depth: "standard" (default) or "deep" — deep is slower and may spend a paid balance
+    /// (exa deep-reasoning, parallel pro tier, grok heavy).
+    pub depth: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -130,24 +146,32 @@ fn route(
     (provider, None)
 }
 
+/// Build the shared `Input` from a search/research request (the niche knobs ride along for both).
+fn search_input(args: SearchArgs, session: Option<String>) -> Input {
+    Input {
+        query: args.query,
+        max_results: args.max_results,
+        session,
+        model: args.model,
+        mode: args.mode,
+        topic: args.topic,
+        recency: args.recency,
+        domains: args.domains,
+        ..Default::default()
+    }
+}
+
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (perplexity_web, gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing."
+        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (perplexity_web, gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing. Niche knobs: `topic` (web/news/academic), `recency`, `domains`."
     )]
     pub async fn search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (forced, session) = route(args.provider, args.session);
-        let input = Input {
-            query: args.query,
-            max_results: args.max_results,
-            session,
-            model: args.model,
-            mode: args.mode,
-            ..Default::default()
-        };
+        let (forced, session) = route(args.provider, args.session.clone());
+        let input = search_input(args, session);
         self.run(Capability::Search, input, forced).await
     }
 
@@ -166,21 +190,15 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research: long-running multi-source synthesis with citations (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). May take minutes. gemini_web and chatgpt_web both return a research PLAN plus a `session` first: pass that `session` with query \"start\" to run it, or with a revised research request to replace the plan. gemini returns the finished report in the same call; chatgpt then runs for ~5-30 min, so after \"start\" it hands back a `session` you call again to fetch the report (chatgpt uses its own research model — `model` is ignored). Pass a `session` to continue any web research thread."
+        description = "Deep research over multiple sources (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). exa/parallel and the web sessions do true multi-round research; tavily returns a single synthesized answer. May take minutes. gemini_web and chatgpt_web both return a research PLAN plus a `session` first: pass that `session` with query \"start\" to run it, or with a revised research request to replace the plan. gemini returns the finished report in the same call; chatgpt then runs for ~5-30 min, so after \"start\" it hands back a `session` you call again to fetch the report (chatgpt uses its own research model — `model` is ignored). Pass a `session` to continue any web research thread. Niche knobs: `topic` (web/news/academic), `recency`, `domains`, `depth` (standard/deep — deep is slower/pricier)."
     )]
     pub async fn deep_research(
         &self,
-        Parameters(args): Parameters<SearchArgs>,
+        Parameters(args): Parameters<ResearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (forced, session) = route(args.provider, args.session);
-        let input = Input {
-            query: args.query,
-            max_results: args.max_results,
-            session,
-            model: args.model,
-            mode: args.mode,
-            ..Default::default()
-        };
+        let (forced, session) = route(args.base.provider, args.base.session.clone());
+        let mut input = search_input(args.base, session);
+        input.depth = args.depth;
         self.run(Capability::DeepResearch, input, forced).await
     }
 

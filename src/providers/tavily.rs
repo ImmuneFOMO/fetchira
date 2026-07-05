@@ -28,11 +28,7 @@ async fn search(
     let resp = client
         .post(format!("{base}/search"))
         .bearer_auth(key)
-        .json(&json!({
-            "query": input.need_query()?,
-            "max_results": input.results(),
-            "search_depth": depth,
-        }))
+        .json(&body(input, depth, false)?)
         .send()
         .await?;
     let v: Value = check("tavily", resp).await?.json().await?;
@@ -48,8 +44,7 @@ async fn search(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let cost = if depth == "advanced" { 2 } else { 1 };
-    Ok(Outcome::new(fmt_hits(&hits), cost))
+    Ok(Outcome::new(fmt_hits(&hits), 1))
 }
 
 async fn research(
@@ -61,17 +56,44 @@ async fn research(
     let resp = client
         .post(format!("{base}/search"))
         .bearer_auth(key)
-        .json(&json!({
-            "query": input.need_query()?,
-            "search_depth": "advanced",
-            "include_answer": true,
-            "max_results": input.results(),
-        }))
+        .json(&body(input, "advanced", true)?)
         .send()
         .await?;
     let v: Value = check("tavily", resp).await?.json().await?;
     let answer = v["answer"].as_str().unwrap_or_default().to_string();
     Ok(Outcome::new(answer, 2))
+}
+
+// Shared /search body. Maps the niche knobs to Tavily's native params: topic=news, `days`
+// window, and include/exclude domains. Only set when the corresponding field is present.
+fn body(input: &Input, depth: &str, include_answer: bool) -> Result<Value> {
+    let mut b = serde_json::Map::new();
+    b.insert("query".into(), json!(input.need_query()?));
+    b.insert("max_results".into(), json!(input.results()));
+    b.insert("search_depth".into(), json!(depth));
+    if include_answer {
+        b.insert("include_answer".into(), json!(true));
+    }
+    if input.topic.as_deref() == Some("news") {
+        b.insert("topic".into(), json!("news"));
+    }
+    if let Some(days) = input
+        .recency
+        .as_deref()
+        .and_then(super::niche::recency_days)
+    {
+        b.insert("days".into(), json!(days));
+    }
+    if let Some(domains) = &input.domains {
+        let (inc, exc) = super::niche::split_domains(domains);
+        if !inc.is_empty() {
+            b.insert("include_domains".into(), json!(inc));
+        }
+        if !exc.is_empty() {
+            b.insert("exclude_domains".into(), json!(exc));
+        }
+    }
+    Ok(Value::Object(b))
 }
 
 async fn extract(
@@ -121,6 +143,37 @@ fn parse_balance(v: &Value) -> LiveBalance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niche_maps_native_params() {
+        let input = Input {
+            query: Some("crispr trials".into()),
+            topic: Some("news".into()),
+            recency: Some("week".into()),
+            domains: Some(vec!["nature.com".into(), "-reddit.com".into()]),
+            ..Default::default()
+        };
+        let b = body(&input, "advanced", true).unwrap();
+        assert_eq!(b["topic"], "news");
+        assert_eq!(b["days"], 7);
+        assert_eq!(b["include_domains"], json!(["nature.com"]));
+        assert_eq!(b["exclude_domains"], json!(["reddit.com"]));
+        assert_eq!(b["include_answer"], true);
+    }
+
+    #[test]
+    fn plain_search_body_unchanged() {
+        let input = Input {
+            query: Some("hello".into()),
+            ..Default::default()
+        };
+        let b = body(&input, "basic", false).unwrap();
+        assert_eq!(b["search_depth"], "basic");
+        assert!(b.get("topic").is_none());
+        assert!(b.get("days").is_none());
+        assert!(b.get("include_domains").is_none());
+        assert!(b.get("include_answer").is_none());
+    }
 
     #[test]
     fn parses_usage() {
