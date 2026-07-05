@@ -457,6 +457,8 @@ pub struct LiveQuota {
 pub struct LiveBalance {
     pub remaining: i64,
     pub total: i64,
+    /// Real dollar balance for top-up $ providers (exa/parallel/steel); None for credit providers.
+    pub usd: Option<f64>,
 }
 
 /// One tool/feature's live allowance for the account's tier (e.g. deep_research, image_gen).

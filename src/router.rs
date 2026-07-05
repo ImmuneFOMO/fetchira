@@ -60,6 +60,9 @@ pub struct UsageView {
     /// Live per-tier tool/model allowances (chatgpt_web), attached to a provider's main view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<LiveLimits>,
+    /// Real dollar balance for top-up $ providers (exa/parallel/steel); None for credit providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd: Option<f64>,
 }
 
 pub struct Router {
@@ -549,6 +552,7 @@ impl Router {
         v.remaining = bal.remaining.max(0);
         v.used = (v.quota - v.remaining).max(0);
         v.exhausted = v.remaining <= 0;
+        v.usd = bal.usd;
     }
 
     /// Re-save a `balance_session` account's stored cookies with the rolling token the dashboard
@@ -640,6 +644,7 @@ impl Router {
             proxy: proxy.to_string(),
             window_secs: None,
             limits: None,
+            usd: None,
         })
     }
 }
@@ -972,6 +977,7 @@ mod tests {
             proxy: "direct".into(),
             window_secs: None,
             limits: None,
+            usd: None,
         };
         let sheet = provider_sheet(ProviderKind::Serper, &[v]);
         assert!(sheet.contains("2400/2500 left"));

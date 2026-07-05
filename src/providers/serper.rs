@@ -106,6 +106,7 @@ fn parse_balance(v: &Value) -> LiveBalance {
     LiveBalance {
         remaining,
         total: remaining.max(2500),
+        usd: None,
     }
 }
 

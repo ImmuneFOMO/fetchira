@@ -158,10 +158,12 @@ pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String,
 // ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
 // draining bar, add it if the flat gauge proves confusing.
 fn parse_balance(v: &Value) -> LiveBalance {
-    let searches = (v["orbCreditsInCents"].as_f64().unwrap_or(0.0) / 0.7) as i64;
+    let cents = v["orbCreditsInCents"].as_f64().unwrap_or(0.0);
+    let searches = (cents / 0.7) as i64;
     LiveBalance {
         remaining: searches,
         total: searches,
+        usd: Some(cents / 100.0),
     }
 }
 

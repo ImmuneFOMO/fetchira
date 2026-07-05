@@ -170,6 +170,7 @@ fn parse_balance(v: &Value) -> LiveBalance {
     LiveBalance {
         remaining,
         total: d["plan_credits"].as_i64().unwrap_or(0).max(remaining),
+        usd: None,
     }
 }
 

@@ -124,6 +124,7 @@ fn parse_balance(v: &Value) -> LiveBalance {
     LiveBalance {
         remaining: reads,
         total: reads,
+        usd: Some(cents as f64 / 100.0),
     }
 }
 

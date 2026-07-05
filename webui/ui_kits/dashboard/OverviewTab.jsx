@@ -97,7 +97,7 @@ function CapabilityMatrix() {
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{open ? '− hide' : '+ show'}</span>
       </button>
       {open && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14, alignItems: 'start' }}>
           {caps.map((c) => (
             <Card key={c.provider} pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>{c.provider}</span>
@@ -128,9 +128,20 @@ function CapabilityMatrix() {
 // One limit = its own cube bar (each mode/model/feature has its own quota + reset cadence).
 // Fuel-gauge fill: the bar shows what's LEFT (full when fresh), so we feed the meter `remaining`
 // as its fill and force the colour from the real remaining (green → amber → red as it drains).
-function LimitRow({ label, used, quota, window, resetAt, locked, off, approx }) {
+function LimitRow({ label, used, quota, window, resetAt, locked, off, approx, usd }) {
   const q = quota || 0;
   const remaining = Math.max(0, q - (used || 0));
+  // Top-up $ providers have no ceiling to drain — show the real balance, not a fuel gauge.
+  if (usd != null) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)' }}>{label === 'quota' ? 'balance' : label}</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+          <b style={{ color: 'var(--text-hi)' }}>${usd.toFixed(2)}</b> · ≈ {remaining.toLocaleString()} left
+        </span>
+      </div>
+    );
+  }
   const remFrac = q > 0 ? remaining / q : 0;
   const st = off || locked ? 'off' : remaining <= 0 ? 'out' : remFrac < 0.15 ? 'low' : 'ok';
   const meta = locked ? 'locked' : [window, fmtReset(resetAt)].filter(Boolean).join(' · ');
@@ -300,7 +311,7 @@ function OverviewTab() {
         {groups.map((g) => (
           <section key={g.id}>
             <GroupHeader label={g.label} count={`${g.providers.length} ${g.providers.length === 1 ? 'provider' : 'providers'}`} />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14, alignItems: 'start' }}>
               {g.providers.map((p) => <FxProviderCard {...p} key={p.name} />)}
             </div>
           </section>

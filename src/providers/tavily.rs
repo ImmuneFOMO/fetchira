@@ -140,6 +140,7 @@ fn parse_balance(v: &Value) -> LiveBalance {
     LiveBalance {
         remaining: (total - used).max(0),
         total,
+        usd: None,
     }
 }
 

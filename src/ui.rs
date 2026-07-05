@@ -714,6 +714,9 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         e.quota += v.quota;
         e.accounts += 1;
         e.window_secs = e.window_secs.or(v.window_secs);
+        if let Some(u) = v.usd {
+            e.usd = Some(e.usd.unwrap_or(0.0) + u);
+        }
         if let Some(m) = inner.meta.get(&v.label) {
             if m.is_web {
                 e.web = true;
@@ -866,6 +869,9 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                     // Estimate providers (a $/token→ops conversion) show "≈" — the count isn't exact.
                     if approx_quota(name) {
                         q["approx"] = json!(true);
+                        if let Some(usd) = a.usd {
+                            q["usd"] = json!(usd);
+                        }
                     }
                     bars.push(q);
                 }
@@ -1065,6 +1071,8 @@ struct Agg {
     dr_window_secs: Option<i64>,
     dr_period: String,
     dr_reset_after: Option<String>,
+    /// Summed real $ balance for top-up providers (exa/parallel/steel); None for credit providers.
+    usd: Option<f64>,
 }
 
 impl Agg {
@@ -1083,6 +1091,7 @@ impl Agg {
             dr_window_secs: None,
             dr_period: String::new(),
             dr_reset_after: None,
+            usd: None,
         }
     }
 }
