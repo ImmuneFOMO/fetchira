@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -63,7 +63,7 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
         input.model.as_deref(),
         search,
         input.session.as_deref(),
-        input.file.as_deref(),
+        &input.file,
         &query,
     )
     .await;
@@ -80,7 +80,7 @@ async fn drive(
     model: Option<&str>,
     search: bool,
     session: Option<&str>,
-    file: Option<&Path>,
+    files: &[PathBuf],
     query: &str,
 ) -> Result<Outcome> {
     // Deep research has a plan step: kickoff drafts a plan (parked), then `dr|plan|<cid>` + "start"
@@ -146,8 +146,8 @@ async fn drive(
         enable_tool(&mut ws, "web search").await?;
     }
 
-    if let Some(path) = file {
-        attach_file(&mut ws, path).await?;
+    if !files.is_empty() {
+        attach_file(&mut ws, files).await?;
     }
 
     if send_prompt(&mut ws, query).await? != "sent" {
@@ -226,10 +226,13 @@ fn cdp_cookies(cookies: &[Cookie]) -> Vec<Value> {
         .collect()
 }
 
-/// Attach a local file to the composer over CDP (`DOM.setFileInputFiles` on the hidden file input),
+/// Attach local files to the composer over CDP (`DOM.setFileInputFiles` on the hidden file input),
 /// then wait for the upload to settle — ChatGPT rejects a send while an attachment is still uploading.
-async fn attach_file(ws: &mut Ws, path: &Path) -> Result<()> {
-    let abs = path.to_string_lossy().to_string();
+async fn attach_file(ws: &mut Ws, files: &[PathBuf]) -> Result<()> {
+    let abs: Vec<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     let doc = cmd(ws, "DOM.getDocument", json!({"depth": -1, "pierce": true})).await?;
     let root = doc
         .pointer("/root/nodeId")
@@ -248,7 +251,7 @@ async fn attach_file(ws: &mut Ws, path: &Path) -> Result<()> {
     cmd(
         ws,
         "DOM.setFileInputFiles",
-        json!({"files": [abs], "nodeId": node}),
+        json!({"files": abs, "nodeId": node}),
     )
     .await?;
     // The send button stays disabled until the attachment finishes uploading; since the prompt text

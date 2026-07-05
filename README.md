@@ -38,7 +38,7 @@ manage accounts without touching a config file.
 | **read** | `read` | firecrawl (auto-escalates to a headless browser if the plain read is empty) |
 | **deep research** | `deep_research` | parallel → exa → tavily → gemini_web → grok_web → chatgpt_web |
 | **image** | `create_image` | grok_web → gemini_web → chatgpt_web |
-| **file Q&A** | `search` / `deep_research` + `file` | attach a local file to a grok / gemini / chatgpt turn and ask about it |
+| **file Q&A** | `search` / `deep_research` + `file` | attach local files to a grok / gemini / chatgpt turn and ask about them |
 | **browser** | `browser` | steel |
 | **usage** | `usage` | live balance + per-tier limits + model/mode catalog, and a per-provider capability sheet |
 
@@ -259,8 +259,8 @@ on its heavy tier (no plan step), and exa / parallel do true multi-round researc
 
 **Images and file Q&A.** `create_image` generates from a text prompt — grok and gemini render
 in-process over HTTP, chatgpt drives the browser; it returns the image bytes, not a link. To ask
-about a local file or image, pass its path as `file` on `search` or `deep_research` (defaults to
-grok). Both take an optional `provider` and fail over like everything else.
+about local files or images, pass their paths as `file` (an array) on `search` or `deep_research`
+(defaults to grok). Both take an optional `provider` and fail over like everything else.
 
 **Live limits.** `usage` polls each web session for its real per-tier limits and the model/mode
 catalog it can select (with thinking levels) — a mode locked by your subscription (e.g. Grok

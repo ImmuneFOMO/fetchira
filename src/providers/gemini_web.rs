@@ -85,7 +85,7 @@ pub async fn call(
     // and the file turn fails with Bard 1100. Chat/deep-research work fine without it, but for an
     // attachment a token-less session is unusable — fail with a retryable error so the router fails
     // over to a sibling gemini session that still carries the token.
-    if input.file.is_some() && at.is_empty() {
+    if !input.file.is_empty() && at.is_empty() {
         return Err(Error::Provider {
             provider: "gemini_web",
             status: 0,
@@ -116,14 +116,18 @@ pub async fn call(
             a[55] = json!([[1]]);
         }
     }
-    // Optional attachment: upload (content-push single multipart, like HanaokaYuzu's working
-    // browserless client) and reference it in message_content[3] = [[[id], name]].
-    if let Some(p) = &input.file {
-        let (name, _mime, bytes) = super::read_attachment(p)?;
-        let id = upload(base, client, &bytes).await?;
+    // Optional attachments: upload each (content-push single multipart, like HanaokaYuzu's working
+    // browserless client) and reference them in message_content[3] = [[[id], name], ...].
+    if !input.file.is_empty() {
+        let mut refs = Vec::with_capacity(input.file.len());
+        for p in &input.file {
+            let (name, _mime, bytes) = super::read_attachment(p)?;
+            let id = upload(base, client, &bytes).await?;
+            refs.push(json!([[id], name]));
+        }
         if let Value::Array(a) = &mut inner_val {
             if let Some(Value::Array(mc)) = a.get_mut(0) {
-                mc[3] = json!([[[id], name]]);
+                mc[3] = json!(refs);
             }
         }
     }

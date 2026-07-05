@@ -62,11 +62,11 @@ pub async fn call(
     };
     let path = url.strip_prefix(base).unwrap_or(&url);
 
-    // Optional attachment: upload first, reference by id. grok caps at 4 per turn.
-    let file_ids: Vec<String> = match &input.file {
-        Some(p) => vec![upload(base, client, &p.to_string_lossy()).await?],
-        None => Vec::new(),
-    };
+    // Optional attachments: upload each, reference by id. grok caps at 4 per turn.
+    let mut file_ids = Vec::new();
+    for p in &input.file {
+        file_ids.push(upload(base, client, &p.to_string_lossy()).await?);
+    }
 
     let body = json!({
         "temporary": false,

@@ -40,9 +40,9 @@ pub struct SearchArgs {
     pub recency: Option<String>,
     /// Restrict to these domains; prefix one with "-" to exclude it (e.g. ["nature.com","-reddit.com"]).
     pub domains: Option<Vec<String>>,
-    /// Absolute path to a local file/image to attach and ask about (uploaded to the web session, then
-    /// referenced in the turn). Defaults to grok_web when no `provider` is forced. Web providers only.
-    pub file: Option<String>,
+    /// Absolute paths to local files/images to attach and ask about (uploaded to the web session,
+    /// then referenced in the turn). Defaults to grok_web when no `provider` is forced. Web providers only.
+    pub file: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -157,7 +157,12 @@ fn search_input(args: SearchArgs, session: Option<String>) -> Input {
         topic: args.topic,
         recency: args.recency,
         domains: args.domains,
-        file: args.file.map(std::path::PathBuf::from),
+        file: args
+            .file
+            .unwrap_or_default()
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
         ..Default::default()
     }
 }
@@ -165,7 +170,7 @@ fn search_input(args: SearchArgs, session: Option<String>) -> Input {
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing. Attach a local file with `file` (absolute path) to ask about it — defaults to grok_web. Niche knobs: `topic` (web/news/academic), `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
+        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing. Attach one or more local files with `file` (array of absolute paths) to ask about them — defaults to grok_web. Niche knobs: `topic` (web/news/academic), `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn search(
         &self,
@@ -174,7 +179,7 @@ impl Fetchira {
         let (forced, session) = route(args.provider, args.session.clone());
         let input = search_input(args, session);
         // An attachment needs a web session that can upload; grok_web is the default carrier.
-        let forced = forced.or_else(|| input.file.is_some().then_some(ProviderKind::GrokWeb));
+        let forced = forced.or_else(|| (!input.file.is_empty()).then_some(ProviderKind::GrokWeb));
         self.run(Capability::Search, input, forced).await
     }
 
