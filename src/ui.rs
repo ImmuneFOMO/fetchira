@@ -650,8 +650,10 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             last_seen.insert(f.as_str(), r);
         }
     }
+    // Newest first: the freshest route sits at the top so new activity shows without scrolling
+    // (`recent_routes` returns oldest-first, so take the last 50 and reverse).
     let start = routes.len().saturating_sub(50);
-    let log: Vec<Value> = routes[start..].iter().map(route_to_entry).collect();
+    let log: Vec<Value> = routes[start..].iter().rev().map(route_to_entry).collect();
 
     // Accounts table + status counts for the summary pills.
     let (mut healthy, mut needs_login, mut exhausted) = (0i64, 0i64, 0i64);

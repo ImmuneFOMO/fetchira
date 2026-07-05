@@ -265,7 +265,8 @@ function LiveLog() {
         let batch;
         try { batch = JSON.parse(e.data); } catch (err) { return; }
         if (!Array.isArray(batch) || !batch.length) return;
-        setLines((prev) => [...prev.slice(-40), ...batch.map((l) => ({ ...l, _id: idRef.current++, fresh: true }))]);
+        // Newest on top: prepend the (reversed) batch and keep the freshest 40.
+        setLines((prev) => [...batch.slice().reverse().map((l) => ({ ...l, _id: idRef.current++, fresh: true })), ...prev].slice(0, 40));
       };
     } catch (err) { /* no SSE when opened as a static file */ }
     return () => { if (es) es.close(); };
@@ -274,7 +275,7 @@ function LiveLog() {
   const scrollRef = React.useRef(null);
   React.useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) el.scrollTop = 0; // newest is at the top — keep it pinned there
   }, [lines]);
 
   return (
