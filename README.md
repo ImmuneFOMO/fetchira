@@ -10,8 +10,8 @@ scrape tier, and spends them so you don't have to think about it.
 ## What it is
 
 A handful of services give away a real amount of free web search every month — Serper,
-Tavily, Exa, Parallel for search, Jina and Firecrawl for reading pages, Steel for headless
-browsing. Your logged-in Gemini, Perplexity, Grok and ChatGPT web sessions add even more —
+Tavily, Exa, Parallel for search, Firecrawl for reading pages, Steel for headless
+browsing. Your logged-in Gemini, Grok and ChatGPT web sessions add even more —
 search, multi-step deep research, image generation and file Q&A. Used together they cover a
 lot of an agent's research, for free.
 
@@ -34,13 +34,13 @@ manage accounts without touching a config file.
 
 | Capability | The agent calls | fetchira routes to (in preference order) |
 |---|---|---|
-| **search** | `search` | serper → tavily → exa → parallel → perplexity_web → gemini_web → grok_web → chatgpt_web |
-| **read** | `read` | jina → firecrawl |
-| **deep research** | `deep_research` | parallel → exa → tavily → perplexity_web → gemini_web → grok_web → chatgpt_web |
+| **search** | `search` | serper → tavily → exa → parallel → gemini_web → grok_web → chatgpt_web |
+| **read** | `read` | firecrawl (auto-escalates to a headless browser if the plain read is empty) |
+| **deep research** | `deep_research` | parallel → exa → tavily → gemini_web → grok_web → chatgpt_web |
 | **image** | `create_image` | grok_web → gemini_web → chatgpt_web |
-| **file Q&A** | `upload` | grok_web / gemini_web / chatgpt_web (attach a local file, ask about it) |
+| **file Q&A** | `search` / `deep_research` + `file` | attach a local file to a grok / gemini / chatgpt turn and ask about it |
 | **browser** | `browser` | steel |
-| **usage** | `usage` | remaining quota + live per-tier limits and model/mode catalog per account |
+| **usage** | `usage` | live balance + per-tier limits + model/mode catalog, and a per-provider capability sheet |
 
 - **Quota-aware routing.** Every call goes to the account with the most free quota left for
   that capability. A `429`/`402` marks that budget exhausted for the period and the router
@@ -52,10 +52,18 @@ manage accounts without touching a config file.
   them by remaining quota.
 - **A sticky proxy per account.** Give each account its own outbound IP (`proxy = "pool"` from
   a Webshare pool, or a pinned URL) so multiple free accounts don't share one address.
-- **Web sessions, not just API keys.** gemini_web / perplexity_web / grok_web / chatgpt_web
-  authenticate with your real logged-in browser cookies and return a synthesized answer with
-  sources — plus multi-step Deep Research (Gemini and ChatGPT), image generation and file Q&A.
-  `usage` reports each session's live per-tier limits and its selectable model/mode catalog. See
+- **Real balances, live.** Where a provider exposes it, fetchira reads the actual figure from the
+  account instead of guessing from a nominal cap — credits for serper / tavily / firecrawl, a real
+  dollar balance for exa / parallel / steel (shown as `$balance · ≈N requests`).
+- **Niche research, not just keywords.** `search` and `deep_research` take `topic` (web / news /
+  academic), `recency`, `domains` (include, or `-` to exclude) and `depth` — each mapped to the
+  backend's native filter (Google News / Scholar, exa categories, date ranges) or folded into the
+  query. `usage(provider=…)` returns that backend's full sheet: its niches, `mode` escape hatches,
+  and ready-to-copy example calls.
+- **Web sessions, not just API keys.** gemini_web / grok_web / chatgpt_web authenticate with your
+  real logged-in browser cookies and return a synthesized answer with sources — plus multi-step
+  Deep Research (Gemini, Grok and ChatGPT), image generation and file Q&A. `usage` reports each
+  session's live per-tier limits and its selectable model/mode catalog. See
   [Web sessions](#web-sessions) below.
 - **A local dashboard.** Live quota, a streaming route log, and full account management in the
   browser — covered next.
@@ -80,7 +88,9 @@ to the browser (keys show as `•••• key set`, proxy credentials are maske
 ![Accounts tab](docs/accounts.png)
 
 **Activity** is the full route log with filters, per-provider health, and the failover story
-written out — `exa-1 429 → tavily-1`, last success and last error per provider.
+written out — `exa-1 429 → tavily-1`, last success and last error per provider. Click any call to
+open what it sent and got back; the **Debug** tab keeps that same per-request detail with the raw
+HTTP — headers and body, secrets redacted — for when something needs tracing.
 
 ![Activity tab](docs/activity.png)
 
@@ -203,12 +213,11 @@ so the agent knows when and how to use the tools.
 
 ## Web sessions
 
-gemini_web, perplexity_web, grok_web and chatgpt_web use your **logged-in browser cookies** instead
+gemini_web, grok_web and chatgpt_web use your **logged-in browser cookies** instead
 of an API key, via a Chrome-impersonating client. One-time setup per provider:
 
 ```sh
-fetchira login perplexity_web   # opens a browser; log in, then it captures the session
-fetchira login gemini_web
+fetchira login gemini_web   # opens a browser; log in, then it captures the session
 fetchira login grok_web
 fetchira login chatgpt_web
 ```
@@ -242,15 +251,16 @@ search { "query": "...", "provider": "gemini_web" }                       // -> 
 search { "query": "follow-up", "session": "gemini_web:c_…,r_…" }          // continues the chat
 ```
 
-**Deep Research** (Gemini and ChatGPT) runs the real multi-step flow — `deep_research` returns a
-plan plus a `session`; send `"start"` on that session to run it (or a revised request to replace the
+**Deep Research.** Gemini and ChatGPT run the real plan-based flow — `deep_research` returns a plan
+plus a `session`; send `"start"` on that session to run it (or a revised request to replace the
 plan). Gemini returns the report in the same call (~1-3 min); ChatGPT then runs for ~5-30 min, so it
-hands back a `session` you call again to fetch the finished report.
+hands back a `session` you call again to fetch the finished report. Grok runs deep research directly
+on its heavy tier (no plan step), and exa / parallel do true multi-round research over the API.
 
 **Images and file Q&A.** `create_image` generates from a text prompt — grok and gemini render
-in-process over HTTP, chatgpt drives the browser; it returns the image bytes, not a link. `upload`
-attaches a local file or image to a turn and asks about it. Both take an optional `provider` and fail
-over like everything else.
+in-process over HTTP, chatgpt drives the browser; it returns the image bytes, not a link. To ask
+about a local file or image, pass its path as `file` on `search` or `deep_research` (defaults to
+grok). Both take an optional `provider` and fail over like everything else.
 
 **Live limits.** `usage` polls each web session for its real per-tier limits and the model/mode
 catalog it can select (with thinking levels) — a mode locked by your subscription (e.g. Grok
@@ -273,8 +283,10 @@ Caveats, inherent to reverse-engineered web access:
 
 ## Tuning quota
 
-The per-account numbers are nominal defaults — set them in `fetchira.toml` to match your real
-plan. Web providers track chat and deep research on separate budgets:
+API providers (serper, tavily, firecrawl, exa, parallel, steel) report their real remaining balance,
+so their numbers are live and need no tuning. The web sessions have no balance endpoint, so their
+per-account numbers are nominal defaults you set in `fetchira.toml` to match your plan — tracked as
+separate chat and deep-research budgets:
 
 ```toml
 [[account]]
