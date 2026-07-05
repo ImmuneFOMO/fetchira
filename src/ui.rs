@@ -271,12 +271,18 @@ async fn api_debug_one(
         return resp;
     }
     match st.store.debug_get(id).await {
-        Ok(Some(r)) => Json(json!({
-            "id": r.id, "ts": r.ts, "capability": r.capability, "provider": r.provider,
-            "label": r.label, "status": r.status, "latencyMs": r.latency_ms,
-            "request": r.request, "response": r.response, "error": r.error,
-        }))
-        .into_response(),
+        Ok(Some(r)) => {
+            let trace = r.http_trace.as_deref().map(|t| {
+                serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::String(t.to_string()))
+            });
+            Json(json!({
+                "id": r.id, "ts": r.ts, "capability": r.capability, "provider": r.provider,
+                "label": r.label, "status": r.status, "latencyMs": r.latency_ms,
+                "request": r.request, "response": r.response, "error": r.error,
+                "httpTrace": trace,
+            }))
+            .into_response()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -415,7 +421,7 @@ async fn api_test(
 /// and shows up in the route log).
 fn test_call(kind: ProviderKind) -> (Capability, Input) {
     match kind {
-        ProviderKind::Jina | ProviderKind::Firecrawl => (
+        ProviderKind::Firecrawl => (
             Capability::Read,
             Input {
                 url: Some("https://example.com".to_string()),
@@ -445,7 +451,7 @@ fn parse_kind(s: &str) -> Option<ProviderKind> {
 
 fn route_to_entry(r: &RouteRow) -> Value {
     let time = r.ts.get(11..19).unwrap_or("").to_string();
-    if let Some(from) = &r.fail_from {
+    let mut entry = if let Some(from) = &r.fail_from {
         json!({
             "time": time, "capability": r.capability,
             "failover": { "from": from, "code": r.fail_code, "to": r.label },
@@ -456,7 +462,14 @@ fn route_to_entry(r: &RouteRow) -> Value {
             "time": time, "capability": r.capability, "provider": r.provider,
             "account": acct_num(&r.label), "status": r.status, "latencyMs": r.latency_ms,
         })
+    };
+    if !r.niche.is_empty() {
+        entry["niche"] = json!(r.niche);
     }
+    if let Some(id) = r.debug_id {
+        entry["debugId"] = json!(id);
+    }
+    entry
 }
 
 /// A debug-feed row: metadata + small request inline, plus a one-line preview of the body. The
@@ -537,6 +550,88 @@ fn mime_for(path: &str) -> &'static str {
 }
 
 /// Build the `window.FX` shape the dashboard expects, from the live usage + route log.
+/// One model/mode summed across a provider's accounts for the Overview tile.
+struct AggModel {
+    id: String,
+    name: String,
+    levels: Vec<String>,
+    remaining: Option<i64>,
+    total: Option<i64>,
+    window_secs: Option<i64>,
+    reset_after: Option<String>,
+    // Locked only if EVERY account has it locked; one unlocked account makes it usable.
+    all_locked: bool,
+}
+
+impl AggModel {
+    fn seed(m: &crate::providers::ModelInfo) -> Self {
+        Self {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            levels: m.levels.clone(),
+            remaining: None,
+            total: None,
+            window_secs: m.window_secs,
+            reset_after: m.reset_after.clone(),
+            all_locked: true,
+        }
+    }
+
+    fn merge(&mut self, m: &crate::providers::ModelInfo) {
+        self.remaining = add_opt(self.remaining, m.remaining);
+        self.total = add_opt(self.total, m.total);
+        self.window_secs = self.window_secs.or(m.window_secs);
+        if self.reset_after.is_none() {
+            self.reset_after = m.reset_after.clone();
+        }
+        if !m.locked {
+            self.all_locked = false;
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "levels": self.levels,
+            "remaining": self.remaining,
+            "total": self.total,
+            "windowSecs": self.window_secs,
+            "resetAfter": self.reset_after,
+            "locked": self.all_locked,
+        })
+    }
+}
+
+/// Sum two optional counts, treating `None` as "no number" (not zero).
+fn add_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), None) => Some(x),
+        (None, y) => y,
+    }
+}
+
+/// Serialize a provider's live model catalog for the dashboard (camelCase keys, matching the
+/// hand-built limits JSON). A locked entry (`total: 0`) renders as 0/0.
+fn models_json(models: &[crate::providers::ModelInfo]) -> Vec<Value> {
+    models
+        .iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "name": m.name,
+                "levels": m.levels,
+                "remaining": m.remaining,
+                "total": m.total,
+                "windowSecs": m.window_secs,
+                "resetAfter": m.reset_after,
+                "locked": m.locked,
+            })
+        })
+        .collect()
+}
+
 async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
     let views = inner.router.usage_snapshot().await?;
 
@@ -553,7 +648,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
 
     // Recent route history (live log + per-account "last seen" + sparklines). Empty until an
     // MCP server built from this code records calls into the shared usage.db.
-    let routes = store.recent_routes(120).await.unwrap_or_default();
+    let routes = store.recent_routes(1000).await.unwrap_or_default();
     let mut last_seen: HashMap<&str, &RouteRow> = HashMap::new();
     for r in &routes {
         last_seen.insert(r.label.as_str(), r);
@@ -561,8 +656,10 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             last_seen.insert(f.as_str(), r);
         }
     }
+    // Newest first: the freshest route sits at the top so new activity shows without scrolling
+    // (`recent_routes` returns oldest-first, so take the last 50 and reverse).
     let start = routes.len().saturating_sub(50);
-    let log: Vec<Value> = routes[start..].iter().map(route_to_entry).collect();
+    let log: Vec<Value> = routes[start..].iter().rev().map(route_to_entry).collect();
 
     // Accounts table + status counts for the summary pills.
     let (mut healthy, mut needs_login, mut exhausted) = (0i64, 0i64, 0i64);
@@ -590,6 +687,17 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "key": key,
                 "web": web,
                 "loggedIn": logged,
+                "limits": v.limits.as_ref().map(|ll| json!({
+                    "tier": ll.tier,
+                    "features": ll.features.iter().map(|f| json!({
+                        "feature": f.feature,
+                        "remaining": f.remaining,
+                        "total": f.total,
+                        "windowSecs": f.window_secs,
+                        "resetAfter": f.reset_after,
+                    })).collect::<Vec<_>>(),
+                    "models": models_json(&ll.models),
+                })),
             })
         })
         .collect();
@@ -606,6 +714,9 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         e.quota += v.quota;
         e.accounts += 1;
         e.window_secs = e.window_secs.or(v.window_secs);
+        if let Some(u) = v.usd {
+            e.usd = Some(e.usd.unwrap_or(0.0) + u);
+        }
         if let Some(m) = inner.meta.get(&v.label) {
             if m.is_web {
                 e.web = true;
@@ -616,6 +727,72 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             e.has_dr = true;
             e.dr_used += d.used;
             e.dr_quota += d.quota;
+            e.dr_window_secs = e.dr_window_secs.or(d.window_secs);
+            if e.dr_period.is_empty() {
+                e.dr_period = d.period.clone();
+            }
+        }
+        // The absolute deep-research reset (chatgpt reports one); grok is a rolling window instead.
+        if e.dr_reset_after.is_none() {
+            e.dr_reset_after = v
+                .limits
+                .as_ref()
+                .and_then(|l| l.feature("deep_research"))
+                .and_then(|f| f.reset_after.clone());
+        }
+    }
+
+    // Per-provider model catalog, SUMMED across the provider's accounts (like the quota tiles):
+    // per model id remaining/total add up, and it stays locked only if every account has it locked.
+    let mut cat_by_provider: HashMap<&str, (Vec<String>, HashMap<String, AggModel>)> =
+        HashMap::new();
+    for v in &mains {
+        let Some(ll) = &v.limits else { continue };
+        let (order, by_id) = cat_by_provider.entry(v.provider).or_default();
+        for m in &ll.models {
+            by_id
+                .entry(m.id.clone())
+                .or_insert_with(|| {
+                    order.push(m.id.clone());
+                    AggModel::seed(m)
+                })
+                .merge(m);
+        }
+    }
+    let catalogs: HashMap<&str, Vec<Value>> = cat_by_provider
+        .iter()
+        .map(|(prov, (order, by_id))| {
+            let models = order
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .map(AggModel::to_json)
+                .collect();
+            (*prov, models)
+        })
+        .collect();
+
+    // Other capability limits worth surfacing (create image, file upload). These report a remaining
+    // count + reset but no ceiling, so they render as info rows, not fuel-gauge bars. Summed by name.
+    let mut feats_by_provider: HashMap<&str, Vec<Value>> = HashMap::new();
+    for v in &mains {
+        let Some(ll) = &v.limits else { continue };
+        let e = feats_by_provider.entry(v.provider).or_default();
+        for (name, label) in [
+            ("image_gen", "create image"),
+            ("file_upload", "file upload"),
+        ] {
+            let Some(f) = ll.feature(name) else { continue };
+            match e.iter_mut().find(|r| r["label"] == label) {
+                Some(row) => {
+                    row["remaining"] =
+                        json!(row["remaining"].as_i64().unwrap_or(0) + f.remaining.max(0));
+                }
+                None => e.push(json!({
+                    "label": label,
+                    "remaining": f.remaining,
+                    "resetAt": f.reset_after,
+                })),
+            }
         }
     }
 
@@ -651,8 +828,68 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                     tile["webSession"] = json!(true);
                     tile["loggedIn"] = json!(a.logged);
                 }
+                // Each limit becomes its own cube bar (with its real window + reset); count-less
+                // models (chatgpt/gemini) fall to a text catalog line.
+                let models = catalogs.get(name).cloned().unwrap_or_default();
+                let mut bars: Vec<Value> = Vec::new();
+                let mut catalog: Vec<Value> = Vec::new();
+                let mut has_model_bar = false;
+                for m in &models {
+                    if m["total"].is_i64() && m["remaining"].is_i64() {
+                        has_model_bar = true;
+                        let total = m["total"].as_i64().unwrap_or(0);
+                        let rem = m["remaining"].as_i64().unwrap_or(0);
+                        bars.push(limit_bar(
+                            m["name"].as_str().unwrap_or(""),
+                            (total - rem).max(0),
+                            total,
+                            m["windowSecs"].as_i64(),
+                            None,
+                            None,
+                            m["locked"].as_bool().unwrap_or(false),
+                        ));
+                    } else {
+                        catalog.push(json!({ "name": m["name"], "levels": m["levels"] }));
+                    }
+                }
+                // Account-level quota bar for API providers only — that's their real key quota. A web
+                // provider's account counter is just a soft failover placeholder; showing it as a
+                // "messages/search" limit misleads (chatgpt caps are per-model, gemini has none), so
+                // web cards show only real live limits (grok modes, deep research) + the model catalog.
+                if !has_model_bar && !a.web {
+                    let mut q = limit_bar(
+                        "quota",
+                        a.used,
+                        a.quota,
+                        a.window_secs,
+                        Some(&a.period),
+                        None,
+                        false,
+                    );
+                    // Estimate providers (a $/token→ops conversion) show "≈" — the count isn't exact.
+                    if approx_quota(name) {
+                        q["approx"] = json!(true);
+                        if let Some(usd) = a.usd {
+                            q["usd"] = json!(usd);
+                        }
+                    }
+                    bars.push(q);
+                }
                 if a.has_dr {
-                    tile["dr"] = json!({ "used": a.dr_used, "quota": a.dr_quota });
+                    bars.push(limit_bar(
+                        "deep research",
+                        a.dr_used,
+                        a.dr_quota,
+                        a.dr_window_secs,
+                        Some(&a.dr_period),
+                        a.dr_reset_after.as_deref(),
+                        a.dr_quota == 0,
+                    ));
+                }
+                tile["limits"] = json!(bars);
+                tile["catalog"] = json!(catalog);
+                if let Some(fs) = feats_by_provider.get(name) {
+                    tile["features"] = json!(fs);
                 }
                 tile
             })
@@ -732,6 +969,79 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
+    // One pass over the route log: dead-end tally (ops that ran out with no success — ~0 by design)
+    // and per-account op rate for the burn radar.
+    let mut ran_out = 0i64;
+    let mut op_rate: HashMap<&str, (i64, i64, i64)> = HashMap::new(); // count, first_epoch, last_epoch
+    for r in &routes {
+        if r.status == 429 || r.status == 402 {
+            ran_out += 1;
+        }
+        if let Ok(d) = DateTime::parse_from_rfc3339(&r.ts) {
+            let secs = d.timestamp();
+            let e = op_rate.entry(r.label.as_str()).or_insert((0, secs, secs));
+            e.0 += 1;
+            e.1 = e.1.min(secs);
+            e.2 = e.2.max(secs);
+        }
+    }
+
+    // Burn radar: the accounts closest to empty, with their recent op/hr slope. Web-session
+    // placeholders (no real ceiling) count as full so they don't crowd out real low balances.
+    let empty_frac = |v: &&crate::router::UsageView| -> f64 {
+        if v.quota > 0 {
+            v.remaining as f64 / v.quota as f64
+        } else {
+            1.0
+        }
+    };
+    let mut burn_ord = mains.clone();
+    burn_ord.sort_by(|a, b| {
+        empty_frac(a)
+            .partial_cmp(&empty_frac(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let burn: Vec<Value> = burn_ord
+        .iter()
+        .take(5)
+        .map(|v| {
+            let rate = op_rate
+                .get(v.label.as_str())
+                .map(|(c, first, last)| {
+                    let span_h = (last - first) as f64 / 3600.0;
+                    if span_h >= 0.1 {
+                        (*c as f64 / span_h * 10.0).round() / 10.0
+                    } else {
+                        0.0
+                    }
+                })
+                .unwrap_or(0.0);
+            json!({
+                "provider": v.provider,
+                "label": v.label,
+                "remaining": v.remaining,
+                "resetWindow": window_or_period(v.window_secs, &v.period),
+                "ratePerHour": rate,
+            })
+        })
+        .collect();
+
+    // Capability matrix: each configured provider's native niches + escape-hatch modes.
+    let capabilities: Vec<Value> = order
+        .iter()
+        .map(|&name| match parse_kind(name) {
+            Some(kind) => {
+                let ex = crate::providers::extras(kind);
+                json!({
+                    "provider": name,
+                    "niches": ex.niches,
+                    "modes": ex.modes.iter().map(|(m, d)| json!([m, d])).collect::<Vec<_>>(),
+                })
+            }
+            None => json!({ "provider": name, "niches": [], "modes": [] }),
+        })
+        .collect();
+
     Ok(json!({
         "groups": groups,
         "accounts": accounts,
@@ -741,6 +1051,9 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         "usage": usage,
         "summary": { "accounts": mains.len(), "healthy": healthy, "needsLogin": needs_login, "exhausted": exhausted },
         "totalRemaining": total_remaining,
+        "deadEnds": { "routed": routes.len(), "ranOut": ran_out },
+        "burn": burn,
+        "capabilities": capabilities,
     }))
 }
 
@@ -755,6 +1068,11 @@ struct Agg {
     has_dr: bool,
     dr_used: i64,
     dr_quota: i64,
+    dr_window_secs: Option<i64>,
+    dr_period: String,
+    dr_reset_after: Option<String>,
+    /// Summed real $ balance for top-up providers (exa/parallel/steel); None for credit providers.
+    usd: Option<f64>,
 }
 
 impl Agg {
@@ -770,6 +1088,10 @@ impl Agg {
             has_dr: false,
             dr_used: 0,
             dr_quota: 0,
+            dr_window_secs: None,
+            dr_period: String::new(),
+            dr_reset_after: None,
+            usd: None,
         }
     }
 }
@@ -810,6 +1132,62 @@ fn reset_window(period: &str) -> &'static str {
     } else {
         "monthly"
     }
+}
+
+/// One limit as a cube-bar descriptor for the dashboard: value + its own window + reset date.
+fn limit_bar(
+    label: &str,
+    used: i64,
+    quota: i64,
+    window_secs: Option<i64>,
+    period: Option<&str>,
+    reset_after: Option<&str>,
+    locked: bool,
+) -> Value {
+    let window = match window_secs {
+        Some(s) => window_label(s),
+        None => period.map(reset_window).unwrap_or("").to_string(),
+    };
+    json!({
+        "label": label,
+        "used": used,
+        "quota": quota,
+        "window": window,
+        "resetAt": reset_at(window_secs, period, reset_after),
+        "locked": locked,
+    })
+}
+
+/// The absolute reset *instant* as an RFC3339 timestamp (UTC) — the browser renders it in the
+/// viewer's own timezone. From an ISO `reset_after` (chatgpt, exact time), else the next period
+/// boundary (midnight UTC). A rolling window (grok) has no fixed instant — the window label carries it.
+fn reset_at(
+    window_secs: Option<i64>,
+    period: Option<&str>,
+    reset_after: Option<&str>,
+) -> Option<String> {
+    if window_secs.is_some() {
+        return None;
+    }
+    if let Some(iso) = reset_after {
+        return Some(iso.to_string());
+    }
+    let now = chrono::Utc::now().date_naive();
+    let boundary = match period.map(reset_window) {
+        Some("daily") => now.succ_opt(),
+        Some("monthly") => {
+            let (y, m) = if now.month() == 12 {
+                (now.year() + 1, 1)
+            } else {
+                (now.year(), now.month() + 1)
+            };
+            chrono::NaiveDate::from_ymd_opt(y, m, 1)
+        }
+        _ => None,
+    };
+    boundary
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc().to_rfc3339())
 }
 
 fn resets_in(period: &str) -> Option<String> {
@@ -856,7 +1234,7 @@ fn mask_proxy(proxy: &str) -> String {
 fn group_of(provider: &str) -> (&'static str, &'static str) {
     match provider {
         "serper" | "tavily" | "exa" | "parallel" => ("search", "Search"),
-        "jina" | "firecrawl" => ("read", "Read / scrape"),
+        "firecrawl" => ("read", "Read / scrape"),
         "steel" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
     }
@@ -871,18 +1249,72 @@ fn group_color(provider: &str) -> &'static str {
     }
 }
 
+/// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance) rather
+/// than an exact request count — shown with a leading "≈".
+fn approx_quota(provider: &str) -> bool {
+    matches!(provider, "parallel" | "exa" | "steel")
+}
+
 fn desc_of(provider: &str) -> &'static str {
     match provider {
         "serper" => "Web search API",
         "tavily" => "Search + extract API",
         "exa" => "Neural search API",
         "parallel" => "Search API",
-        "jina" => "Reader — URL → markdown",
         "firecrawl" => "Crawl + scrape API",
         "steel" => "Headless browser sessions",
-        "perplexity_web" => "Browser session · search + deep research",
-        "gemini_web" => "Browser session · search + #dr",
-        "grok_web" => "Browser session · search + #dr",
+        "gemini_web" => "Browser session · search + deep research",
+        "grok_web" => "Browser session · search + deep research",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ModelInfo;
+
+    fn mi(id: &str, remaining: Option<i64>, total: Option<i64>, locked: bool) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            name: id.into(),
+            levels: Vec::new(),
+            remaining,
+            total,
+            window_secs: None,
+            reset_after: None,
+            locked,
+        }
+    }
+
+    #[test]
+    fn agg_sums_and_unlocks_if_any_account_can() {
+        // Same mode across two accounts: one paid (5/20), one free+locked (0/0).
+        let paid = mi("expert", Some(5), Some(20), false);
+        let free = mi("expert", Some(0), Some(0), true);
+        let mut agg = AggModel::seed(&paid);
+        agg.merge(&paid);
+        agg.merge(&free);
+        assert_eq!(agg.remaining, Some(25 - 20)); // 5 + 0
+        assert_eq!(agg.total, Some(20)); // 20 + 0
+        assert!(!agg.all_locked); // one account can use it
+    }
+
+    #[test]
+    fn agg_locked_when_all_locked_and_none_stays_none() {
+        let locked = mi("heavy", Some(0), Some(0), true);
+        let mut h = AggModel::seed(&locked);
+        h.merge(&locked);
+        h.merge(&locked);
+        assert!(h.all_locked);
+        assert_eq!(h.remaining, Some(0));
+
+        // gemini reports no count on any account -> stays None (not summed to 0).
+        let no_count = mi("pro", None, None, false);
+        let mut p = AggModel::seed(&no_count);
+        p.merge(&no_count);
+        p.merge(&no_count);
+        assert_eq!(p.remaining, None);
+        assert!(!p.all_locked);
     }
 }

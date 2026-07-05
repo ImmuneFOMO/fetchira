@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/roughjs@4.6.6/bundled/rough.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0b0d12; }
+  #stage { position: relative; width: 1180px; height: 520px; background: #0b0d12;
+           font-family: 'Kalam', cursive; overflow: hidden; }
+  #rc { position: absolute; inset: 0; }
+  .t { position: absolute; }                 /* text layer */
+  .title { font-weight: 700; color: #c6f94a; }
+  .sub { color: #7e8896; }
+  .body { color: #aab3c2; line-height: 1.35; }
+  .faint { color: #5c6572; }
+  .lbl { position: absolute; color: #8b95a4; background: #10141b; padding: 1px 7px;
+         border-radius: 6px; font-size: 15px; white-space: nowrap; transform: translate(-50%,-50%); }
+  .sec { font-weight: 700; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <svg id="rc" width="1180" height="520"></svg>
+
+  <div class="t title" style="left:44px; top:34px; font-size:26px;">fetchira <span style="color:#7e8896; font-weight:400;">— one binary between your agents and every search tier</span></div>
+
+  <!-- agents -->
+  <div class="t title" style="left:70px; top:138px; font-size:20px;">Your coding agents</div>
+  <div class="t body"  style="left:70px; top:172px; font-size:16px;">Claude Code · Cursor<br>Codex · Gemini CLI<br>Windsurf · VS Code</div>
+
+  <!-- fetchira -->
+  <div class="t title" style="left:496px; top:112px; font-size:22px;">fetchira</div>
+  <div class="t sub"   style="left:496px; top:144px; font-size:15px;">single Rust binary · MCP server</div>
+  <div class="t body"  style="left:520px; top:186px; font-size:16px; color:#c9d1dc; font-weight:700;">quota-aware router</div>
+  <div class="t body"  style="left:520px; top:216px; font-size:16px;">search · read<br>deep_research · browser</div>
+
+  <!-- providers -->
+  <div class="t title" style="left:936px; top:110px; font-size:20px;">Providers</div>
+  <div class="t sec"   style="left:936px; top:150px; font-size:16px; color:#6fe38f;">search</div>
+  <div class="t body"  style="left:936px; top:174px; font-size:15px;">serper · tavily<br>exa · parallel</div>
+  <div class="t sec"   style="left:936px; top:230px; font-size:16px; color:#4fd6c9;">read</div>
+  <div class="t body"  style="left:936px; top:254px; font-size:15px;">firecrawl</div>
+  <div class="t sec"   style="left:936px; top:296px; font-size:16px; color:#f0a04b;">browser</div>
+  <div class="t body"  style="left:936px; top:320px; font-size:15px;">steel</div>
+  <div class="t sec"   style="left:936px; top:362px; font-size:16px; color:#b58cf0;">web sessions</div>
+  <div class="t body"  style="left:936px; top:386px; font-size:15px;">gemini · grok · chatgpt</div>
+
+  <!-- ui -->
+  <div class="t title" style="left:70px; top:378px; font-size:20px;">fetchira ui</div>
+  <div class="t body"  style="left:70px; top:412px; font-size:15px;">local browser dashboard<br>127.0.0.1 · token-gated</div>
+  <div class="t faint" style="left:70px; top:470px; font-size:14px;">live quota · route log · accounts</div>
+
+  <!-- usage.db -->
+  <div class="t title" style="left:474px; top:378px; font-size:20px;">usage.db · SQLite</div>
+  <div class="t body"  style="left:474px; top:412px; font-size:15px;">quota counters per window<br>route_log (every call + failover)</div>
+
+  <!-- edge labels -->
+  <div class="lbl" style="left:384px; top:180px;">MCP · stdio</div>
+  <div class="lbl" style="left:864px; top:180px;">HTTP calls</div>
+  <div class="lbl" style="left:700px; top:352px;">record usage + route</div>
+  <div class="lbl" style="left:400px; top:432px;">reads + SSE</div>
+  <div class="lbl" style="left:352px; top:336px;">bare <code>fetchira</code> in a TTY</div>
+</div>
+
+<script>
+window.__ready = false;
+document.fonts.ready.then(() => {
+  const rc = rough.svg(document.getElementById('rc'));
+  const svg = document.getElementById('rc');
+  const gray = '#3d4657', lime = '#c6f94a';
+  const box = (x,y,w,h,stroke) => svg.appendChild(rc.rectangle(x,y,w,h,{stroke, strokeWidth:1.7, roughness:1.15, bowing:1.2}));
+  const arrow = (x1,y1,x2,y2,opt={}) => {
+    const o = Object.assign({stroke:'#6b7482', strokeWidth:1.6, roughness:1.1}, opt);
+    svg.appendChild(rc.line(x1,y1,x2,y2,o));
+    const a = Math.atan2(y2-y1, x2-x1), h = 11;
+    svg.appendChild(rc.line(x2,y2, x2-h*Math.cos(a-0.42), y2-h*Math.sin(a-0.42), o));
+    svg.appendChild(rc.line(x2,y2, x2-h*Math.cos(a+0.42), y2-h*Math.sin(a+0.42), o));
+  };
+  // boxes
+  box(48,120,250,150,gray);
+  box(470,96,330,250,lime);            // fetchira highlighted
+  box(496,170,278,150,'#4a5468');      // inner router
+  box(912,96,236,340,gray);
+  box(48,360,290,140,gray);
+  box(452,360,320,140,gray);
+  // arrows
+  arrow(298,190,470,190);                                  // agents -> fetchira
+  arrow(800,190,912,190);                                  // fetchira -> providers
+  arrow(612,346,600,360);                                  // fetchira -> usage.db
+  arrow(452,430,338,430);                                  // usage.db -> ui
+  arrow(486,346,300,372,{strokeLineDash:[7,7], stroke:'#59616f'}); // fetchira ~> ui (dashed)
+  window.__ready = true;
+});
+</script>
+</body>
+</html>

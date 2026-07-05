@@ -26,6 +26,8 @@ pub struct RouteRow {
     pub latency_ms: i64,
     pub fail_from: Option<String>,
     pub fail_code: Option<i64>,
+    pub niche: String,
+    pub debug_id: Option<i64>,
 }
 
 /// What the router hands to `log_route` after each call (success, with optional failover origin).
@@ -37,6 +39,10 @@ pub struct RouteLog<'a> {
     pub latency_ms: i64,
     pub fail_from: Option<&'a str>,
     pub fail_code: Option<i64>,
+    /// `native`/`rewrite`/`` — how the chosen provider served the request's niche knobs.
+    pub niche: &'a str,
+    /// The debug_log row for this route's winning attempt, for drill-down from the Activity tab.
+    pub debug_id: Option<i64>,
 }
 
 /// One full request/response capture (the debug firehose — every attempt, success or failure).
@@ -51,6 +57,8 @@ pub struct DebugRow {
     pub request: String,
     pub response: Option<String>,
     pub error: Option<String>,
+    /// Raw HTTP round-trip(s) for the attempt, as a JSON array string (api-key providers only).
+    pub http_trace: Option<String>,
 }
 
 /// What the router hands to `log_debug` after every provider attempt.
@@ -63,6 +71,7 @@ pub struct DebugLog<'a> {
     pub request: &'a str,
     pub response: Option<&'a str>,
     pub error: Option<&'a str>,
+    pub http_trace: Option<&'a str>,
 }
 
 /// Per-field char cap and row cap for the debug log. The product (~0.5 GB) is the hard ceiling
@@ -119,11 +128,23 @@ impl Store {
                 status     INTEGER NOT NULL,
                 latency_ms INTEGER NOT NULL,
                 fail_from  TEXT,
-                fail_code  INTEGER
+                fail_code  INTEGER,
+                niche      TEXT    NOT NULL DEFAULT '',
+                debug_id   INTEGER
             )",
         )
         .execute(&pool)
         .await?;
+        // Existing DBs predate `niche`; add it idempotently (ignore "duplicate column name").
+        sqlx::query("ALTER TABLE route_log ADD COLUMN niche TEXT NOT NULL DEFAULT ''")
+            .execute(&pool)
+            .await
+            .ok();
+        // Same for `debug_id` — links each route to its debug_log capture for drill-down.
+        sqlx::query("ALTER TABLE route_log ADD COLUMN debug_id INTEGER")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS debug_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,11 +156,17 @@ impl Store {
                 latency_ms INTEGER NOT NULL,
                 request    TEXT    NOT NULL,
                 response   TEXT,
-                error      TEXT
+                error      TEXT,
+                http_trace TEXT
             )",
         )
         .execute(&pool)
         .await?;
+        // Existing DBs predate `http_trace`; add it idempotently (ignore "duplicate column name").
+        sqlx::query("ALTER TABLE debug_log ADD COLUMN http_trace TEXT")
+            .execute(&pool)
+            .await
+            .ok();
         Ok(Self { pool })
     }
 
@@ -303,8 +330,8 @@ impl Store {
     pub async fn log_route(&self, e: &RouteLog<'_>) -> Result<()> {
         let res = sqlx::query(
             "INSERT INTO route_log
-                (ts, capability, provider, label, status, latency_ms, fail_from, fail_code)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, capability, provider, label, status, latency_ms, fail_from, fail_code, niche, debug_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(e.capability)
@@ -314,6 +341,8 @@ impl Store {
         .bind(e.latency_ms)
         .bind(e.fail_from)
         .bind(e.fail_code)
+        .bind(e.niche)
+        .bind(e.debug_id)
         .execute(&self.pool)
         .await?;
         // Keep the table bounded (~last 1000 rows), amortized so it isn't run every call.
@@ -329,7 +358,7 @@ impl Store {
 
     pub async fn recent_routes(&self, limit: i64) -> Result<Vec<RouteRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code
+            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code, niche, debug_id
              FROM route_log ORDER BY id DESC LIMIT ?",
         )
         .bind(limit)
@@ -342,7 +371,7 @@ impl Store {
 
     pub async fn routes_since(&self, after_id: i64, limit: i64) -> Result<Vec<RouteRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code
+            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code, niche, debug_id
              FROM route_log WHERE id > ? ORDER BY id ASC LIMIT ?",
         )
         .bind(after_id)
@@ -359,11 +388,11 @@ impl Store {
         Ok(row.get("m"))
     }
 
-    pub async fn log_debug(&self, e: &DebugLog<'_>, retention_hours: i64) -> Result<()> {
+    pub async fn log_debug(&self, e: &DebugLog<'_>, retention_hours: i64) -> Result<i64> {
         let res = sqlx::query(
             "INSERT INTO debug_log
-                (ts, capability, provider, label, status, latency_ms, request, response, error)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, capability, provider, label, status, latency_ms, request, response, error, http_trace)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(e.capability)
@@ -374,6 +403,7 @@ impl Store {
         .bind(clip(e.request))
         .bind(e.response.map(clip))
         .bind(e.error.map(clip))
+        .bind(e.http_trace.map(clip))
         .execute(&self.pool)
         .await?;
         // Amortized eviction: drop rows past the row cap or older than the retention window.
@@ -388,14 +418,14 @@ impl Store {
                 .await
                 .ok();
         }
-        Ok(())
+        Ok(id)
     }
 
     /// Newest-first page for the Debug tab's initial load. Bodies are returned in full; the
     /// handler trims them to previews and serves the full row from `debug_get`.
     pub async fn recent_debug(&self, limit: i64) -> Result<Vec<DebugRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
              FROM debug_log ORDER BY id DESC LIMIT ?",
         )
         .bind(limit)
@@ -407,7 +437,7 @@ impl Store {
     /// New rows since `after_id`, oldest-first, for incremental polling.
     pub async fn debug_since(&self, after_id: i64, limit: i64) -> Result<Vec<DebugRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
              FROM debug_log WHERE id > ? ORDER BY id ASC LIMIT ?",
         )
         .bind(after_id)
@@ -419,7 +449,7 @@ impl Store {
 
     pub async fn debug_get(&self, id: i64) -> Result<Option<DebugRow>> {
         let row = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
              FROM debug_log WHERE id = ?",
         )
         .bind(id)
@@ -460,6 +490,7 @@ fn debug_row(r: &sqlx::sqlite::SqliteRow) -> DebugRow {
         request: r.get("request"),
         response: r.get("response"),
         error: r.get("error"),
+        http_trace: r.get("http_trace"),
     }
 }
 
@@ -474,6 +505,8 @@ fn route_row(r: &sqlx::sqlite::SqliteRow) -> RouteRow {
         latency_ms: r.get("latency_ms"),
         fail_from: r.get("fail_from"),
         fail_code: r.get("fail_code"),
+        niche: r.get("niche"),
+        debug_id: r.get("debug_id"),
     }
 }
 
@@ -506,6 +539,8 @@ mod tests {
                 latency_ms: 198,
                 fail_from: None,
                 fail_code: None,
+                niche: "",
+                debug_id: None,
             })
             .await
             .unwrap();
@@ -518,6 +553,8 @@ mod tests {
                 latency_ms: 312,
                 fail_from: Some("exa-1"),
                 fail_code: Some(429),
+                niche: "native",
+                debug_id: Some(7),
             })
             .await
             .unwrap();
@@ -526,6 +563,8 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].label, "serper-1"); // chronological: oldest first
         assert_eq!(recent[1].fail_from.as_deref(), Some("exa-1"));
+        assert_eq!(recent[1].niche, "native");
+        assert_eq!(recent[1].debug_id, Some(7));
 
         let since = store.routes_since(recent[0].id, 10).await.unwrap();
         assert_eq!(since.len(), 1);
@@ -552,6 +591,7 @@ mod tests {
                     request: r#"{"query":"hi"}"#,
                     response: None,
                     error: Some("grok anti-bot rejected this request"),
+                    http_trace: Some(r#"[{"method":"POST","status":403}]"#),
                 },
                 24,
             )
@@ -566,6 +606,10 @@ mod tests {
             Some("grok anti-bot rejected this request")
         );
         assert!(recent[0].response.is_none());
+        assert_eq!(
+            recent[0].http_trace.as_deref(),
+            Some(r#"[{"method":"POST","status":403}]"#)
+        );
 
         let id = recent[0].id;
         assert_eq!(store.max_debug_id().await.unwrap(), id);

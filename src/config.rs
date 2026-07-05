@@ -79,7 +79,7 @@ impl ProxyPool {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Account {
     pub provider: ProviderKind,
     pub label: String,

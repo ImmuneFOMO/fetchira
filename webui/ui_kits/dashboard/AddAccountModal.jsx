@@ -8,10 +8,8 @@ const PROVIDER_CATALOG = [
   { id: 'tavily', kind: 'key', note: 'Search + extract API' },
   { id: 'exa', kind: 'key', note: 'Neural search API' },
   { id: 'parallel', kind: 'key', note: 'Search API' },
-  { id: 'jina', kind: 'key', note: 'Reader · URL → markdown' },
   { id: 'firecrawl', kind: 'key', note: 'Crawl + scrape API' },
   { id: 'steel', kind: 'key', note: 'Headless browser sessions' },
-  { id: 'perplexity_web', kind: 'web', note: 'Browser session · search + deep research' },
   { id: 'gemini_web', kind: 'web', note: 'Browser session · search + #dr' },
   { id: 'grok_web', kind: 'web', note: 'Browser session · search + #dr' },
 ];

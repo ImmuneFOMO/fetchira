@@ -938,6 +938,8 @@ function ProviderCard({
   loggedIn = false,
   dr = null,
   // { used, quota } deep-research daily budget
+  models = null,
+  // [{ id, name, levels, remaining, total, locked, windowSecs }] live model/mode catalog
   style = {}
 }) {
   const remaining = Math.max(0, quota - used);
@@ -1043,7 +1045,42 @@ function ProviderCard({
     style: {
       color: 'var(--text-faint)'
     }
-  }, "daily"))), /*#__PURE__*/React.createElement("div", {
+  }, "daily"))), models && models.length ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
+      paddingTop: 8,
+      borderTop: '1px solid var(--border-faint)'
+    }
+  }, models.slice(0, 6).map(m => /*#__PURE__*/React.createElement("div", {
+    key: m.id,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: m.locked ? 'var(--text-faint)' : 'var(--text-mid)',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, m.name, m.levels && m.levels.length ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-faint)'
+    }
+  }, ' ·' + m.levels.join('/')) : null), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: m.locked ? 'var(--text-faint)' : 'var(--text-lo)'
+    }
+  }, m.locked ? '0/0' : m.total != null ? m.remaining + '/' + m.total : m.remaining != null ? String(m.remaining) : '—'))) ) : null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',

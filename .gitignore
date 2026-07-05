@@ -1,5 +1,6 @@
 # secrets / local state — never commit
 research/
+CLAUDE.local.md
 .env
 fetchira.toml
 usage.db

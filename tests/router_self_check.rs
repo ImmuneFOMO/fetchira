@@ -17,6 +17,7 @@ fn bucket(kind: ProviderKind, base: &str, label: &str) -> Bucket {
         dr_quota: 100,
         dr_reset: Reset::Monthly,
         proxy: None,
+        balance_conn: None,
     }
 }
 

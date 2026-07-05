@@ -1,6 +1,5 @@
 ## Commit Messages
 Use **Conventional Commits** with **short subject line only**. No body, no footers, no explanations.
-NEVER put in commit co-auth anyone even you 
 **Good examples:**
 - `fix(wallet): refresh JWT after setup completes`
 - `feat(wallet): cut over to type-3 deposit wallet contract`

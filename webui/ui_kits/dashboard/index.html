@@ -6,6 +6,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fetchira — router dashboard</title>
+<link rel="icon" type="image/svg+xml" href="../../assets/logo-mark.svg">
 <link rel="stylesheet" href="../../styles.css">
 <style>
   html, body { background: var(--bg-base); }
@@ -40,7 +41,7 @@ function EmptyState({ onAdd }) {
         Add your first account to start filling the tank.
       </div>
       <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 28 }}>
-        {['serper','tavily','exa','jina','firecrawl','steel','perplexity_web','gemini_web','grok_web'].map((p) => (
+        {['serper','tavily','exa','firecrawl','steel','gemini_web','grok_web'].map((p) => (
           <Badge key={p} tone="neutral" variant="outline">{p}</Badge>
         ))}
       </div>
@@ -72,8 +73,8 @@ function UpdateBanner({ u }) {
 }
 
 function App() {
-  const [tab, setTab] = React.useState('overview');
-  const [modal, setModal] = React.useState(false);
+  const [tab, setTab] = React.useState(new URLSearchParams(location.search).get('tab') || 'overview');
+  const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   const [seeded, setSeeded] = React.useState(true);
   const [online, setOnline] = React.useState(true);
   const [, bump] = React.useState(0); // re-render with the freshly polled state
