@@ -121,7 +121,7 @@ function LimitRow({ label, used, quota, window, resetAt, locked, off, approx, us
             <b style={{ color: 'var(--text-hi)' }}>${usd.toFixed(2)}</b> · ≈ {remaining.toLocaleString()} left
           </span>
         </div>
-        <QuotaMeter used={remaining} quota={q} variant="segments" segments={18} showValues={false} state={off ? 'off' : 'ok'} />
+        <QuotaMeter used={1} quota={1} variant="segments" segments={18} showValues={false} state={off ? 'off' : remaining <= 0 ? 'out' : 'ok'} />
       </div>
     );
   }
