@@ -203,7 +203,7 @@ impl ProviderKind {
             ProviderKind::Jina => 2500,      // 10M free tokens ÷ ~4k/read ≈ 2.5k reads, one-time
             ProviderKind::Firecrawl => 1000, // 1k credits/mo
             ProviderKind::Parallel => 16000, // 16k free requests (no reset advertised)
-            ProviderKind::Steel => 6000,     // $30 one-time ÷ $0.005/scrape ≈ 6k scrapes
+            ProviderKind::Steel => 2000,     // $30 one-time ÷ ~$0.015/proxied read ≈ 2k reads
             // Web sessions: server enforces the real (windowed) limits; these are nominal
             // ceilings so a 429 marks the account exhausted and the router fails over.
             ProviderKind::GeminiWeb => 1000,

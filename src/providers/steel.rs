@@ -88,7 +88,7 @@ async fn pdf(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> 
 
 /// Live credit balance via `POST /v1/usage-details` with the api-key (the gateway routes it as
 /// POST, not GET — a GET returns "no route"). The response carries a Stripe `creditBalanceSummary`;
-/// sum the available grants (cents). A scrape is $0.005, so cents·2 = scrapes.
+/// sum the available grants (cents), then convert to reads (see `parse_balance`).
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
     let resp = client
         .post(format!("{base}/v1/usage-details"))
@@ -100,8 +100,11 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
     Ok(parse_balance(&v))
 }
 
-// Sum the available credit across Stripe credit-balance grants (`value` is in cents). No fixed
-// ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
+// Sum the available credit across Stripe credit-balance grants (`value` is in cents), then estimate
+// reads. A read isn't a flat fee: the $0.005 browser-tool charge plus residential-proxy bandwidth
+// (~1 MB of a page at ~$10/GB ≈ $0.0098) — we send `useProxy:true` so pages actually render — puts a
+// typical proxied read near $0.015. So cents ÷ 1.5 (= cents·2/3) reads; it's an estimate (page-weight
+// dependent, screenshot/pdf are cheaper), shown with "≈".
 // ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
 // draining bar, add it if the flat gauge proves confusing.
 fn parse_balance(v: &Value) -> LiveBalance {
@@ -117,10 +120,10 @@ fn parse_balance(v: &Value) -> LiveBalance {
                 .sum()
         })
         .unwrap_or(0);
-    let scrapes = cents * 2;
+    let reads = cents * 2 / 3;
     LiveBalance {
-        remaining: scrapes,
-        total: scrapes,
+        remaining: reads,
+        total: reads,
     }
 }
 
@@ -129,11 +132,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn credit_summary_to_scrapes() {
+    fn credit_summary_to_reads() {
         let v = json!({"creditBalanceSummary": {"object": "billing.credit_balance_summary", "balances": [
             {"available_balance": {"monetary": {"currency": "usd", "value": 1000}, "type": "monetary"}}
         ]}});
-        assert_eq!(parse_balance(&v).remaining, 2000); // $10.00 / $0.005
+        assert_eq!(parse_balance(&v).remaining, 666); // $10.00 / ~$0.015 proxied read
     }
 
     #[test]
