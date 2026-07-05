@@ -7,7 +7,8 @@ use serde::Serialize;
 use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
 use crate::providers::{
-    self, Capability, Input, LiveLimits, LiveQuota, ModelInfo, OutImage, Provider, ProviderKind,
+    self, Capability, Input, LiveBalance, LiveLimits, LiveQuota, ModelInfo, OutImage, Provider,
+    ProviderKind,
 };
 use crate::proxy;
 use crate::usage::{period_key, DebugLog, RouteLog, Store};
@@ -30,6 +31,9 @@ pub struct Bucket {
     pub dr_quota: i64,
     pub dr_reset: Reset,
     pub proxy: Option<String>,
+    /// Cookie client for reading the dashboard balance of a `balance_session` provider (exa/parallel),
+    /// separate from the api-key `conn` that does the actual calls. `None` until `fetchira login`.
+    pub balance_conn: Option<wreq::Client>,
 }
 
 /// A successful call's answer plus an optional resume token (`provider:opaque`) for web sessions.
@@ -65,6 +69,9 @@ pub struct Router {
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
     // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. `None` caches a miss.
     live_limits: Mutex<HashMap<String, (Instant, Option<LiveLimits>)>>,
+    // Live API-key balances (serper/tavily/firecrawl/jina/steel), keyed by label. `None` caches a
+    // miss so a provider without a usable balance endpoint isn't re-polled every snapshot.
+    balance: Mutex<HashMap<String, (Instant, Option<LiveBalance>)>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
     debug: Option<i64>,
 }
@@ -76,6 +83,7 @@ impl Router {
             store,
             live: Mutex::new(HashMap::new()),
             live_limits: Mutex::new(HashMap::new()),
+            balance: Mutex::new(HashMap::new()),
             debug: None,
         }
     }
@@ -168,6 +176,18 @@ impl Router {
                 };
                 (Conn::Api(client), key)
             };
+            // exa/parallel keep their api-key for calls but read the live $ balance through a
+            // captured dashboard cookie session (best-effort; absent until `fetchira login`).
+            let balance_conn = match acc.provider.balance_session() {
+                true => match store.load_session(&acc.label).await? {
+                    Some(raw) => {
+                        let sess = web::parse_session(&raw);
+                        web::build_client(&sess.cookies, &sess.headers, proxy_url.as_deref()).ok()
+                    }
+                    None => None,
+                },
+                false => None,
+            };
             buckets.push(Bucket {
                 quota: acc.quota.unwrap_or_else(|| acc.provider.default_quota()),
                 reset: acc.reset.unwrap_or_else(|| acc.provider.default_reset()),
@@ -178,6 +198,7 @@ impl Router {
                 key,
                 label: acc.label,
                 proxy: proxy_url,
+                balance_conn,
             });
         }
         Ok(Self {
@@ -185,6 +206,7 @@ impl Router {
             store,
             live: Mutex::new(HashMap::new()),
             live_limits: Mutex::new(HashMap::new()),
+            balance: Mutex::new(HashMap::new()),
             debug,
         })
     }
@@ -378,6 +400,7 @@ impl Router {
                 .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
                 .await?;
             self.patch_live(b, false, &mut mv).await;
+            self.patch_live_balance(b, &mut mv).await;
             mv.limits = ll.clone();
             out.push(mv);
             // Web providers track deep_research against a separate daily budget.
@@ -440,6 +463,39 @@ impl Router {
         v.used = (lq.total - lq.remaining).max(0);
         v.exhausted = lq.remaining == 0;
         v.window_secs = Some(lq.window_secs);
+    }
+
+    /// Overwrite an API-key bucket's soft counter with the provider's live balance when it reports
+    /// one (serper/tavily/firecrawl/jina, and steel on paid tiers). Cached 20s; a miss is cached too,
+    /// so providers without a usable endpoint (exa/parallel/steel-free) keep the corrected constant.
+    async fn patch_live_balance(&self, b: &Bucket, v: &mut UsageView) {
+        let Conn::Api(c) = &b.conn else { return };
+        let cached = self.balance.lock().ok().and_then(|m| {
+            m.get(&b.label)
+                .filter(|(t, _)| t.elapsed() < Duration::from_secs(20))
+                .map(|(_, bal)| *bal)
+        });
+        let bal = match cached {
+            Some(bal) => bal,
+            None => {
+                // exa/parallel read their $ balance through the dashboard cookie session; the rest
+                // (serper/tavily/firecrawl/jina/steel) through the api-key.
+                let fresh = match &b.balance_conn {
+                    Some(wc) => b.provider.live_balance_web(wc).await,
+                    None => b.provider.live_balance(&b.key, c).await,
+                };
+                if let Ok(mut m) = self.balance.lock() {
+                    m.insert(b.label.clone(), (Instant::now(), fresh));
+                }
+                fresh
+            }
+        };
+        let Some(bal) = bal else { return };
+        // Top-ups can push the balance past the original grant, so the gauge ceiling follows it.
+        v.quota = bal.total.max(bal.remaining);
+        v.remaining = bal.remaining.max(0);
+        v.used = (v.quota - v.remaining).max(0);
+        v.exhausted = v.remaining <= 0;
     }
 
     /// Live per-tier limits for a web bucket, cached 20s (a miss is cached too, so a provider

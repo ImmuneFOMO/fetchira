@@ -174,15 +174,25 @@ impl ProviderKind {
         )
     }
 
+    /// Api-key providers whose live balance is only readable through their dashboard's cookie session
+    /// (no key-usable endpoint). `fetchira login <them>` captures that session; the api-key still does
+    /// the actual calls. exa/parallel are real $ balances the api can't report.
+    pub fn balance_session(self) -> bool {
+        matches!(self, ProviderKind::Parallel | ProviderKind::Exa)
+    }
+
+    /// Fallback ceiling when the provider exposes no live balance (exa, steel-free, parallel) or the
+    /// live fetch fails. Providers with a live endpoint (serper/tavily/firecrawl/jina) overwrite this
+    /// from `live_balance` — the constant only seeds the soft counter.
     pub fn default_quota(self) -> i64 {
         match self {
-            ProviderKind::Tavily => 1000,
-            ProviderKind::Exa => 1000,
-            ProviderKind::Serper => 2500,
-            ProviderKind::Jina => 1_000_000, // 10M tokens; tracked loosely as requests
-            ProviderKind::Firecrawl => 1000,
-            ProviderKind::Parallel => 16000,
-            ProviderKind::Steel => 360_000, // 100 browser-hours in seconds
+            ProviderKind::Tavily => 1000,    // 1k credits/mo
+            ProviderKind::Exa => 20_000,     // 20k requests/mo (forever-free)
+            ProviderKind::Serper => 2500,    // 2.5k credits, one-time
+            ProviderKind::Jina => 2500,      // 10M free tokens ÷ ~4k/read ≈ 2.5k reads, one-time
+            ProviderKind::Firecrawl => 1000, // 1k credits/mo
+            ProviderKind::Parallel => 16000, // 16k free requests (no reset advertised)
+            ProviderKind::Steel => 6000,     // $30 one-time ÷ $0.005/scrape ≈ 6k scrapes
             // Web sessions: server enforces the real (windowed) limits; these are nominal
             // ceilings so a 429 marks the account exhausted and the router fails over.
             ProviderKind::GeminiWeb => 1000,
@@ -194,7 +204,12 @@ impl ProviderKind {
 
     pub fn default_reset(self) -> Reset {
         match self {
-            ProviderKind::Serper => Reset::Once,
+            // One-time grants / top-up $ balances (no monthly reset): "lifetime" badge, not "monthly".
+            ProviderKind::Serper
+            | ProviderKind::Jina
+            | ProviderKind::Parallel
+            | ProviderKind::Exa
+            | ProviderKind::Steel => Reset::Once,
             _ => Reset::Monthly,
         }
     }
@@ -310,6 +325,16 @@ pub struct LiveQuota {
     pub remaining: i64,
     pub total: i64,
     pub window_secs: i64,
+}
+
+/// Live remaining balance for an API-key provider, already normalized to the unit fetchira displays
+/// (searches/reads/credits — each provider converts from its native $/tokens/credits). Authoritative:
+/// it reflects usage outside fetchira plus any top-up or paid plan. `total` is the grant for the
+/// fuel gauge (0 when unknown).
+#[derive(Clone, Copy)]
+pub struct LiveBalance {
+    pub remaining: i64,
+    pub total: i64,
 }
 
 /// One tool/feature's live allowance for the account's tier (e.g. deep_research, image_gen).
@@ -478,6 +503,30 @@ impl Provider {
             ProviderKind::ChatgptWeb => chatgpt_web::limits(&self.base, client).await.ok(),
             ProviderKind::GrokWeb => grok_web::limits(&self.base, client).await.ok(),
             ProviderKind::GeminiWeb => gemini_web::limits(&self.base, client).await.ok(),
+            _ => None,
+        }
+    }
+
+    /// Live remaining balance for an API-key provider, in fetchira's display unit. Best-effort:
+    /// `None` when the provider has no key-usable balance endpoint (exa, parallel), the account is a
+    /// free tier the endpoint doesn't cover (steel), or the fetch fails.
+    pub async fn live_balance(&self, key: &str, client: &reqwest::Client) -> Option<LiveBalance> {
+        match self.kind {
+            ProviderKind::Serper => serper::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Tavily => tavily::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Firecrawl => firecrawl::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Jina => jina::balance(key, client).await.ok(),
+            ProviderKind::Steel => steel::balance(&self.base, key, client).await.ok(),
+            _ => None,
+        }
+    }
+
+    /// Live balance for a `balance_session` provider (exa/parallel), read through its dashboard's
+    /// cookie session (the `client` carries the captured cookies). Best-effort.
+    pub async fn live_balance_web(&self, client: &wreq::Client) -> Option<LiveBalance> {
+        match self.kind {
+            ProviderKind::Parallel => parallel::balance(client).await.ok(),
+            ProviderKind::Exa => exa::balance(client).await.ok(),
             _ => None,
         }
     }

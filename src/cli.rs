@@ -405,14 +405,14 @@ pub async fn login(home: &Path, who: Option<String>) -> anyhow::Result<()> {
         .iter()
         .find(|a| a.label == who)
         .or_else(|| {
-            cfg.accounts
-                .iter()
-                .find(|a| a.provider.is_web() && a.provider.as_str() == who)
+            cfg.accounts.iter().find(|a| {
+                (a.provider.is_web() || a.provider.balance_session()) && a.provider.as_str() == who
+            })
         })
         .with_context(|| {
             format!("no web account matching '{who}' — add one with `fetchira add {who}`")
         })?;
-    if !acc.provider.is_web() {
+    if !acc.provider.is_web() && !acc.provider.balance_session() {
         bail!("'{}' is not a web-session provider", acc.provider.as_str());
     }
     do_login(home, &cfg, acc.provider, &acc.label).await

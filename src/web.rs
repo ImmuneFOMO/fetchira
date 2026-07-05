@@ -118,9 +118,19 @@ pub fn build_client(
     Ok(b.build()?)
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum BrowserKind {
     Chromium,
     Firefox,
+}
+
+impl BrowserKind {
+    fn tag(self) -> &'static str {
+        match self {
+            BrowserKind::Chromium => "chrome",
+            BrowserKind::Firefox => "firefox",
+        }
+    }
 }
 
 pub(crate) struct Browser {
@@ -165,26 +175,9 @@ fn find_bin(cands: &[&str]) -> Option<PathBuf> {
     })
 }
 
-/// Find a usable browser. `FETCHIRA_BROWSER=chrome|firefox` forces one; otherwise Chrome is
-/// tried first and Firefox second.
+/// The preferred usable browser (Chrome, else Firefox). `FETCHIRA_BROWSER=chrome|firefox` pins one.
 pub(crate) fn detect_browser() -> Option<Browser> {
-    let chromium = || {
-        find_bin(CHROMIUM_BINS).map(|bin| Browser {
-            kind: BrowserKind::Chromium,
-            bin,
-        })
-    };
-    let firefox = || {
-        find_bin(FIREFOX_BINS).map(|bin| Browser {
-            kind: BrowserKind::Firefox,
-            bin,
-        })
-    };
-    match std::env::var("FETCHIRA_BROWSER").ok().as_deref() {
-        Some("firefox" | "ff") => firefox(),
-        Some("chrome" | "chromium") => chromium(),
-        _ => chromium().or_else(firefox),
-    }
+    browser_candidates().into_iter().next()
 }
 
 // (url, cookie-domain, auth-cookie, optional page-eval that must be true for a *real* login —
@@ -225,6 +218,21 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
             "__Secure-next-auth.session-token.0",
             None,
         ),
+        // Api-key providers whose live $ balance is only readable through the dashboard's cookie
+        // session. NextAuth (`__Secure-next-auth.session-token`, present only when signed in — the
+        // auth-wait also accepts the `.0` chunk when NextAuth splits it).
+        ProviderKind::Parallel => (
+            "https://platform.parallel.ai/home",
+            "parallel.ai",
+            "st", // platform session token (JWT); present only when signed in
+            None,
+        ),
+        ProviderKind::Exa => (
+            "https://dashboard.exa.ai/billing",
+            "exa.ai",
+            "next-auth.session-token", // NextAuth session JWT on .exa.ai; present only when signed in
+            None,
+        ),
         other => return Err(Error::Unsupported(other.as_str())),
     })
 }
@@ -235,46 +243,70 @@ fn profile_dir(home: &Path, tag: &str, label: &str) -> PathBuf {
     home.join(format!("{tag}-{label}"))
 }
 
+/// Browsers to try for login, in preference order: Chrome (default) then Firefox (fallback).
+/// `FETCHIRA_BROWSER=chrome|firefox` pins one.
+fn browser_candidates() -> Vec<Browser> {
+    let chromium = || {
+        find_bin(CHROMIUM_BINS).map(|bin| Browser {
+            kind: BrowserKind::Chromium,
+            bin,
+        })
+    };
+    let firefox = || {
+        find_bin(FIREFOX_BINS).map(|bin| Browser {
+            kind: BrowserKind::Firefox,
+            bin,
+        })
+    };
+    match std::env::var("FETCHIRA_BROWSER").ok().as_deref() {
+        Some("firefox" | "ff") => firefox().into_iter().collect(),
+        Some("chrome" | "chromium") => chromium().into_iter().collect(),
+        _ => [chromium(), firefox()].into_iter().flatten().collect(),
+    }
+}
+
 /// Launch a real browser on this account's dedicated profile, let the user log in, and capture
 /// the resulting cookie session once auth completes. Chrome is driven over CDP; Firefox (which
-/// dropped CDP) is read straight from its plaintext `cookies.sqlite`.
+/// dropped CDP) is read straight from its plaintext `cookies.sqlite`. Chrome is the default; if its
+/// capture fails (e.g. the DevTools socket resets on some builds) we fall back to Firefox.
 pub async fn login(home: &Path, kind: ProviderKind, label: &str) -> Result<Session> {
-    let browser = detect_browser().ok_or_else(|| {
-        Error::Config(
+    let candidates = browser_candidates();
+    if candidates.is_empty() {
+        return Err(Error::Config(
             "no Chrome/Chromium or Firefox found — install one, or attach a session manually \
              with `fetchira session <label>`"
                 .into(),
-        )
-    })?;
+        ));
+    }
     let (url, domain, auth, check) = login_target(kind)?;
-    let fut = async {
-        match browser.kind {
-            BrowserKind::Chromium => {
-                capture_chromium(
-                    &browser.bin,
-                    &profile_dir(home, "chrome", label),
-                    url,
-                    domain,
-                    auth,
-                    check,
-                )
-                .await
+    let mut last_err = None;
+    for browser in candidates {
+        // Always start from an empty profile so `login` means "sign in and we capture this account",
+        // not "silently re-grab whoever was left signed in" — the user picks the account each time.
+        let profile = profile_dir(home, browser.kind.tag(), label);
+        let _ = std::fs::remove_dir_all(&profile);
+        let fut = async {
+            match browser.kind {
+                BrowserKind::Chromium => {
+                    capture_chromium(&browser.bin, &profile, url, domain, auth, check).await
+                }
+                BrowserKind::Firefox => {
+                    capture_firefox(&browser.bin, &profile, url, domain, auth).await
+                }
             }
-            BrowserKind::Firefox => {
-                capture_firefox(
-                    &browser.bin,
-                    &profile_dir(home, "firefox", label),
-                    url,
-                    domain,
-                    auth,
-                )
-                .await
+        };
+        match timeout(Duration::from_secs(300), fut).await {
+            Ok(Ok(session)) => return Ok(session),
+            // A capture error (Chrome's DevTools socket resetting, a dead profile) — try the next
+            // browser. A timeout means the user simply didn't finish, so don't switch on them.
+            Ok(Err(e)) => {
+                tracing::warn!(browser = ?browser.kind, error = %e, "browser login failed; trying next");
+                last_err = Some(e);
             }
+            Err(_) => return Err(Error::Timeout("login")),
         }
-    };
-    timeout(Duration::from_secs(300), fut)
-        .await
-        .map_err(|_| Error::Timeout("login"))?
+    }
+    Err(last_err.unwrap_or(Error::Timeout("login")))
 }
 
 async fn capture_chromium(
@@ -408,9 +440,14 @@ trait CookieSource {
 /// fullest set until it stops growing (companions like Google's `__Secure-1PSIDTS` land a beat
 /// after the auth cookie). Caller wraps this in a timeout.
 async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Result<Session> {
+    // NextAuth splits large session tokens into `<name>.0`/`.1`, so accept the first chunk too.
+    let chunk = format!("{auth}.0");
     let mut best = loop {
         let scoped = src.fetch(domain).await?;
-        if scoped.iter().any(|c| is_auth(c, auth)) {
+        if scoped
+            .iter()
+            .any(|c| is_auth(c, auth) || is_auth(c, &chunk))
+        {
             break scoped;
         }
         sleep(Duration::from_secs(1)).await;

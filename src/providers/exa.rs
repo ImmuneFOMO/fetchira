@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 const POLL: Duration = Duration::from_secs(3);
@@ -116,4 +116,48 @@ async fn research(
         }
     }
     Err(Error::Timeout("exa"))
+}
+
+/// Live $ balance via the dashboard's cookie session (the api-key has no balance endpoint — exa is a
+/// PAYG $ balance, not a request quota). `get-credits` → `{orbCreditsInCents}`; a search is $0.007,
+/// so cents/0.7 = searches.
+pub async fn balance(client: &wreq::Client) -> Result<LiveBalance> {
+    let resp = client
+        .get("https://dashboard.exa.ai/api/get-credits")
+        .header("referer", "https://dashboard.exa.ai/billing")
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "exa",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("exa"))?;
+    Ok(parse_balance(&v))
+}
+
+// No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
+// ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
+// draining bar, add it if the flat gauge proves confusing.
+fn parse_balance(v: &Value) -> LiveBalance {
+    let searches = (v["orbCreditsInCents"].as_f64().unwrap_or(0.0) / 0.7) as i64;
+    LiveBalance {
+        remaining: searches,
+        total: searches,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cents_to_searches() {
+        let b = parse_balance(&json!({"orbCreditsInCents": 1766.99, "orbInvoiceDebt": 0}));
+        assert_eq!(b.remaining, 2524); // $17.67 / $0.007
+        assert_eq!(b.total, 2524);
+    }
 }

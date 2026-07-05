@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, s, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -94,4 +94,41 @@ async fn extract(
         .filter(|t| !t.is_empty())
         .ok_or(Error::BadResponse("tavily"))?;
     Ok(Outcome::new(text, 1))
+}
+
+/// `GET /usage` → account-wide monthly credits. Free read, reflects paid plans automatically.
+pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
+    let resp = client
+        .get(format!("{base}/usage"))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    Ok(parse_balance(&check("tavily", resp).await?.json().await?))
+}
+
+// plan_limit is the monthly ceiling, plan_usage what's spent (basic search 1, advanced 2). Paygo
+// overage can push usage past the plan, so remaining floors at 0.
+fn parse_balance(v: &Value) -> LiveBalance {
+    let a = &v["account"];
+    let total = a["plan_limit"].as_i64().unwrap_or(0);
+    let used = a["plan_usage"].as_i64().unwrap_or(0);
+    LiveBalance {
+        remaining: (total - used).max(0),
+        total,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_usage() {
+        let b = parse_balance(&json!({
+            "key": {"usage": 20},
+            "account": {"current_plan": "Researcher", "plan_usage": 20, "plan_limit": 1000},
+        }));
+        assert_eq!(b.remaining, 980);
+        assert_eq!(b.total, 1000);
+    }
 }

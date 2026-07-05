@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, s, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -55,4 +55,42 @@ async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
         .to_string();
     let cost = v["data"]["metadata"]["creditsUsed"].as_i64().unwrap_or(1);
     Ok(Outcome::new(text, cost))
+}
+
+/// `GET /v1/team/credit-usage` → monthly credit balance. Free read, reflects paid plans + top-ups.
+pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
+    let resp = client
+        .get(format!("{base}/v1/team/credit-usage"))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    Ok(parse_balance(
+        &check("firecrawl", resp).await?.json().await?,
+    ))
+}
+
+// remaining_credits is the real spendable balance (includes coupons/packs/auto-recharge);
+// plan_credits is only the monthly base, so it seeds the gauge ceiling but can't cap remaining.
+fn parse_balance(v: &Value) -> LiveBalance {
+    let d = &v["data"];
+    let remaining = d["remaining_credits"].as_i64().unwrap_or(0);
+    LiveBalance {
+        remaining,
+        total: d["plan_credits"].as_i64().unwrap_or(0).max(remaining),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_credit_usage() {
+        let b = parse_balance(&json!({
+            "success": true,
+            "data": {"remaining_credits": 1357, "plan_credits": 1000},
+        }));
+        assert_eq!(b.remaining, 1357);
+        assert_eq!(b.total, 1357); // top-ups exceed the plan base
+    }
 }

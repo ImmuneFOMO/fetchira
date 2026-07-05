@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 const POLL: Duration = Duration::from_secs(3);
@@ -106,4 +106,54 @@ async fn result(base: &str, key: &str, client: &reqwest::Client, id: &str) -> Re
         .map(String::from)
         .unwrap_or_else(|| value_to_text(content));
     Ok(Outcome::new(text, 1))
+}
+
+/// Live $ balance via the dashboard's cookie session (the api-key can't read it — api.parallel.ai's
+/// balance is OAuth-only). `billing_overview` → `{balance: <cents>}`; a search is $0.005, so cents·2
+/// = searches.
+pub async fn balance(client: &wreq::Client) -> Result<LiveBalance> {
+    let resp = client
+        .post("https://platform.parallel.ai/api/acc_svc/billing_overview")
+        .header("content-type", "application/json")
+        .header("origin", "https://platform.parallel.ai")
+        .header(
+            "referer",
+            "https://platform.parallel.ai/settings?tab=billing",
+        )
+        .body("{}")
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "parallel",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("parallel"))?;
+    Ok(parse_balance(&v))
+}
+
+// No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
+// ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
+// draining bar, add it if the flat gauge proves confusing.
+fn parse_balance(v: &Value) -> LiveBalance {
+    let searches = v["balance"].as_i64().unwrap_or(0) * 2;
+    LiveBalance {
+        remaining: searches,
+        total: searches,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cents_to_searches() {
+        let b = parse_balance(&json!({"balance": 1690, "balanceError": null}));
+        assert_eq!(b.remaining, 3380); // $16.90 / $0.005
+        assert_eq!(b.total, 3380);
+    }
 }
