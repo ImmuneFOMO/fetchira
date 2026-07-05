@@ -1,6 +1,6 @@
 # fetchira
 
-One small binary that sits between your coding agent and every free web-search and
+One small binary that sits between your coding agent and every web-search and
 scrape tier, and spends them so you don't have to think about it.
 
 ![fetchira architecture](docs/architecture.png)
