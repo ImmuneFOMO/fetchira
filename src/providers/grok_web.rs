@@ -64,10 +64,7 @@ pub async fn call(
 
     // Optional attachment: upload first, reference by id. grok caps at 4 per turn.
     let file_ids: Vec<String> = match &input.file {
-        Some(p) => {
-            let (name, mime, bytes) = super::read_attachment(p)?;
-            vec![upload(base, client, &name, &mime, &bytes).await?]
-        }
+        Some(p) => vec![upload(base, client, &p.to_string_lossy()).await?],
         None => Vec::new(),
     };
 
@@ -318,55 +315,6 @@ fn find_val<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     }
 }
 
-/// Upload one attachment (base64-in-JSON, not multipart) and return its `fileMetadataId` — the bare
-/// string that goes into the send body's `fileAttachments`. Under `/rest/app-chat/`, so statsig-gated.
-async fn upload(
-    base: &str,
-    client: &wreq::Client,
-    name: &str,
-    mime: &str,
-    bytes: &[u8],
-) -> Result<String> {
-    let body = json!({
-        "fileName": name,
-        "fileMimeType": mime,
-        "content": base64::engine::general_purpose::STANDARD.encode(bytes),
-    })
-    .to_string();
-    let statsig = grok_statsig::current(base, client).await?;
-    let resp = client
-        .post(format!("{base}/rest/app-chat/upload-file"))
-        .header("content-type", "application/json")
-        .header(
-            "baggage",
-            "sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c",
-        )
-        .header("origin", base)
-        .header(
-            "x-statsig-id",
-            statsig.token("POST", "/rest/app-chat/upload-file"),
-        )
-        .header("x-xai-request-id", uuid4())
-        .body(body)
-        .send()
-        .await?;
-    if resp.status().as_u16() != 200 {
-        return Err(Error::Provider {
-            provider: "grok_web",
-            status: resp.status().as_u16(),
-            body: "file upload rejected".into(),
-        });
-    }
-    serde_json::from_str::<Value>(&resp.text().await.unwrap_or_default())
-        .ok()
-        .and_then(|v| {
-            v.get("fileMetadataId")
-                .and_then(|x| x.as_str())
-                .map(String::from)
-        })
-        .ok_or(Error::BadResponse("grok_web"))
-}
-
 /// One POST attempt with a freshly minted `x-statsig-id` for the current build.
 async fn send(
     base: &str,
@@ -389,6 +337,71 @@ async fn send(
         .body(body.to_string())
         .send()
         .await?)
+}
+
+/// Upload a local file to grok and return its `fileMetadataId` for the chat body's `fileAttachments`.
+/// Same JSON+base64 shape and statsig/403 handling as the chat submit.
+async fn upload(base: &str, client: &wreq::Client, path: &str) -> Result<String> {
+    let bytes = tokio::fs::read(path).await?;
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("upload");
+    let body = json!({
+        "fileName": name,
+        "fileMimeType": mime_of(path),
+        "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+    .to_string();
+    let url = format!("{base}/rest/app-chat/upload-file");
+    let path = "/rest/app-chat/upload-file";
+
+    let mut resp = send(base, client, &url, path, &body).await?;
+    if resp.status().as_u16() == 403 {
+        grok_statsig::invalidate().await;
+        resp = send(base, client, &url, path, &body).await?;
+    }
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status != 200 {
+        return Err(Error::Provider {
+            provider: "grok_web",
+            status,
+            body: format!("upload failed: {}", snippet(&text)),
+        });
+    }
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("fileMetadataId")
+                .and_then(|x| x.as_str())
+                .map(str::to_owned)
+        })
+        .ok_or(Error::BadResponse("grok_web"))
+}
+
+/// grok requires a mime type on every upload; map by extension, default to octet-stream.
+fn mime_of(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("pdf") => "application/pdf",
+        Some("json") => "application/json",
+        Some("csv") => "text/csv",
+        Some("html" | "htm") => "text/html",
+        // Source/config files: grok parses text/plain; octet-stream would be treated as opaque.
+        Some(
+            "md" | "markdown" | "txt" | "py" | "rs" | "js" | "ts" | "go" | "c" | "h" | "cpp" | "sh"
+            | "toml" | "yaml" | "yml" | "xml",
+        ) => "text/plain",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Live remaining budget grok.com's own web UI polls, for a given model. grok keys the quota by
@@ -695,6 +708,16 @@ mod tests {
     fn stream_error_is_rate_limit() {
         let line = r#"{"error":{"code":429,"message":"rate"}}"#;
         assert!(matches!(parse(line), Err(Error::RateLimit(_))));
+    }
+
+    #[test]
+    fn mime_by_extension() {
+        assert_eq!(mime_of("/tmp/a.PNG"), "image/png");
+        assert_eq!(mime_of("photo.jpeg"), "image/jpeg");
+        assert_eq!(mime_of("notes.md"), "text/plain");
+        assert_eq!(mime_of("main.rs"), "text/plain");
+        assert_eq!(mime_of("app.js"), "text/plain");
+        assert_eq!(mime_of("blob"), "application/octet-stream");
     }
 
     #[test]

@@ -64,7 +64,7 @@ pub struct Input {
     /// Provider-specific mode (e.g. grok "expert").
     pub mode: Option<String>,
     /// A local file to attach to the chat turn (the `upload` tool). The provider uploads it, then
-    /// references it in the send so the model can see it. gemini_web / grok_web only.
+    /// references it in the send so the model can see it. gemini_web / grok_web / chatgpt_web.
     pub file: Option<std::path::PathBuf>,
     /// Cross-provider research niche: `web` (default), `news`, or `academic`. The router steers to a
     /// backend that serves it and each provider maps it to its native vertical (else query-rewrite).
