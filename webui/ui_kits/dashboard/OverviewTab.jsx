@@ -23,6 +23,114 @@ function fmtReset(iso) {
   return 'resets ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
 }
 
+const fmtUsd = (n) => '$' + (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Header odometer + at-a-glance tank + dead-ends. "est. retail" is an honest what-you-didn't-pay
+// estimate, not a real bill.
+function SavingsStrip() {
+  const sv = window.FX.savings || {};
+  const de = window.FX.deadEnds || {};
+  const totalRemaining = window.FX.totalRemaining || 0;
+  const providers = (window.FX.groups || []).reduce((n, g) => n + g.providers.length, 0);
+  const clean = (de.ranOut || 0) === 0;
+  return (
+    <Card accent="accent" pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-mid)', lineHeight: 1.5 }}>
+        You pooled <b style={{ color: 'var(--text-hi)' }}>{(sv.pooledRequests || 0).toLocaleString()}</b> free requests across <b style={{ color: 'var(--text-hi)' }}>{providers}</b> providers — <b style={{ color: 'var(--lime-500)' }}>~{fmtUsd(sv.estRetailUsd)}</b> <span style={{ color: 'var(--text-faint)' }}>est. retail</span> you didn't pay · <b style={{ color: 'var(--text-hi)' }}>{(sv.keysBilled || 0).toLocaleString()}</b> keys billed
+      </div>
+      <div style={{ display: 'flex', borderTop: '1px solid var(--border-faint)', paddingTop: 14 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-hi)' }}>{totalRemaining.toLocaleString()}</span>
+          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>free requests still in the tank</span>
+        </div>
+        <div style={{ width: 1, background: 'var(--border-faint)', margin: '0 18px' }} />
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-hi)' }}>{(de.routed || 0).toLocaleString()}</span>
+          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>operations routed · <span style={{ color: clean ? 'var(--green-500)' : 'var(--red-500)' }}>{(de.ranOut || 0).toLocaleString()} ran out mid-task</span></span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// Accounts closest to empty — remaining + reset cadence + observed burn rate.
+function BurnRadar() {
+  const burn = window.FX.burn || [];
+  if (!burn.length) return null;
+  return (
+    <Card pad={0} style={{ overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--border-faint)' }}>
+        <StatusDot tone="low" size={7} />
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)' }}>Burn radar</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>closest to empty</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {burn.map((b, i) => {
+          const rem = b.remaining || 0;
+          const tone = rem <= 0 ? 'out' : rem < 5 ? 'low' : 'ok';
+          return (
+            <div key={b.label + i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', borderTop: i ? '1px solid var(--border-faint)' : 'none' }}>
+              <StatusDot tone={tone} size={6} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{b.label}</div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{b.provider}</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                {b.resetWindow && <Badge tone="neutral" variant="outline" uppercase>{b.resetWindow}</Badge>}
+                {b.ratePerHour > 0 && <span>~{b.ratePerHour}/hr</span>}
+                <span><b style={{ color: tone === 'out' ? 'var(--red-500)' : 'var(--text-hi)' }}>{rem.toLocaleString()}</b> left</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// Human twin of the agent's usage(provider) drill-in: per-provider niches + call modes.
+function CapabilityMatrix() {
+  const caps = window.FX.capabilities || [];
+  const [open, setOpen] = React.useState(false);
+  if (!caps.length) return null;
+  return (
+    <section>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, marginBottom: open ? 12 : 0 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-lo)' }}>Capability matrix</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{caps.length} {caps.length === 1 ? 'provider' : 'providers'}</span>
+        <span style={{ flex: 1, height: 1, background: 'var(--border-faint)' }} />
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{open ? '− hide' : '+ show'}</span>
+      </button>
+      {open && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14 }}>
+          {caps.map((c) => (
+            <Card key={c.provider} pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>{c.provider}</span>
+              {(c.niches || []).length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {c.niches.map((n) => (
+                    <span key={n} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px' }}>{n}</span>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {(c.modes || []).map(([mode, desc]) => (
+                  <div key={mode} style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)', flexShrink: 0 }}>{mode}</span>
+                    <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>call usage(provider={c.provider}) for exact calls</span>
+            </Card>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // One limit = its own cube bar (each mode/model/feature has its own quota + reset cadence).
 // Fuel-gauge fill: the bar shows what's LEFT (full when fresh), so we feed the meter `remaining`
 // as its fill and force the colour from the real remaining (green → amber → red as it drains).
@@ -169,6 +277,8 @@ function OverviewTab() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 380px', gap: 20, alignItems: 'start', height: '100%' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <SavingsStrip />
+        <BurnRadar />
         {groups.map((g) => (
           <section key={g.id}>
             <GroupHeader label={g.label} count={`${g.providers.length} ${g.providers.length === 1 ? 'provider' : 'providers'}`} />
@@ -177,6 +287,7 @@ function OverviewTab() {
             </div>
           </section>
         ))}
+        <CapabilityMatrix />
       </div>
       <div style={{ position: 'sticky', top: 84, height: 'calc(100vh - 104px)' }}>
         <LiveLog />

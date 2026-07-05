@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod mcp;
+pub mod price;
 pub mod providers;
 pub mod proxy;
 pub mod router;

@@ -635,7 +635,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
 
     // Recent route history (live log + per-account "last seen" + sparklines). Empty until an
     // MCP server built from this code records calls into the shared usage.db.
-    let routes = store.recent_routes(120).await.unwrap_or_default();
+    let routes = store.recent_routes(1000).await.unwrap_or_default();
     let mut last_seen: HashMap<&str, &RouteRow> = HashMap::new();
     for r in &routes {
         last_seen.insert(r.label.as_str(), r);
@@ -943,6 +943,85 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
+    // One pass over the route log: savings odometer (what the pooled free tiers would have cost at
+    // list price), dead-end tally (ops that ran out with no success — ~0 by design), and per-account
+    // op rate for the burn radar.
+    let mut est_retail = 0.0f64;
+    let mut pooled = 0i64;
+    let mut ran_out = 0i64;
+    let mut op_rate: HashMap<&str, (i64, i64, i64)> = HashMap::new(); // count, first_epoch, last_epoch
+    for r in &routes {
+        if r.status == 200 {
+            est_retail += crate::price::retail_usd(&r.provider, &r.capability);
+            pooled += 1;
+        } else if r.status == 429 || r.status == 402 {
+            ran_out += 1;
+        }
+        if let Ok(d) = DateTime::parse_from_rfc3339(&r.ts) {
+            let secs = d.timestamp();
+            let e = op_rate.entry(r.label.as_str()).or_insert((0, secs, secs));
+            e.0 += 1;
+            e.1 = e.1.min(secs);
+            e.2 = e.2.max(secs);
+        }
+    }
+
+    // Burn radar: the accounts closest to empty, with their recent op/hr slope. Web-session
+    // placeholders (no real ceiling) count as full so they don't crowd out real low balances.
+    let empty_frac = |v: &&crate::router::UsageView| -> f64 {
+        if v.quota > 0 {
+            v.remaining as f64 / v.quota as f64
+        } else {
+            1.0
+        }
+    };
+    let mut burn_ord = mains.clone();
+    burn_ord.sort_by(|a, b| {
+        empty_frac(a)
+            .partial_cmp(&empty_frac(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let burn: Vec<Value> = burn_ord
+        .iter()
+        .take(5)
+        .map(|v| {
+            let rate = op_rate
+                .get(v.label.as_str())
+                .map(|(c, first, last)| {
+                    let span_h = (last - first) as f64 / 3600.0;
+                    if span_h >= 0.1 {
+                        (*c as f64 / span_h * 10.0).round() / 10.0
+                    } else {
+                        0.0
+                    }
+                })
+                .unwrap_or(0.0);
+            json!({
+                "provider": v.provider,
+                "label": v.label,
+                "remaining": v.remaining,
+                "resetWindow": window_or_period(v.window_secs, &v.period),
+                "ratePerHour": rate,
+            })
+        })
+        .collect();
+
+    // Capability matrix: each configured provider's native niches + escape-hatch modes.
+    let capabilities: Vec<Value> = order
+        .iter()
+        .map(|&name| match parse_kind(name) {
+            Some(kind) => {
+                let ex = crate::providers::extras(kind);
+                json!({
+                    "provider": name,
+                    "niches": ex.niches,
+                    "modes": ex.modes.iter().map(|(m, d)| json!([m, d])).collect::<Vec<_>>(),
+                })
+            }
+            None => json!({ "provider": name, "niches": [], "modes": [] }),
+        })
+        .collect();
+
     Ok(json!({
         "groups": groups,
         "accounts": accounts,
@@ -952,6 +1031,10 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         "usage": usage,
         "summary": { "accounts": mains.len(), "healthy": healthy, "needsLogin": needs_login, "exhausted": exhausted },
         "totalRemaining": total_remaining,
+        "savings": { "estRetailUsd": (est_retail * 100.0).round() / 100.0, "pooledRequests": pooled, "keysBilled": 0 },
+        "deadEnds": { "routed": routes.len(), "ranOut": ran_out },
+        "burn": burn,
+        "capabilities": capabilities,
     }))
 }
 
