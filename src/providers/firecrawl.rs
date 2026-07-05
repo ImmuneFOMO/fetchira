@@ -71,6 +71,24 @@ fn search_query(input: &Input) -> Result<String> {
 }
 
 async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
+    match input.mode.as_deref() {
+        None => scrape_markdown(base, key, client, input).await,
+        Some("extract") => extract(base, key, client, input).await,
+        Some("crawl") => crawl(base, key, client, input).await,
+        Some(other) => Err(Error::Provider {
+            provider: "firecrawl",
+            status: 400,
+            body: format!("unknown mode '{other}'; valid modes: extract, crawl"),
+        }),
+    }
+}
+
+async fn scrape_markdown(
+    base: &str,
+    key: &str,
+    client: &reqwest::Client,
+    input: &Input,
+) -> Result<Outcome> {
     let resp = client
         .post(format!("{base}/v1/scrape"))
         .bearer_auth(key)
@@ -85,6 +103,47 @@ async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
         .to_string();
     let cost = v["data"]["metadata"]["creditsUsed"].as_i64().unwrap_or(1);
     Ok(Outcome::new(text, cost))
+}
+
+// LLM-structured extraction over a single url; query doubles as the extraction prompt.
+async fn extract(
+    base: &str,
+    key: &str,
+    client: &reqwest::Client,
+    input: &Input,
+) -> Result<Outcome> {
+    let resp = client
+        .post(format!("{base}/v1/extract"))
+        .bearer_auth(key)
+        .json(&extract_body(input)?)
+        .send()
+        .await?;
+    let v: Value = check("firecrawl", resp).await?.json().await?;
+    let cost = v["data"]["metadata"]["creditsUsed"].as_i64().unwrap_or(1);
+    Ok(Outcome::new(v["data"].to_string(), cost))
+}
+
+fn extract_body(input: &Input) -> Result<Value> {
+    Ok(json!({
+        "urls": [input.need_url()?],
+        "prompt": input.query.as_deref().unwrap_or("Extract the main content of the page as structured data."),
+    }))
+}
+
+// crawl is async on firecrawl's side; kick it off and hand back the job id to poll.
+async fn crawl(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
+    let resp = client
+        .post(format!("{base}/v1/crawl"))
+        .bearer_auth(key)
+        .json(&json!({ "url": input.need_url()? }))
+        .send()
+        .await?;
+    let v: Value = check("firecrawl", resp).await?.json().await?;
+    let text = match v["id"].as_str() {
+        Some(id) => format!("crawl started, job id: {id}"),
+        None => v.to_string(),
+    };
+    Ok(Outcome::new(text, 1))
 }
 
 /// `GET /v1/team/credit-usage` → monthly credit balance. Free read, reflects paid plans + top-ups.
@@ -139,6 +198,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(search_query(&input).unwrap(), "crispr");
+    }
+
+    #[test]
+    fn extract_body_uses_url_and_query_prompt() {
+        let input = Input {
+            url: Some("https://example.com".into()),
+            query: Some("list the pricing tiers".into()),
+            mode: Some("extract".into()),
+            ..Default::default()
+        };
+        let body = extract_body(&input).unwrap();
+        assert_eq!(body["urls"], json!(["https://example.com"]));
+        assert_eq!(body["prompt"], "list the pricing tiers");
     }
 
     #[test]

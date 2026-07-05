@@ -350,6 +350,135 @@ pub fn order_for(cap: Capability, topic: Option<&str>) -> Vec<ProviderKind> {
     list
 }
 
+/// A provider's static capability sheet: the research niches it serves natively, its escape-hatch
+/// `mode` values (with a one-line what-it-does), and ready-to-copy example calls. Single source for
+/// both `usage(provider=…)` and the UI capability matrix — keep it data-only and terse.
+pub struct ProviderExtras {
+    pub niches: &'static [&'static str],
+    pub modes: &'static [(&'static str, &'static str)],
+    pub examples: &'static [&'static str],
+}
+
+pub fn extras(kind: ProviderKind) -> ProviderExtras {
+    use ProviderKind::*;
+    match kind {
+        Serper => ProviderExtras {
+            niches: &[
+                "topic=news → Google News",
+                "topic=academic → Google Scholar",
+            ],
+            modes: &[
+                ("patents", "Google Patents"),
+                ("places", "Google Maps / local places"),
+                ("shopping", "Google Shopping products"),
+                ("images", "Google Images"),
+                ("scrape", "fetch a page as text — call read(provider=serper)"),
+            ],
+            examples: &[
+                "search(query=\"crispr off-target\", provider=\"serper\", topic=\"academic\")",
+                "search(query=\"ramen lisbon\", provider=\"serper\", mode=\"places\")",
+            ],
+        },
+        Tavily => ProviderExtras {
+            niches: &["topic=news → news source"],
+            modes: &[
+                ("extract", "pull the main content of a URL — read(provider=tavily)"),
+                ("crawl", "follow a site's links and return their content"),
+            ],
+            examples: &[
+                "search(query=\"fed rate decision\", provider=\"tavily\", topic=\"news\", recency=\"week\")",
+                "read(url=\"https://example.com/post\", provider=\"tavily\", mode=\"extract\")",
+            ],
+        },
+        Exa => ProviderExtras {
+            niches: &[
+                "topic=news → news category",
+                "topic=academic → research-paper category",
+            ],
+            modes: &[
+                ("similar", "find pages semantically similar to a URL"),
+                ("contents", "return the full text of a result — read(provider=exa)"),
+            ],
+            examples: &[
+                "search(query=\"transformer scaling laws\", provider=\"exa\", topic=\"academic\")",
+                "deep_research(query=\"state of solid-state batteries\", provider=\"exa\", depth=\"deep\")",
+            ],
+        },
+        Firecrawl => ProviderExtras {
+            niches: &["topic=news / academic → query-rewrite hint"],
+            modes: &[
+                ("crawl", "crawl a whole site to markdown"),
+                ("extract", "structured extraction against a schema/prompt"),
+                ("screenshot", "render the page and return a screenshot"),
+            ],
+            examples: &[
+                "read(url=\"https://docs.example.com\", provider=\"firecrawl\", mode=\"crawl\")",
+                "read(url=\"https://example.com/pricing\", provider=\"firecrawl\", mode=\"extract\")",
+            ],
+        },
+        Parallel => ProviderExtras {
+            niches: &["depth=deep → pro research tier"],
+            modes: &[("extract", "search + extract structured fields in one pass")],
+            examples: &[
+                "deep_research(query=\"compare EU AI-act obligations by company size\", provider=\"parallel\", depth=\"deep\")",
+            ],
+        },
+        Jina => ProviderExtras {
+            niches: &[],
+            modes: &[
+                ("screenshot", "return a screenshot instead of markdown"),
+                ("links", "append a summary of the page's outbound links"),
+            ],
+            examples: &["read(url=\"https://example.com\", provider=\"jina\")"],
+        },
+        Steel => ProviderExtras {
+            niches: &[],
+            modes: &[
+                ("screenshot", "capture the rendered page as an image"),
+                ("pdf", "render the page to a PDF"),
+            ],
+            examples: &["browser(url=\"https://app.example.com/dashboard\")"],
+        },
+        GrokWeb => ProviderExtras {
+            niches: &[],
+            modes: &[
+                ("fast", "quick search-grounded answer (default)"),
+                ("expert", "slower, deeper reasoning"),
+                ("heavy", "grok-4-heavy — deep_research tier"),
+            ],
+            examples: &[
+                "search(query=\"who won stage 4 of the tour\", provider=\"grok_web\")",
+                "deep_research(query=\"lithium supply chain risks\", provider=\"grok_web\", mode=\"heavy\")",
+            ],
+        },
+        GeminiWeb => ProviderExtras {
+            niches: &[],
+            modes: &[("(model picks the tier — see usage models)", "")],
+            examples: &[
+                "search(query=\"latest webb telescope findings\", provider=\"gemini_web\", model=\"3.1 pro\")",
+            ],
+        },
+        PerplexityWeb => ProviderExtras {
+            niches: &[],
+            modes: &[
+                ("reasoning", "reasoning-model answer"),
+                ("deep research", "multi-round research report"),
+            ],
+            examples: &[
+                "deep_research(query=\"survey of RAG eval methods\", provider=\"perplexity_web\", mode=\"deep research\")",
+            ],
+        },
+        ChatgptWeb => ProviderExtras {
+            niches: &[],
+            modes: &[("chat", "answer from the model alone, web search off")],
+            examples: &[
+                "search(query=\"explain HNSW indexing\", provider=\"chatgpt_web\", model=\"gpt-5.4 high\")",
+                "deep_research(query=\"2025 humanoid-robot startups landscape\", provider=\"chatgpt_web\")",
+            ],
+        },
+    }
+}
+
 /// Live remaining budget reported by the provider itself (only grok exposes one today).
 #[derive(Clone, Copy)]
 pub struct LiveQuota {
@@ -711,5 +840,15 @@ mod tests {
         let dr = order_for(Capability::DeepResearch, Some("academic"));
         assert_eq!(dr[0], Exa);
         assert!(!dr.contains(&Serper));
+    }
+
+    #[test]
+    fn every_provider_has_a_nonempty_extras_sheet() {
+        for &k in ProviderKind::all() {
+            let e = extras(k);
+            assert!(!e.examples.is_empty(), "{} has no examples", k.as_str());
+            // modes carry a (value, desc) pair; the value must be present
+            assert!(e.modes.iter().all(|(v, _)| !v.is_empty()));
+        }
     }
 }

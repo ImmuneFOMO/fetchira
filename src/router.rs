@@ -317,6 +317,14 @@ impl Router {
                 }
                 match res {
                     Ok(o) => {
+                        // An empty read isn't a real answer — refund and fall through so failover
+                        // (and the browser escalation below) get a shot instead of returning blank.
+                        if cap == Capability::Read && o.text.trim().is_empty() {
+                            let _ = self.store.refund(&blabel, &period, 1).await;
+                            prev_fail = Some((acct.to_string(), 0));
+                            last_err = Some(Error::BadResponse(kind.as_str()));
+                            continue;
+                        }
                         // The reservation already charged 1; settle the rest for costlier calls.
                         if o.cost != 1 {
                             let _ = self
@@ -377,6 +385,14 @@ impl Router {
                         }
                     }
                 }
+            }
+        }
+
+        // Read escalation: if every read backend failed or returned nothing, the page likely needs a
+        // real browser — try Steel once before giving up.
+        if cap == Capability::Read && forced.is_none() && last_err.is_some() {
+            if let Ok(reply) = Box::pin(self.call(Capability::Browser, input, None)).await {
+                return Ok(reply);
             }
         }
 
@@ -652,9 +668,85 @@ pub fn compact_usage(views: &[UsageView]) -> String {
         }
     }
     format!(
-        "web sessions — live models + limits (pass a model/mode back to search/deep_research):\n{web}\napi keys: {}\n\ntip: an unknown model/mode makes the tool return the live options; the router also auto-fails-over on its own.",
-        api.join(" · ")
+        "web sessions — live models + limits (pass a model/mode back to search/deep_research):\n{web}\napi keys: {}\n\nextras: {}\n\ntip: an unknown model/mode makes the tool return the live options; the router also auto-fails-over on its own.",
+        api.join(" · "),
+        extras_index()
     )
+}
+
+/// One-line teaser of the escape-hatch modes, pointing at `usage(provider=…)` for the full sheet.
+/// Non-web providers only (web modes ride along in the model catalog above).
+fn extras_index() -> String {
+    let mut idx: Vec<String> = ProviderKind::all()
+        .iter()
+        .filter(|k| !k.is_web())
+        .filter_map(|&k| {
+            let modes = providers::extras(k).modes;
+            if modes.is_empty() {
+                return None;
+            }
+            let names: Vec<&str> = modes.iter().take(2).map(|(n, _)| *n).collect();
+            Some(format!("{}({})", k.as_str(), names.join("·")))
+        })
+        .collect();
+    idx.push("→ usage(provider=…) for params & examples".to_string());
+    idx.join(" · ")
+}
+
+/// The full capability sheet for one provider: its live limit/balance line(s) from the snapshot,
+/// merged with the static `extras` table (niches, escape-hatch modes, example calls). This is what
+/// `usage(provider=…)` returns — everything an agent needs to drive that backend by hand.
+pub fn provider_sheet(kind: ProviderKind, views: &[UsageView]) -> String {
+    use std::fmt::Write;
+    let ex = providers::extras(kind);
+    let mut s = format!("{} — {}\n", kind.as_str(), kind.blurb());
+    for v in views
+        .iter()
+        .filter(|v| v.provider == kind.as_str() && !v.label.ends_with("#dr"))
+    {
+        let _ = writeln!(s, "  {} — {}/{} left", v.label, v.remaining, v.quota);
+        if let Some(ll) = &v.limits {
+            if let Some(t) = &ll.tier {
+                let _ = writeln!(s, "    tier: {t}");
+            }
+            if !ll.models.is_empty() {
+                let parts: Vec<String> = ll.models.iter().map(fmt_model).collect();
+                let _ = writeln!(s, "    models: {}", parts.join(" · "));
+            }
+            if !ll.features.is_empty() {
+                let feats: Vec<String> = ll
+                    .features
+                    .iter()
+                    .map(|f| match f.total {
+                        Some(t) => format!("{} {}/{}", f.feature, f.remaining, t),
+                        None => format!("{} {}", f.feature, f.remaining),
+                    })
+                    .collect();
+                let _ = writeln!(s, "    limits: {}", feats.join(" · "));
+            }
+        }
+    }
+    if !ex.niches.is_empty() {
+        s.push_str("niches:\n");
+        for n in ex.niches {
+            let _ = writeln!(s, "  {n}");
+        }
+    }
+    if !ex.modes.is_empty() {
+        s.push_str("modes (pass as `mode`):\n");
+        for (m, desc) in ex.modes {
+            if desc.is_empty() {
+                let _ = writeln!(s, "  {m}");
+            } else {
+                let _ = writeln!(s, "  {m} — {desc}");
+            }
+        }
+    }
+    s.push_str("examples:\n");
+    for e in ex.examples {
+        let _ = writeln!(s, "  {e}");
+    }
+    s
 }
 
 /// One model/mode as a compact token: `name[levels] value·window`, `LOCKED` when the tier can't use it.
@@ -790,5 +882,37 @@ mod tests {
             )),
             "Pro[standard/extended]"
         );
+    }
+
+    #[test]
+    fn provider_sheet_renders_extras_and_live_line() {
+        // No matching views: still renders the static sheet (modes + examples).
+        let sheet = provider_sheet(ProviderKind::Serper, &[]);
+        assert!(sheet.contains("serper"));
+        assert!(sheet.contains("patents"));
+        assert!(sheet.contains("examples:"));
+
+        // A matching view contributes a live "left" line.
+        let v = UsageView {
+            provider: "serper",
+            label: "serper".into(),
+            period: "once".into(),
+            quota: 2500,
+            used: 100,
+            remaining: 2400,
+            exhausted: false,
+            proxy: "direct".into(),
+            window_secs: None,
+            limits: None,
+        };
+        let sheet = provider_sheet(ProviderKind::Serper, &[v]);
+        assert!(sheet.contains("2400/2500 left"));
+    }
+
+    #[test]
+    fn extras_index_points_at_usage() {
+        let idx = extras_index();
+        assert!(idx.contains("serper("));
+        assert!(idx.contains("usage(provider"));
     }
 }

@@ -1,11 +1,12 @@
 use serde_json::{json, Value};
 
 use super::{check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 // Maps the niche knobs onto serper's native shape: topic → endpoint (/news, /scholar), recency →
-// `tbs`, and domains → `site:`/`-site:` on `q` (serper has no domains param). Returns the path, body
-// and the result-array key (news lands under `news`, search/scholar under `organic`).
+// `tbs`, and domains → `site:`/`-site:` on `q` (serper has no domains param). `mode` is an escape
+// hatch to serper's other verticals; when absent the topic mapping stands. Returns the path, body
+// and the result-array key (news lands under `news`, search/scholar/patents under `organic`).
 fn build_req(input: &Input) -> Result<(&'static str, Value, &'static str)> {
     let mut q = input.need_query()?.to_string();
     if let Some(domains) = &input.domains {
@@ -17,10 +18,34 @@ fn build_req(input: &Input) -> Result<(&'static str, Value, &'static str)> {
             q.push_str(&format!(" -site:{d}"));
         }
     }
-    let (path, arr) = match input.topic.as_deref() {
-        Some("news") => ("news", "news"),
-        Some("academic") => ("scholar", "organic"),
-        _ => ("search", "organic"),
+    let (path, arr) = match input.mode.as_deref() {
+        Some(mode) => match mode {
+            "patents" => ("patents", "organic"),
+            "places" => ("places", "places"),
+            "shopping" => ("shopping", "shopping"),
+            "images" => ("images", "images"),
+            "scrape" => {
+                return Err(Error::Provider {
+                    provider: "serper",
+                    status: 400,
+                    body: "serper scrape is a read: use the read tool with provider=serper".into(),
+                })
+            }
+            other => {
+                return Err(Error::Provider {
+                    provider: "serper",
+                    status: 400,
+                    body: format!(
+                        "unknown mode '{other}'; valid modes: patents, places, shopping, images"
+                    ),
+                })
+            }
+        },
+        None => match input.topic.as_deref() {
+            Some("news") => ("news", "news"),
+            Some("academic") => ("scholar", "organic"),
+            _ => ("search", "organic"),
+        },
     };
     let mut body = json!({ "q": q, "num": input.results() });
     if let Some(tbs) = input.recency.as_deref().and_then(niche::recency_tbs) {
@@ -48,10 +73,13 @@ pub async fn call(
         .as_array()
         .map(|a| {
             a.iter()
-                .map(|o| Hit {
-                    title: s(o, "title"),
-                    url: s(o, "link"),
-                    snippet: s(o, "snippet"),
+                .map(|o| {
+                    let url = s(o, "link");
+                    Hit {
+                        title: s(o, "title"),
+                        url: if url.is_empty() { s(o, "url") } else { url },
+                        snippet: s(o, "snippet"),
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -112,6 +140,19 @@ mod tests {
         assert_eq!(arr, "organic");
         assert!(body.get("tbs").is_none());
         assert_eq!(body["q"], "crispr");
+    }
+
+    #[test]
+    fn mode_overrides_endpoint() {
+        let input = Input {
+            query: Some("crispr".into()),
+            topic: Some("news".into()),
+            mode: Some("patents".into()),
+            ..Default::default()
+        };
+        let (path, _body, arr) = build_req(&input).unwrap();
+        assert_eq!(path, "patents");
+        assert_eq!(arr, "organic");
     }
 
     #[test]

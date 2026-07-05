@@ -85,6 +85,14 @@ fn search_body(input: &Input) -> Result<Value> {
     Ok(body)
 }
 
+// `deep` depth buys the pricier/deeper `core` processor; anything else keeps the default `base`.
+fn processor(input: &Input) -> &'static str {
+    match input.depth.as_deref() {
+        Some("deep") => "core",
+        _ => "base",
+    }
+}
+
 async fn research(
     base: &str,
     key: &str,
@@ -94,7 +102,7 @@ async fn research(
     let start = client
         .post(format!("{base}/v1/tasks/runs"))
         .header("x-api-key", key)
-        .json(&json!({ "input": input.need_query()?, "processor": "base" }))
+        .json(&json!({ "input": input.need_query()?, "processor": processor(input) }))
         .send()
         .await?;
     let v: Value = check("parallel", start).await?.json().await?;
@@ -206,6 +214,25 @@ mod tests {
         let body = search_body(&input).unwrap();
         assert_eq!(body["objective"], "crispr");
         assert!(body.get("source_policy").is_none());
+    }
+
+    #[test]
+    fn depth_selects_processor() {
+        assert_eq!(processor(&Input::default()), "base");
+        assert_eq!(
+            processor(&Input {
+                depth: Some("deep".into()),
+                ..Default::default()
+            }),
+            "core"
+        );
+        assert_eq!(
+            processor(&Input {
+                depth: Some("standard".into()),
+                ..Default::default()
+            }),
+            "base"
+        );
     }
 
     #[test]
