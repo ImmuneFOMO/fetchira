@@ -311,8 +311,12 @@ function OverviewTab() {
         {groups.map((g) => (
           <section key={g.id}>
             <GroupHeader label={g.label} count={`${g.providers.length} ${g.providers.length === 1 ? 'provider' : 'providers'}`} />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14, alignItems: 'start' }}>
-              {g.providers.map((p) => <FxProviderCard {...p} key={p.name} />)}
+            <div style={{ columnWidth: 290, columnGap: 14 }}>
+              {g.providers.map((p) => (
+                <div key={p.name} style={{ breakInside: 'avoid', marginBottom: 14 }}>
+                  <FxProviderCard {...p} />
+                </div>
+              ))}
             </div>
           </section>
         ))}
