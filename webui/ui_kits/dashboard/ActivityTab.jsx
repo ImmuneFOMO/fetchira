@@ -44,12 +44,55 @@ function NicheBadge({ niche }) {
   );
 }
 
-function LogRow(l) {
-  if (!l.niche) return <RouteLogLine {...l} />;
+function pretty(s) {
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch (e) { return s; }
+}
+
+// Drill-in for a route-log row: full request + response/error from GET /api/debug/{id}.
+// Mirrors DebugTab's DebugDetail; the error border keys off full.status since route lines carry no `ok`.
+function LogDetail({ full }) {
+  if (!full) return <div style={{ padding: '6px 10px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>loading…</div>;
+  const body = full.response != null ? full.response : full.error;
+  const label = full.response != null ? 'response' : 'error';
+  const pre = { fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0, padding: 10, background: 'var(--surface-well)', borderRadius: 'var(--r-xs)', color: 'var(--text-mid)' };
+  const cap = { fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)', marginBottom: 4 };
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <RouteLogLine {...l} style={{ flex: 1, minWidth: 0 }} />
-      <NicheBadge niche={l.niche} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '2px 10px 10px' }}>
+      <div>
+        <div style={cap}>request</div>
+        <pre style={pre}>{pretty(full.request)}</pre>
+      </div>
+      <div>
+        <div style={cap}>{label}</div>
+        <pre style={{ ...pre, maxHeight: 320, overflowY: 'auto', borderLeft: full.status < 400 ? 'none' : '2px solid var(--red-500)' }}>{body != null ? body : '—'}</pre>
+      </div>
+    </div>
+  );
+}
+
+function LogRow(l) {
+  const [open, setOpen] = React.useState(false);
+  const [full, setFull] = React.useState(null);
+  const hasDebug = l.debugId != null;
+
+  const toggle = async () => {
+    const opening = !open;
+    setOpen(opening);
+    if (!opening || full) return;
+    try {
+      const r = await fetch(`/api/debug/${l.debugId}`, { headers: { 'x-fetchira-token': window.FX_TOKEN } });
+      if (r.ok) setFull(await r.json());
+    } catch (e) { /* offline */ }
+  };
+
+  return (
+    <div style={{ borderRadius: 'var(--r-xs)', background: open ? 'var(--surface-2)' : 'transparent' }}>
+      <div onClick={hasDebug ? toggle : undefined} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: hasDebug ? 'pointer' : 'default' }}>
+        <span style={{ width: 10, flexShrink: 0, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>{hasDebug ? (open ? '▾' : '▸') : ''}</span>
+        <RouteLogLine {...l} style={{ flex: 1, minWidth: 0 }} />
+        {l.niche && <NicheBadge niche={l.niche} />}
+      </div>
+      {open && <LogDetail full={full} />}
     </div>
   );
 }

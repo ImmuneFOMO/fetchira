@@ -292,10 +292,11 @@ impl Router {
                 let latency = t0.elapsed().as_millis() as i64;
                 let acct = strip_dr(&blabel);
                 // Firehose: every attempt (success or failure, incl. a 403 body) lands here.
+                let mut debug_id = None;
                 if let Some(retention) = self.debug {
                     let err = res.as_ref().err().map(|e| e.to_string());
                     let req = describe_input(cap, input);
-                    let _ = self
+                    debug_id = self
                         .store
                         .log_debug(
                             &DebugLog {
@@ -313,7 +314,8 @@ impl Router {
                             },
                             retention,
                         )
-                        .await;
+                        .await
+                        .ok();
                 }
                 match res {
                     Ok(o) => {
@@ -349,6 +351,7 @@ impl Router {
                                 fail_from: prev_fail.as_ref().map(|(l, _)| l.as_str()),
                                 fail_code: prev_fail.as_ref().map(|(_, c)| *c),
                                 niche,
+                                debug_id,
                             })
                             .await;
                         // Deep-research honesty: exa/parallel `deep` bills a live $ balance.

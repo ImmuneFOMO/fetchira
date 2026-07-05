@@ -460,6 +460,9 @@ fn route_to_entry(r: &RouteRow) -> Value {
     if !r.niche.is_empty() {
         entry["niche"] = json!(r.niche);
     }
+    if let Some(id) = r.debug_id {
+        entry["debugId"] = json!(id);
+    }
     entry
 }
 
