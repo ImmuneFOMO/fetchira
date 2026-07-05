@@ -102,7 +102,8 @@ async fn contents(
 }
 
 // The async `/research/v1` job endpoint is EOL; deep research now runs synchronously through
-// `/search` with the `deep-reasoning` type (also the `depth=deep` path).
+// `/search`. `depth=deep` gets the heaviest `deep-reasoning` type; standard/none get a plain
+// research-grade `deep` search.
 async fn research(
     base: &str,
     key: &str,
@@ -121,7 +122,10 @@ async fn research(
 
 fn research_body(input: &Input) -> Result<Value> {
     let mut body = search_body(input, 8000)?;
-    body["type"] = json!("deep-reasoning");
+    body["type"] = json!(match input.depth.as_deref() {
+        Some("deep") => "deep-reasoning",
+        _ => "deep",
+    });
     Ok(body)
 }
 
@@ -201,13 +205,21 @@ mod tests {
     }
 
     #[test]
-    fn research_is_synchronous_deep() {
-        let b = research_body(&Input {
+    fn research_depth_selects_type() {
+        let standard = research_body(&Input {
             query: Some("q".into()),
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(b["type"], "deep-reasoning");
-        assert_eq!(b["contents"]["text"]["maxCharacters"], 8000);
+        assert_eq!(standard["type"], "deep");
+        assert_eq!(standard["contents"]["text"]["maxCharacters"], 8000);
+
+        let deep = research_body(&Input {
+            query: Some("q".into()),
+            depth: Some("deep".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(deep["type"], "deep-reasoning");
     }
 }

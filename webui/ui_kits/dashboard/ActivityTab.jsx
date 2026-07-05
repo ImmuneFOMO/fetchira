@@ -31,6 +31,29 @@ function FilterChip({ label, active, onClick }) {
   );
 }
 
+// Tag on a route-log row when the request carried a niche filter: green "native" = the filter hit a
+// real provider param; amber "rewrite" = served best-effort via query text (hint: add a provider that
+// filters natively). Absent field → no tag.
+function NicheBadge({ niche }) {
+  if (niche !== 'native' && niche !== 'rewrite') return null;
+  const native = niche === 'native';
+  return (
+    <Badge tone={native ? 'ok' : 'low'} variant="soft" uppercase
+      title={native ? 'niche filter mapped to a native provider param' : 'niche served via query text — add a provider that filters natively'}
+      style={{ height: 16, padding: '0 6px', fontSize: 10, flexShrink: 0 }}>{niche}</Badge>
+  );
+}
+
+function LogRow(l) {
+  if (!l.niche) return <RouteLogLine {...l} />;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <RouteLogLine {...l} style={{ flex: 1, minWidth: 0 }} />
+      <NicheBadge niche={l.niche} />
+    </div>
+  );
+}
+
 function HealthRow({ h }) {
   const tone = h.state === 'exhausted' ? 'out' : h.state === 'needs-login' ? 'off' : 'ok';
   return (
@@ -63,7 +86,7 @@ function ActivityTab() {
             {caps.map((c) => <FilterChip key={c} label={c.replace('_', ' ')} active={filter === c} onClick={() => setFilter(c)} />)}
           </div>
           <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 1 }}>
-            {lines.length ? lines.map((l, i) => <RouteLogLine key={i} {...l} />) : <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>No matching calls</div>}
+            {lines.length ? lines.map((l, i) => <LogRow key={i} {...l} />) : <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>No matching calls</div>}
           </div>
         </Card>
 

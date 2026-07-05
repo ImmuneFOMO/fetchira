@@ -350,6 +350,33 @@ pub fn order_for(cap: Capability, topic: Option<&str>) -> Vec<ProviderKind> {
     list
 }
 
+/// Whether every niche knob set on this request is served *natively* by `kind`, vs. baked into the
+/// query by `niche::rewrite_query`. `None` when no niche knob is set. Drives the route log's
+/// native/rewrite marker; mirrors the per-provider mapping each `call` applies.
+pub fn niche_native(kind: ProviderKind, input: &Input) -> Option<bool> {
+    if !niche::any(input) {
+        return None;
+    }
+    let topic = input.topic.is_some();
+    let academic = input.topic.as_deref() == Some("academic");
+    let recency = input.recency.is_some();
+    let domains = input.domains.is_some();
+    use ProviderKind::*;
+    Some(match kind {
+        Exa => true,
+        // topic native only for news; academic falls to query-rewrite
+        Tavily => !academic,
+        // domains -> site: rewrite
+        Serper => !domains,
+        // only recency native (tbs); topic + domains rewrite
+        Firecrawl => !(topic || domains),
+        // only domains native (source_policy); topic + recency rewrite
+        Parallel => !(topic || recency),
+        // web sessions + read/browser backends: everything is prose/rewrite
+        _ => false,
+    })
+}
+
 /// A provider's static capability sheet: the research niches it serves natively, its escape-hatch
 /// `mode` values (with a one-line what-it-does), and ready-to-copy example calls. Single source for
 /// both `usage(provider=…)` and the UI capability matrix — keep it data-only and terse.
@@ -840,6 +867,29 @@ mod tests {
         let dr = order_for(Capability::DeepResearch, Some("academic"));
         assert_eq!(dr[0], Exa);
         assert!(!dr.contains(&Serper));
+    }
+
+    #[test]
+    fn niche_native_by_provider() {
+        let dom = Input {
+            domains: Some(vec!["nasa.gov".into()]),
+            ..Default::default()
+        };
+        assert_eq!(niche_native(Exa, &dom), Some(true));
+        assert_eq!(niche_native(Serper, &dom), Some(false)); // domains -> site:
+        assert_eq!(niche_native(GrokWeb, &dom), Some(false));
+        assert_eq!(niche_native(Exa, &Input::default()), None);
+        // tavily serves news natively but rewrites academic
+        let news = Input {
+            topic: Some("news".into()),
+            ..Default::default()
+        };
+        let acad = Input {
+            topic: Some("academic".into()),
+            ..Default::default()
+        };
+        assert_eq!(niche_native(Tavily, &news), Some(true));
+        assert_eq!(niche_native(Tavily, &acad), Some(false));
     }
 
     #[test]

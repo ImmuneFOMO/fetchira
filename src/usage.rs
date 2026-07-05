@@ -26,6 +26,7 @@ pub struct RouteRow {
     pub latency_ms: i64,
     pub fail_from: Option<String>,
     pub fail_code: Option<i64>,
+    pub niche: String,
 }
 
 /// What the router hands to `log_route` after each call (success, with optional failover origin).
@@ -37,6 +38,8 @@ pub struct RouteLog<'a> {
     pub latency_ms: i64,
     pub fail_from: Option<&'a str>,
     pub fail_code: Option<i64>,
+    /// `native`/`rewrite`/`` — how the chosen provider served the request's niche knobs.
+    pub niche: &'a str,
 }
 
 /// One full request/response capture (the debug firehose — every attempt, success or failure).
@@ -119,11 +122,17 @@ impl Store {
                 status     INTEGER NOT NULL,
                 latency_ms INTEGER NOT NULL,
                 fail_from  TEXT,
-                fail_code  INTEGER
+                fail_code  INTEGER,
+                niche      TEXT    NOT NULL DEFAULT ''
             )",
         )
         .execute(&pool)
         .await?;
+        // Existing DBs predate `niche`; add it idempotently (ignore "duplicate column name").
+        sqlx::query("ALTER TABLE route_log ADD COLUMN niche TEXT NOT NULL DEFAULT ''")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS debug_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -303,8 +312,8 @@ impl Store {
     pub async fn log_route(&self, e: &RouteLog<'_>) -> Result<()> {
         let res = sqlx::query(
             "INSERT INTO route_log
-                (ts, capability, provider, label, status, latency_ms, fail_from, fail_code)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, capability, provider, label, status, latency_ms, fail_from, fail_code, niche)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(e.capability)
@@ -314,6 +323,7 @@ impl Store {
         .bind(e.latency_ms)
         .bind(e.fail_from)
         .bind(e.fail_code)
+        .bind(e.niche)
         .execute(&self.pool)
         .await?;
         // Keep the table bounded (~last 1000 rows), amortized so it isn't run every call.
@@ -329,7 +339,7 @@ impl Store {
 
     pub async fn recent_routes(&self, limit: i64) -> Result<Vec<RouteRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code
+            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code, niche
              FROM route_log ORDER BY id DESC LIMIT ?",
         )
         .bind(limit)
@@ -342,7 +352,7 @@ impl Store {
 
     pub async fn routes_since(&self, after_id: i64, limit: i64) -> Result<Vec<RouteRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code
+            "SELECT id, ts, capability, provider, label, status, latency_ms, fail_from, fail_code, niche
              FROM route_log WHERE id > ? ORDER BY id ASC LIMIT ?",
         )
         .bind(after_id)
@@ -474,6 +484,7 @@ fn route_row(r: &sqlx::sqlite::SqliteRow) -> RouteRow {
         latency_ms: r.get("latency_ms"),
         fail_from: r.get("fail_from"),
         fail_code: r.get("fail_code"),
+        niche: r.get("niche"),
     }
 }
 
@@ -506,6 +517,7 @@ mod tests {
                 latency_ms: 198,
                 fail_from: None,
                 fail_code: None,
+                niche: "",
             })
             .await
             .unwrap();
@@ -518,6 +530,7 @@ mod tests {
                 latency_ms: 312,
                 fail_from: Some("exa-1"),
                 fail_code: Some(429),
+                niche: "native",
             })
             .await
             .unwrap();
@@ -526,6 +539,7 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].label, "serper-1"); // chronological: oldest first
         assert_eq!(recent[1].fail_from.as_deref(), Some("exa-1"));
+        assert_eq!(recent[1].niche, "native");
 
         let since = store.routes_since(recent[0].id, 10).await.unwrap();
         assert_eq!(since.len(), 1);

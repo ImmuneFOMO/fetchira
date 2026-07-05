@@ -544,10 +544,14 @@ fn friendly_tier(raw: Option<String>, active: bool) -> Option<String> {
 /// grok's web-UI `modeId` for a call: search -> Fast, deep_research -> Expert. Heavy isn't accepted
 /// for every account, so it's only sent when explicitly requested via `mode`. grok's anti-bot now
 /// rejects the old `modelName`/`deepsearchPreset`/`isReasoning` body fields, so one `modeId` carries
-/// the whole selection.
+/// the whole selection. Absent an explicit `mode`, deep_research honours `depth`: `deep` starts on
+/// Heavy (falls back to Expert on quota lock), everything else on Expert.
 fn select(cap: Capability, input: &Input) -> &'static str {
     let mode = match cap {
-        Capability::DeepResearch => "expert",
+        Capability::DeepResearch => match input.depth.as_deref() {
+            Some("deep") => "heavy",
+            _ => "expert",
+        },
         _ => "fast",
     };
     match input.mode.as_deref() {
@@ -744,6 +748,32 @@ mod tests {
         let empty: Value =
             serde_json::from_str(r#"{"responses":[{"fileAttachmentsMetadata":[]}]}"#).unwrap();
         assert_eq!(generated_image_uri(&empty), None);
+    }
+
+    #[test]
+    fn select_maps_depth_and_mode() {
+        let inp = |depth: Option<&str>, mode: Option<&str>| Input {
+            depth: depth.map(str::to_string),
+            mode: mode.map(str::to_string),
+            ..Default::default()
+        };
+        // search is always Fast, regardless of depth
+        assert_eq!(select(Capability::Search, &inp(Some("deep"), None)), "fast");
+        // deep_research default -> Expert; depth=deep starts on Heavy
+        assert_eq!(select(Capability::DeepResearch, &inp(None, None)), "expert");
+        assert_eq!(
+            select(Capability::DeepResearch, &inp(Some("standard"), None)),
+            "expert"
+        );
+        assert_eq!(
+            select(Capability::DeepResearch, &inp(Some("deep"), None)),
+            "heavy"
+        );
+        // an explicit mode overrides depth
+        assert_eq!(
+            select(Capability::DeepResearch, &inp(Some("deep"), Some("expert"))),
+            "expert"
+        );
     }
 
     #[test]

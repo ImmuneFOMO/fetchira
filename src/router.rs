@@ -333,6 +333,11 @@ impl Router {
                                 .await;
                         }
                         // Best-effort route log (never fail the call over telemetry).
+                        let niche = match providers::niche_native(kind, input) {
+                            Some(true) => "native",
+                            Some(false) => "rewrite",
+                            None => "",
+                        };
                         let _ = self
                             .store
                             .log_route(&RouteLog {
@@ -343,11 +348,23 @@ impl Router {
                                 latency_ms: latency,
                                 fail_from: prev_fail.as_ref().map(|(l, _)| l.as_str()),
                                 fail_code: prev_fail.as_ref().map(|(_, c)| *c),
+                                niche,
                             })
                             .await;
+                        // Deep-research honesty: exa/parallel `deep` bills a live $ balance.
+                        let mut text = o.text;
+                        if cap == Capability::DeepResearch
+                            && input.depth.as_deref() == Some("deep")
+                            && matches!(kind, ProviderKind::Exa | ProviderKind::Parallel)
+                        {
+                            text = format!(
+                                "⟦deep research via {} — spends live $ balance⟧\n{text}",
+                                kind.as_str()
+                            );
+                        }
                         let session = o.session.map(|s| format!("{}:{}", kind.as_str(), s));
                         return Ok(Reply {
-                            text: o.text,
+                            text,
                             session,
                             image: o.image,
                         });

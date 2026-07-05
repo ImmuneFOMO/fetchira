@@ -227,6 +227,29 @@ function FxProviderCard(p) {
   );
 }
 
+// Tag on a route-log row when the request carried a niche filter: green "native" = the filter hit a
+// real provider param; amber "rewrite" = served best-effort via query text (hint: add a provider that
+// filters natively). Absent field → no tag.
+function NicheBadge({ niche }) {
+  if (niche !== 'native' && niche !== 'rewrite') return null;
+  const native = niche === 'native';
+  return (
+    <Badge tone={native ? 'ok' : 'low'} variant="soft" uppercase
+      title={native ? 'niche filter mapped to a native provider param' : 'niche served via query text — add a provider that filters natively'}
+      style={{ height: 16, padding: '0 6px', fontSize: 10, flexShrink: 0 }}>{niche}</Badge>
+  );
+}
+
+function LogRow(l) {
+  if (!l.niche) return <RouteLogLine {...l} />;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <RouteLogLine {...l} style={{ flex: 1, minWidth: 0 }} />
+      <NicheBadge niche={l.niche} />
+    </div>
+  );
+}
+
 function LiveLog() {
   const [lines, setLines] = React.useState(() => window.FX.log.map((l, i) => ({ ...l, _id: i, fresh: false })));
   const idRef = React.useRef(window.FX.log.length);
@@ -265,7 +288,7 @@ function LiveLog() {
       </div>
       <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: 6, display: 'flex', flexDirection: 'column', gap: 1 }}>
         {lines.length
-          ? lines.map((l) => <RouteLogLine key={l._id} {...l} />)
+          ? lines.map((l) => <LogRow key={l._id} {...l} />)
           : <div style={{ margin: 'auto', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)', padding: 24 }}>waiting for route activity…</div>}
       </div>
     </Card>

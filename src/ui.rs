@@ -445,7 +445,7 @@ fn parse_kind(s: &str) -> Option<ProviderKind> {
 
 fn route_to_entry(r: &RouteRow) -> Value {
     let time = r.ts.get(11..19).unwrap_or("").to_string();
-    if let Some(from) = &r.fail_from {
+    let mut entry = if let Some(from) = &r.fail_from {
         json!({
             "time": time, "capability": r.capability,
             "failover": { "from": from, "code": r.fail_code, "to": r.label },
@@ -456,7 +456,11 @@ fn route_to_entry(r: &RouteRow) -> Value {
             "time": time, "capability": r.capability, "provider": r.provider,
             "account": acct_num(&r.label), "status": r.status, "latencyMs": r.latency_ms,
         })
+    };
+    if !r.niche.is_empty() {
+        entry["niche"] = json!(r.niche);
     }
+    entry
 }
 
 /// A debug-feed row: metadata + small request inline, plus a one-line preview of the body. The
