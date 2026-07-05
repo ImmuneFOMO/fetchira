@@ -427,46 +427,54 @@ impl Router {
     }
 
     pub async fn usage_snapshot(&self) -> Result<Vec<UsageView>> {
+        // A cold snapshot hits every provider's live endpoint; fan the buckets out concurrently
+        // so the dashboard's first paint waits for the slowest single provider, not the sum.
+        let per = self.buckets.iter().map(|b| self.bucket_views(b));
         let mut out = Vec::with_capacity(self.buckets.len());
-        for b in &self.buckets {
-            let proxy = b.proxy.clone().unwrap_or_else(|| "direct".to_string());
-            let ll = self.live_limits_for(b).await;
-            let mut mv = self
-                .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
+        for r in futures_util::future::join_all(per).await {
+            out.extend(r?);
+        }
+        Ok(out)
+    }
+
+    async fn bucket_views(&self, b: &Bucket) -> Result<Vec<UsageView>> {
+        let proxy = b.proxy.clone().unwrap_or_else(|| "direct".to_string());
+        let ll = self.live_limits_for(b).await;
+        let mut mv = self
+            .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
+            .await?;
+        self.patch_live(b, false, &mut mv).await;
+        self.patch_live_balance(b, &mut mv).await;
+        mv.limits = ll.clone();
+        let mut out = vec![mv];
+        // Web providers track deep_research against a separate daily budget.
+        if b.provider.kind.is_web() {
+            let label = format!("{}#dr", b.label);
+            let mut dv = self
+                .view(
+                    b.provider.kind.as_str(),
+                    &label,
+                    b.dr_quota,
+                    b.dr_reset,
+                    &proxy,
+                )
                 .await?;
-            self.patch_live(b, false, &mut mv).await;
-            self.patch_live_balance(b, &mut mv).await;
-            mv.limits = ll.clone();
-            out.push(mv);
-            // Web providers track deep_research against a separate daily budget.
-            if b.provider.kind.is_web() {
-                let label = format!("{}#dr", b.label);
-                let mut dv = self
-                    .view(
-                        b.provider.kind.as_str(),
-                        &label,
-                        b.dr_quota,
-                        b.dr_reset,
-                        &proxy,
-                    )
-                    .await?;
-                self.patch_live(b, true, &mut dv).await;
-                // Prefer the provider's live deep-research allowance over the soft counter. A live
-                // `total` (grok, tier-aware) overrides the ceiling too, so a locked tier reads 0/0
-                // instead of the nominal daily budget.
-                if let Some(f) = ll.as_ref().and_then(|l| l.feature("deep_research")) {
-                    dv.remaining = f.remaining.max(0);
-                    if let Some(t) = f.total {
-                        dv.quota = t;
-                    }
-                    dv.used = (dv.quota - dv.remaining).max(0);
-                    dv.exhausted = dv.remaining == 0 || dv.quota == 0;
-                    if let Some(w) = f.window_secs {
-                        dv.window_secs = Some(w);
-                    }
+            self.patch_live(b, true, &mut dv).await;
+            // Prefer the provider's live deep-research allowance over the soft counter. A live
+            // `total` (grok, tier-aware) overrides the ceiling too, so a locked tier reads 0/0
+            // instead of the nominal daily budget.
+            if let Some(f) = ll.as_ref().and_then(|l| l.feature("deep_research")) {
+                dv.remaining = f.remaining.max(0);
+                if let Some(t) = f.total {
+                    dv.quota = t;
                 }
-                out.push(dv);
+                dv.used = (dv.quota - dv.remaining).max(0);
+                dv.exhausted = dv.remaining == 0 || dv.quota == 0;
+                if let Some(w) = f.window_secs {
+                    dv.window_secs = Some(w);
+                }
             }
+            out.push(dv);
         }
         Ok(out)
     }

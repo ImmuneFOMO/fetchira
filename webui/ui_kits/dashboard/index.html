@@ -11,6 +11,8 @@
 <style>
   html, body { background: var(--bg-base); }
   #root { min-height: 100vh; }
+  @keyframes fx-spin { to { transform: rotate(360deg); } }
+  .fx-spin { animation: fx-spin 0.7s linear infinite; }
 </style>
 <!-- Vendored locally so the dashboard works fully offline (no CDN dependency). -->
 <script src="../../vendor/react.production.min.js"></script>
@@ -52,6 +54,15 @@ function EmptyState({ onAdd }) {
   );
 }
 
+function Loading() {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '40vh', gap: 12, fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-faint)' }}>
+      <span className="fx-spin" style={{ width: 16, height: 16, border: '2px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%' }} />
+      loading live quota…
+    </div>
+  );
+}
+
 function OfflineToast() {
   return (
     <div style={{ position: 'fixed', bottom: 16, left: 0, right: 0, zIndex: 100, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
@@ -77,6 +88,13 @@ function App() {
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   const [seeded, setSeeded] = React.useState(true);
   const [online, setOnline] = React.useState(true);
+  // 'loading' until the first live /api/state; a served page starts here so the shell paints
+  // instantly instead of blocking on the (cold) fan-out. No token / a failed fetch = opened
+  // standalone, so fall back to the bundled mock. A mutation re-mount (fxRefresh already loaded
+  // live state) starts at 'live' so it doesn't flash the spinner again.
+  const [phase, setPhase] = React.useState(
+    window.__fxLive ? 'live' : window.FX_TOKEN ? 'loading' : 'mock'
+  );
   const [, bump] = React.useState(0); // re-render with the freshly polled state
   const everOnline = React.useRef(false); // only nag once the server has actually been reached
 
@@ -87,12 +105,13 @@ function App() {
     const ping = async () => {
       try {
         const r = await fetch('/api/state', { headers: { 'x-fetchira-token': window.FX_TOKEN } });
-        if (!r.ok) { setOnline(false); return; }
+        if (!r.ok) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); return; }
         everOnline.current = true;
         setOnline(true);
         window.FX = Object.assign({}, window.FX, await r.json());
+        setPhase('live');
         bump((n) => n + 1);
-      } catch (e) { setOnline(false); }
+      } catch (e) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); }
     };
     ping();
     const id = setInterval(ping, 5000);
@@ -120,7 +139,8 @@ function App() {
 
       <main style={{ maxWidth: 'var(--container-max)', margin: '0 auto', padding: '20px' }}>
         {window.FX.update && <UpdateBanner u={window.FX.update} />}
-        {!seeded ? <EmptyState onAdd={() => setModal(true)} />
+        {phase === 'loading' ? <Loading />
+          : !seeded ? <EmptyState onAdd={() => setModal(true)} />
           : tab === 'overview' ? <window.OverviewTab />
           : tab === 'accounts' ? <window.AccountsTab onAdd={() => setModal(true)} />
           : tab === 'activity' ? <window.ActivityTab />
@@ -159,18 +179,17 @@ window.apiPost = async function (path, body) {
 async function loadFX() {
   try {
     const r = await fetch('/api/state', { headers: { 'x-fetchira-token': window.FX_TOKEN } });
-    if (r.ok) window.FX = Object.assign({}, window.FX, await r.json());
+    if (r.ok) { window.FX = Object.assign({}, window.FX, await r.json()); window.__fxLive = true; }
   } catch (e) { /* standalone / offline → keep mock */ }
 }
 
 let __root;
 window.fxRefresh = async function () { await loadFX(); __root.render(<App />); };
 
-(async () => {
-  await loadFX();
-  __root = ReactDOM.createRoot(document.getElementById('root'));
-  __root.render(<App />);
-})();
+// Paint the shell immediately; App's poll loads live state and swaps it in. A cold /api/state
+// fan-out can take seconds — don't hold the first paint hostage to it.
+__root = ReactDOM.createRoot(document.getElementById('root'));
+__root.render(<App />);
 </script>
 </body>
 </html>
