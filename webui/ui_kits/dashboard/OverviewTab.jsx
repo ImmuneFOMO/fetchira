@@ -24,29 +24,6 @@ function fmtReset(iso) {
 }
 
 
-// At-a-glance: total remaining capacity across all accounts + routing reliability. No savings/$
-// claim — fetchira can't tell a free tier from a paid/topped-up account, so it never guesses that.
-function SavingsStrip() {
-  const de = window.FX.deadEnds || {};
-  const totalRemaining = window.FX.totalRemaining || 0;
-  const clean = (de.ranOut || 0) === 0;
-  return (
-    <Card accent="accent" pad={16}>
-      <div style={{ display: 'flex' }}>
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <span style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-hi)' }}>{totalRemaining.toLocaleString()}</span>
-          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>requests still in the tank</span>
-        </div>
-        <div style={{ width: 1, background: 'var(--border-faint)', margin: '0 18px' }} />
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <span style={{ fontFamily: 'var(--font-display)', fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-hi)' }}>{(de.routed || 0).toLocaleString()}</span>
-          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>operations routed · <span style={{ color: clean ? 'var(--green-500)' : 'var(--red-500)' }}>{(de.ranOut || 0).toLocaleString()} ran out mid-task</span></span>
-        </div>
-      </div>
-    </Card>
-  );
-}
-
 // Accounts closest to empty — remaining + reset cadence + observed burn rate.
 function BurnRadar() {
   const burn = window.FX.burn || [];
@@ -97,9 +74,10 @@ function CapabilityMatrix() {
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{open ? '− hide' : '+ show'}</span>
       </button>
       {open && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 14, alignItems: 'start' }}>
+        <div style={{ columnWidth: 290, columnGap: 14 }}>
           {caps.map((c) => (
-            <Card key={c.provider} pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div key={c.provider} style={{ breakInside: 'avoid', marginBottom: 14 }}>
+            <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>{c.provider}</span>
               {(c.niches || []).length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
@@ -118,6 +96,7 @@ function CapabilityMatrix() {
               </div>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>call usage(provider={c.provider}) for exact calls</span>
             </Card>
+            </div>
           ))}
         </div>
       )}
@@ -306,7 +285,6 @@ function OverviewTab() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 380px', gap: 20, alignItems: 'start', height: '100%' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-        <SavingsStrip />
         <BurnRadar />
         {groups.map((g) => (
           <section key={g.id}>
