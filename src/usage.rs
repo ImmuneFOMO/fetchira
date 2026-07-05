@@ -57,6 +57,8 @@ pub struct DebugRow {
     pub request: String,
     pub response: Option<String>,
     pub error: Option<String>,
+    /// Raw HTTP round-trip(s) for the attempt, as a JSON array string (api-key providers only).
+    pub http_trace: Option<String>,
 }
 
 /// What the router hands to `log_debug` after every provider attempt.
@@ -69,6 +71,7 @@ pub struct DebugLog<'a> {
     pub request: &'a str,
     pub response: Option<&'a str>,
     pub error: Option<&'a str>,
+    pub http_trace: Option<&'a str>,
 }
 
 /// Per-field char cap and row cap for the debug log. The product (~0.5 GB) is the hard ceiling
@@ -153,11 +156,17 @@ impl Store {
                 latency_ms INTEGER NOT NULL,
                 request    TEXT    NOT NULL,
                 response   TEXT,
-                error      TEXT
+                error      TEXT,
+                http_trace TEXT
             )",
         )
         .execute(&pool)
         .await?;
+        // Existing DBs predate `http_trace`; add it idempotently (ignore "duplicate column name").
+        sqlx::query("ALTER TABLE debug_log ADD COLUMN http_trace TEXT")
+            .execute(&pool)
+            .await
+            .ok();
         Ok(Self { pool })
     }
 
@@ -382,8 +391,8 @@ impl Store {
     pub async fn log_debug(&self, e: &DebugLog<'_>, retention_hours: i64) -> Result<i64> {
         let res = sqlx::query(
             "INSERT INTO debug_log
-                (ts, capability, provider, label, status, latency_ms, request, response, error)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, capability, provider, label, status, latency_ms, request, response, error, http_trace)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(e.capability)
@@ -394,6 +403,7 @@ impl Store {
         .bind(clip(e.request))
         .bind(e.response.map(clip))
         .bind(e.error.map(clip))
+        .bind(e.http_trace.map(clip))
         .execute(&self.pool)
         .await?;
         // Amortized eviction: drop rows past the row cap or older than the retention window.
@@ -415,7 +425,7 @@ impl Store {
     /// handler trims them to previews and serves the full row from `debug_get`.
     pub async fn recent_debug(&self, limit: i64) -> Result<Vec<DebugRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
              FROM debug_log ORDER BY id DESC LIMIT ?",
         )
         .bind(limit)
@@ -427,7 +437,7 @@ impl Store {
     /// New rows since `after_id`, oldest-first, for incremental polling.
     pub async fn debug_since(&self, after_id: i64, limit: i64) -> Result<Vec<DebugRow>> {
         let rows = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
              FROM debug_log WHERE id > ? ORDER BY id ASC LIMIT ?",
         )
         .bind(after_id)
@@ -439,7 +449,7 @@ impl Store {
 
     pub async fn debug_get(&self, id: i64) -> Result<Option<DebugRow>> {
         let row = sqlx::query(
-            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error
+            "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
              FROM debug_log WHERE id = ?",
         )
         .bind(id)
@@ -480,6 +490,7 @@ fn debug_row(r: &sqlx::sqlite::SqliteRow) -> DebugRow {
         request: r.get("request"),
         response: r.get("response"),
         error: r.get("error"),
+        http_trace: r.get("http_trace"),
     }
 }
 
@@ -580,6 +591,7 @@ mod tests {
                     request: r#"{"query":"hi"}"#,
                     response: None,
                     error: Some("grok anti-bot rejected this request"),
+                    http_trace: Some(r#"[{"method":"POST","status":403}]"#),
                 },
                 24,
             )
@@ -594,6 +606,10 @@ mod tests {
             Some("grok anti-bot rejected this request")
         );
         assert!(recent[0].response.is_none());
+        assert_eq!(
+            recent[0].http_trace.as_deref(),
+            Some(r#"[{"method":"POST","status":403}]"#)
+        );
 
         let id = recent[0].id;
         assert_eq!(store.max_debug_id().await.unwrap(), id);

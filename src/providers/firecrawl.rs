@@ -22,12 +22,13 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
     if let Some(tbs) = input.recency.as_deref().and_then(niche::recency_tbs) {
         body["tbs"] = json!(tbs);
     }
-    let resp = client
-        .post(format!("{base}/v1/search"))
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/search"))
+            .bearer_auth(key)
+            .json(&body),
+    )
+    .await?;
     let v: Value = check("firecrawl", resp).await?.json().await?;
     let hits = v["data"]
         .as_array()
@@ -89,12 +90,13 @@ async fn scrape_markdown(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1/scrape"))
-        .bearer_auth(key)
-        .json(&json!({ "url": input.need_url()?, "formats": ["markdown"] }))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/scrape"))
+            .bearer_auth(key)
+            .json(&json!({ "url": input.need_url()?, "formats": ["markdown"] })),
+    )
+    .await?;
     let v: Value = check("firecrawl", resp).await?.json().await?;
     let text = v["data"]["markdown"]
         .as_str()
@@ -112,12 +114,13 @@ async fn extract(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1/extract"))
-        .bearer_auth(key)
-        .json(&extract_body(input)?)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/extract"))
+            .bearer_auth(key)
+            .json(&extract_body(input)?),
+    )
+    .await?;
     let v: Value = check("firecrawl", resp).await?.json().await?;
     let cost = v["data"]["metadata"]["creditsUsed"].as_i64().unwrap_or(1);
     Ok(Outcome::new(v["data"].to_string(), cost))
@@ -132,12 +135,13 @@ fn extract_body(input: &Input) -> Result<Value> {
 
 // crawl is async on firecrawl's side; kick it off and hand back the job id to poll.
 async fn crawl(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1/crawl"))
-        .bearer_auth(key)
-        .json(&json!({ "url": input.need_url()? }))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/crawl"))
+            .bearer_auth(key)
+            .json(&json!({ "url": input.need_url()? })),
+    )
+    .await?;
     let v: Value = check("firecrawl", resp).await?.json().await?;
     let text = match v["id"].as_str() {
         Some(id) => format!("crawl started, job id: {id}"),

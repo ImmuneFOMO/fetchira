@@ -25,12 +25,13 @@ async fn search(
     input: &Input,
     depth: &str,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/search"))
-        .bearer_auth(key)
-        .json(&body(input, depth, false)?)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/search"))
+            .bearer_auth(key)
+            .json(&body(input, depth, false)?),
+    )
+    .await?;
     let v: Value = check("tavily", resp).await?.json().await?;
     let hits = v["results"]
         .as_array()
@@ -53,12 +54,13 @@ async fn research(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/search"))
-        .bearer_auth(key)
-        .json(&body(input, "advanced", true)?)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/search"))
+            .bearer_auth(key)
+            .json(&body(input, "advanced", true)?),
+    )
+    .await?;
     let v: Value = check("tavily", resp).await?.json().await?;
     let answer = v["answer"].as_str().unwrap_or_default().to_string();
     Ok(Outcome::new(answer, 2))
@@ -102,12 +104,13 @@ async fn extract(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/extract"))
-        .bearer_auth(key)
-        .json(&json!({ "urls": [input.need_url()?] }))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/extract"))
+            .bearer_auth(key)
+            .json(&json!({ "urls": [input.need_url()?] })),
+    )
+    .await?;
     let v: Value = check("tavily", resp).await?.json().await?;
     let text = v["results"]
         .as_array()

@@ -27,12 +27,13 @@ pub async fn call(
 }
 
 async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1/scrape"))
-        .header("steel-api-key", key)
-        .json(&scrape_body(input.need_url()?))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/scrape"))
+            .header("steel-api-key", key)
+            .json(&scrape_body(input.need_url()?)),
+    )
+    .await?;
     let v: Value = check("steel", resp).await?.json().await?;
     let text = v["content"]["markdown"]
         .as_str()
@@ -53,12 +54,13 @@ async fn screenshot(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1/screenshot"))
-        .header("steel-api-key", key)
-        .json(&json!({ "url": input.need_url()?, "useProxy": true, "waitFor": 1500 }))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/screenshot"))
+            .header("steel-api-key", key)
+            .json(&json!({ "url": input.need_url()?, "useProxy": true, "waitFor": 1500 })),
+    )
+    .await?;
     let bytes = check("steel", resp).await?.bytes().await?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let mut out = Outcome::new(String::new(), 1);
@@ -70,12 +72,13 @@ async fn screenshot(
 }
 
 async fn pdf(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1/pdf"))
-        .header("steel-api-key", key)
-        .json(&json!({ "url": input.need_url()?, "useProxy": true, "waitFor": 1500 }))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/pdf"))
+            .header("steel-api-key", key)
+            .json(&json!({ "url": input.need_url()?, "useProxy": true, "waitFor": 1500 })),
+    )
+    .await?;
     let bytes = check("steel", resp).await?.bytes().await?;
     Ok(Outcome::new(
         format!("PDF produced ({} bytes)", bytes.len()),

@@ -23,13 +23,14 @@ pub async fn call(
 }
 
 async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/v1beta/search"))
-        .header("x-api-key", key)
-        .header("parallel-beta", "search-extract-2025-10-10")
-        .json(&search_body(input)?)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1beta/search"))
+            .header("x-api-key", key)
+            .header("parallel-beta", "search-extract-2025-10-10")
+            .json(&search_body(input)?),
+    )
+    .await?;
     let v: Value = check("parallel", resp).await?.json().await?;
     let hits = v["results"]
         .as_array()
@@ -99,12 +100,13 @@ async fn research(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let start = client
-        .post(format!("{base}/v1/tasks/runs"))
-        .header("x-api-key", key)
-        .json(&json!({ "input": input.need_query()?, "processor": processor(input) }))
-        .send()
-        .await?;
+    let start = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/v1/tasks/runs"))
+            .header("x-api-key", key)
+            .json(&json!({ "input": input.need_query()?, "processor": processor(input) })),
+    )
+    .await?;
     let v: Value = check("parallel", start).await?.json().await?;
     let id = v["run_id"]
         .as_str()
@@ -113,11 +115,12 @@ async fn research(
 
     for _ in 0..MAX_POLLS {
         tokio::time::sleep(POLL).await;
-        let resp = client
-            .get(format!("{base}/v1/tasks/runs/{id}"))
-            .header("x-api-key", key)
-            .send()
-            .await?;
+        let resp = crate::httptrace::send_traced(
+            client
+                .get(format!("{base}/v1/tasks/runs/{id}"))
+                .header("x-api-key", key),
+        )
+        .await?;
         let v: Value = check("parallel", resp).await?.json().await?;
         match v["status"].as_str().unwrap_or_default() {
             "completed" => return result(base, key, client, &id).await,
@@ -129,11 +132,12 @@ async fn research(
 }
 
 async fn result(base: &str, key: &str, client: &reqwest::Client, id: &str) -> Result<Outcome> {
-    let resp = client
-        .get(format!("{base}/v1/tasks/runs/{id}/result"))
-        .header("x-api-key", key)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .get(format!("{base}/v1/tasks/runs/{id}/result"))
+            .header("x-api-key", key),
+    )
+    .await?;
     let v: Value = check("parallel", resp).await?.json().await?;
     let content = &v["output"]["content"];
     let text = content["output"]

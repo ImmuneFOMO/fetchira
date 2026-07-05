@@ -19,12 +19,13 @@ pub async fn call(
 }
 
 async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/search"))
-        .header("x-api-key", key)
-        .json(&search_body(input, 500)?)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/search"))
+            .header("x-api-key", key)
+            .json(&search_body(input, 500)?),
+    )
+    .await?;
     let v: Value = check("exa", resp).await?.json().await?;
     Ok(Outcome::new(fmt_hits(&hits(&v)), 1))
 }
@@ -82,15 +83,16 @@ async fn contents(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/contents"))
-        .header("x-api-key", key)
-        .json(&json!({
-            "urls": [input.need_url()?],
-            "text": { "maxCharacters": 8000 },
-        }))
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/contents"))
+            .header("x-api-key", key)
+            .json(&json!({
+                "urls": [input.need_url()?],
+                "text": { "maxCharacters": 8000 },
+            })),
+    )
+    .await?;
     let v: Value = check("exa", resp).await?.json().await?;
     let text = v["results"]
         .as_array()
@@ -110,12 +112,13 @@ async fn research(
     client: &reqwest::Client,
     input: &Input,
 ) -> Result<Outcome> {
-    let resp = client
-        .post(format!("{base}/search"))
-        .header("x-api-key", key)
-        .json(&research_body(input)?)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/search"))
+            .header("x-api-key", key)
+            .json(&research_body(input)?),
+    )
+    .await?;
     let v: Value = check("exa", resp).await?.json().await?;
     Ok(Outcome::new(fmt_hits(&hits(&v)), 1))
 }

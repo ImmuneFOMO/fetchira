@@ -62,12 +62,13 @@ pub async fn call(
     input: &Input,
 ) -> Result<Outcome> {
     let (path, body, arr) = build_req(input)?;
-    let resp = client
-        .post(format!("{base}/{path}"))
-        .header("X-API-KEY", key)
-        .json(&body)
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(format!("{base}/{path}"))
+            .header("X-API-KEY", key)
+            .json(&body),
+    )
+    .await?;
     let v: Value = check("serper", resp).await?.json().await?;
     let hits = v[arr]
         .as_array()

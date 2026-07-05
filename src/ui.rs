@@ -271,12 +271,18 @@ async fn api_debug_one(
         return resp;
     }
     match st.store.debug_get(id).await {
-        Ok(Some(r)) => Json(json!({
-            "id": r.id, "ts": r.ts, "capability": r.capability, "provider": r.provider,
-            "label": r.label, "status": r.status, "latencyMs": r.latency_ms,
-            "request": r.request, "response": r.response, "error": r.error,
-        }))
-        .into_response(),
+        Ok(Some(r)) => {
+            let trace = r.http_trace.as_deref().map(|t| {
+                serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::String(t.to_string()))
+            });
+            Json(json!({
+                "id": r.id, "ts": r.ts, "capability": r.capability, "provider": r.provider,
+                "label": r.label, "status": r.status, "latencyMs": r.latency_ms,
+                "request": r.request, "response": r.response, "error": r.error,
+                "httpTrace": trace,
+            }))
+            .into_response()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

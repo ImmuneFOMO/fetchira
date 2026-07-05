@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::config::{resolve_secret, Config, Reset};
 use crate::error::{Error, Result};
+use crate::httptrace;
 use crate::providers::{
     self, order_for, Capability, Input, LiveBalance, LiveLimits, LiveQuota, ModelInfo, OutImage,
     Provider, ProviderKind,
@@ -271,8 +272,16 @@ impl Router {
                     continue;
                 }
                 let t0 = Instant::now();
+                let mut http_trace = None;
                 let res = match &b.conn {
-                    Conn::Api(c) => b.provider.call(&b.key, c, cap, input).await,
+                    Conn::Api(c) => {
+                        let (res, traces) =
+                            httptrace::capture(b.provider.call(&b.key, c, cap, input)).await;
+                        if !traces.is_empty() {
+                            http_trace = serde_json::to_string(&traces).ok();
+                        }
+                        res
+                    }
                     // chatgpt.com gates generation behind an anti-bot defense pure HTTP can't pass, so
                     // it drives a real browser with the captured cookies. A deep-research poll is a
                     // plain GET (not gated), so resume it over HTTP instead of relaunching a browser.
@@ -311,6 +320,7 @@ impl Router {
                                 request: &req,
                                 response: res.as_ref().ok().map(|o| o.text.as_str()),
                                 error: err.as_deref(),
+                                http_trace: http_trace.as_deref(),
                             },
                             retention,
                         )

@@ -12,6 +12,37 @@ function pretty(s) {
   try { return JSON.stringify(JSON.parse(s), null, 2); } catch (e) { return s; }
 }
 
+// Headers/body may arrive as a JSON object (header map) or a plain string; render both readably.
+function fmtTrace(v) {
+  if (v == null) return '—';
+  if (typeof v === 'string') return v || '—';
+  return JSON.stringify(v, null, 2);
+}
+
+function RawHttp({ trace, pre, cap }) {
+  const [open, setOpen] = React.useState(false);
+  if (!Array.isArray(trace) || !trace.length) return null;
+  const sub = { ...cap, marginTop: 6 };
+  return (
+    <div>
+      <div onClick={() => setOpen(o => !o)} style={{ ...cap, marginBottom: open ? 6 : 0, cursor: 'pointer' }}>{open ? '▾' : '▸'} raw HTTP</div>
+      {open && trace.map((rt, i) => (
+        <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', wordBreak: 'break-all' }}>{rt.method} {rt.url} → {rt.status}</div>
+          <div style={sub}>req headers</div>
+          <pre style={pre}>{fmtTrace(rt.reqHeaders)}</pre>
+          <div style={sub}>req body</div>
+          <pre style={pre}>{fmtTrace(rt.reqBody)}</pre>
+          <div style={sub}>resp headers</div>
+          <pre style={pre}>{fmtTrace(rt.respHeaders)}</pre>
+          <div style={sub}>resp body</div>
+          <pre style={{ ...pre, maxHeight: 320, overflowY: 'auto' }}>{fmtTrace(rt.respBody)}</pre>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DebugDetail({ row, full }) {
   if (!full) return <div style={{ padding: '6px 10px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>loading…</div>;
   const body = full.response != null ? full.response : full.error;
@@ -28,6 +59,7 @@ function DebugDetail({ row, full }) {
         <div style={cap}>{label}</div>
         <pre style={{ ...pre, maxHeight: 320, overflowY: 'auto', borderLeft: row.ok ? 'none' : '2px solid var(--red-500)' }}>{body != null ? body : '—'}</pre>
       </div>
+      <RawHttp trace={full.httpTrace} pre={pre} cap={cap} />
     </div>
   );
 }

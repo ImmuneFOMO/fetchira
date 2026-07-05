@@ -16,12 +16,13 @@ pub async fn call(
     input: &Input,
 ) -> Result<Outcome> {
     let url = input.need_url()?;
-    let resp = client
-        .get(format!("{base}/{url}"))
-        .bearer_auth(key)
-        .header("Accept", "application/json")
-        .send()
-        .await?;
+    let resp = crate::httptrace::send_traced(
+        client
+            .get(format!("{base}/{url}"))
+            .bearer_auth(key)
+            .header("Accept", "application/json"),
+    )
+    .await?;
     let v: Value = check("jina", resp).await?.json().await?;
     let text = v["data"]["content"]
         .as_str()
