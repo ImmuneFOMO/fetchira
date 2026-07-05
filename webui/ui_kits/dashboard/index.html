@@ -72,8 +72,8 @@ function UpdateBanner({ u }) {
 }
 
 function App() {
-  const [tab, setTab] = React.useState('overview');
-  const [modal, setModal] = React.useState(false);
+  const [tab, setTab] = React.useState(new URLSearchParams(location.search).get('tab') || 'overview');
+  const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   const [seeded, setSeeded] = React.useState(true);
   const [online, setOnline] = React.useState(true);
   const [, bump] = React.useState(0); // re-render with the freshly polled state
