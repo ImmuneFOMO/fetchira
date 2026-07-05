@@ -642,7 +642,7 @@ async fn login_flow(home: &Path) -> anyhow::Result<()> {
         .map(|a| (a.provider, a.label.clone()))
         .collect();
     if web.is_empty() {
-        pause("No web accounts yet — add gemini_web / perplexity_web / grok_web first.");
+        pause("No web accounts yet — add gemini_web / grok_web / chatgpt_web first.");
         return Ok(());
     }
     let labels: Vec<String> = web
@@ -913,7 +913,7 @@ pub fn help() {
            fetchira install             register the MCP server into your coding tools (Claude Code, Codex, …)\n  \
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
-           fetchira login <provider>    (re)capture a web-session login (gemini_web/perplexity_web/grok_web)\n  \
+           fetchira login <provider>    (re)capture a web-session login (gemini_web/grok_web/chatgpt_web)\n  \
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
            fetchira update              download & install the latest release\n  \
            fetchira --version           print the installed version\n  \

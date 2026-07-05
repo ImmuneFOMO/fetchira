@@ -70,7 +70,7 @@ pub struct Router {
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
     // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. `None` caches a miss.
     live_limits: Mutex<HashMap<String, (Instant, Option<LiveLimits>)>>,
-    // Live API-key balances (serper/tavily/firecrawl/jina/steel), keyed by label. `None` caches a
+    // Live API-key balances (serper/tavily/firecrawl/steel), keyed by label. `None` caches a
     // miss so a provider without a usable balance endpoint isn't re-polled every snapshot.
     balance: Mutex<HashMap<String, (Instant, Option<LiveBalance>)>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
@@ -512,7 +512,7 @@ impl Router {
     }
 
     /// Overwrite an API-key bucket's soft counter with the provider's live balance when it reports
-    /// one (serper/tavily/firecrawl/jina, and steel on paid tiers). Cached 20s; a miss is cached too,
+    /// one (serper/tavily/firecrawl, and steel on paid tiers). Cached 20s; a miss is cached too,
     /// so providers without a usable endpoint (exa/parallel/steel-free) keep the corrected constant.
     async fn patch_live_balance(&self, b: &Bucket, v: &mut UsageView) {
         let Conn::Api(c) = &b.conn else { return };
@@ -525,7 +525,7 @@ impl Router {
             Some(bal) => bal,
             None => {
                 // exa/parallel read their $ balance through the dashboard cookie session; the rest
-                // (serper/tavily/firecrawl/jina/steel) through the api-key. The dashboard re-issues a
+                // (serper/tavily/firecrawl/steel) through the api-key. The dashboard re-issues a
                 // rolling NextAuth token on every fetch, so re-save it to keep the session alive.
                 let fresh = match &b.balance_conn {
                     Some(wc) => match b.provider.live_balance_web(wc).await {

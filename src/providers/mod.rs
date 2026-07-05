@@ -11,10 +11,8 @@ mod firecrawl;
 mod gemini_web;
 mod grok_statsig;
 mod grok_web;
-mod jina;
 pub(crate) mod niche;
 mod parallel;
-mod perplexity_web;
 mod serper;
 mod steel;
 mod tavily;
@@ -25,13 +23,11 @@ pub enum ProviderKind {
     Tavily,
     Exa,
     Serper,
-    Jina,
     Firecrawl,
     Parallel,
     Steel,
     GeminiWeb,
     GrokWeb,
-    PerplexityWeb,
     ChatgptWeb,
 }
 
@@ -63,9 +59,9 @@ pub struct Input {
     pub max_results: Option<u32>,
     /// Resume token (opaque to the router) to continue a web-session conversation.
     pub session: Option<String>,
-    /// Provider-specific model selector (e.g. a Gemini model id or Perplexity preference).
+    /// Provider-specific model selector (e.g. a Gemini model id).
     pub model: Option<String>,
-    /// Provider-specific mode (e.g. grok "expert", perplexity "deep research").
+    /// Provider-specific mode (e.g. grok "expert").
     pub mode: Option<String>,
     /// A local file to attach to the chat turn (the `upload` tool). The provider uploads it, then
     /// references it in the send so the model can see it. gemini_web / grok_web only.
@@ -128,13 +124,11 @@ impl ProviderKind {
             ProviderKind::Tavily => "tavily",
             ProviderKind::Exa => "exa",
             ProviderKind::Serper => "serper",
-            ProviderKind::Jina => "jina",
             ProviderKind::Firecrawl => "firecrawl",
             ProviderKind::Parallel => "parallel",
             ProviderKind::Steel => "steel",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
-            ProviderKind::PerplexityWeb => "perplexity_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
         }
     }
@@ -144,13 +138,11 @@ impl ProviderKind {
             ProviderKind::Tavily => "https://api.tavily.com",
             ProviderKind::Exa => "https://api.exa.ai",
             ProviderKind::Serper => "https://google.serper.dev",
-            ProviderKind::Jina => "https://r.jina.ai",
             ProviderKind::Firecrawl => "https://api.firecrawl.dev",
             ProviderKind::Parallel => "https://api.parallel.ai",
             ProviderKind::Steel => "https://api.steel.dev",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
-            ProviderKind::PerplexityWeb => "https://www.perplexity.ai",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
         }
     }
@@ -163,14 +155,10 @@ impl ProviderKind {
             (Tavily, Search | Read | DeepResearch)
                 | (Exa, Search | Read | DeepResearch)
                 | (Serper, Search)
-                | (Jina, Read)
                 | (Firecrawl, Search | Read)
                 | (Parallel, Search | DeepResearch)
                 | (Steel, Browser)
-                | (
-                    GeminiWeb | GrokWeb | PerplexityWeb | ChatgptWeb,
-                    Search | DeepResearch
-                )
+                | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
     }
@@ -178,10 +166,7 @@ impl ProviderKind {
     pub fn is_web(self) -> bool {
         matches!(
             self,
-            ProviderKind::GeminiWeb
-                | ProviderKind::GrokWeb
-                | ProviderKind::PerplexityWeb
-                | ProviderKind::ChatgptWeb
+            ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb
         )
     }
 
@@ -193,14 +178,13 @@ impl ProviderKind {
     }
 
     /// Fallback ceiling when the provider exposes no live balance (exa, steel-free, parallel) or the
-    /// live fetch fails. Providers with a live endpoint (serper/tavily/firecrawl/jina) overwrite this
+    /// live fetch fails. Providers with a live endpoint (serper/tavily/firecrawl) overwrite this
     /// from `live_balance` — the constant only seeds the soft counter.
     pub fn default_quota(self) -> i64 {
         match self {
             ProviderKind::Tavily => 1000,    // 1k credits/mo
             ProviderKind::Exa => 20_000,     // 20k requests/mo (forever-free)
             ProviderKind::Serper => 2500,    // 2.5k credits, one-time
-            ProviderKind::Jina => 2500,      // 10M free tokens ÷ ~4k/read ≈ 2.5k reads, one-time
             ProviderKind::Firecrawl => 1000, // 1k credits/mo
             ProviderKind::Parallel => 16000, // 16k free requests (no reset advertised)
             ProviderKind::Steel => 2000,     // $30 one-time ÷ ~$0.015/proxied read ≈ 2k reads
@@ -208,7 +192,6 @@ impl ProviderKind {
             // ceilings so a 429 marks the account exhausted and the router fails over.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
-            ProviderKind::PerplexityWeb => 300,
             ProviderKind::ChatgptWeb => 100,
         }
     }
@@ -217,7 +200,6 @@ impl ProviderKind {
         match self {
             // One-time grants / top-up $ balances (no monthly reset): "lifetime" badge, not "monthly".
             ProviderKind::Serper
-            | ProviderKind::Jina
             | ProviderKind::Parallel
             | ProviderKind::Exa
             | ProviderKind::Steel => Reset::Once,
@@ -231,7 +213,6 @@ impl ProviderKind {
     pub fn dr_quota(self) -> i64 {
         match self {
             ProviderKind::GeminiWeb => 10,
-            ProviderKind::PerplexityWeb => 5,
             ProviderKind::GrokWeb => 3,
             // ChatGPT Plus deep research is a monthly bucket (~25/mo); the server reports the live
             // remaining count in `conversation/init`, so this is just the failover ceiling.
@@ -251,17 +232,7 @@ impl ProviderKind {
     pub fn all() -> &'static [ProviderKind] {
         use ProviderKind::*;
         &[
-            Serper,
-            Tavily,
-            Exa,
-            Jina,
-            Firecrawl,
-            Parallel,
-            Steel,
-            PerplexityWeb,
-            GeminiWeb,
-            GrokWeb,
-            ChatgptWeb,
+            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, GeminiWeb, GrokWeb, ChatgptWeb,
         ]
     }
 
@@ -271,11 +242,9 @@ impl ProviderKind {
             ProviderKind::Serper => "Google search results (SERP)",
             ProviderKind::Tavily => "web search + answers tuned for LLMs",
             ProviderKind::Exa => "neural / semantic web search",
-            ProviderKind::Jina => "read any URL as clean markdown",
             ProviderKind::Firecrawl => "scrape / crawl pages to markdown",
             ProviderKind::Parallel => "async deep-research API",
             ProviderKind::Steel => "headless-browser page scrape",
-            ProviderKind::PerplexityWeb => "your logged-in Perplexity (search + deep research)",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -290,7 +259,6 @@ impl ProviderKind {
             ProviderKind::Serper => "https://serper.dev",
             ProviderKind::Tavily => "https://app.tavily.com",
             ProviderKind::Exa => "https://dashboard.exa.ai/api-keys",
-            ProviderKind::Jina => "https://jina.ai/reader (free; key raises limits)",
             ProviderKind::Firecrawl => "https://firecrawl.dev",
             ProviderKind::Parallel => "https://parallel.ai",
             ProviderKind::Steel => "https://steel.dev",
@@ -304,25 +272,10 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
         Capability::Search => &[
-            Serper,
-            Tavily,
-            Exa,
-            Parallel,
-            PerplexityWeb,
-            GeminiWeb,
-            GrokWeb,
-            ChatgptWeb,
+            Serper, Tavily, Exa, Parallel, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
-        Capability::Read => &[Jina, Firecrawl],
-        Capability::DeepResearch => &[
-            Parallel,
-            Exa,
-            Tavily,
-            PerplexityWeb,
-            GeminiWeb,
-            GrokWeb,
-            ChatgptWeb,
-        ],
+        Capability::Read => &[Firecrawl],
+        Capability::DeepResearch => &[Parallel, Exa, Tavily, GeminiWeb, GrokWeb, ChatgptWeb],
         Capability::Browser => &[Steel],
         // grok generates in-process and is region-agnostic; gemini image-gen is EU-gated (falls back
         // to text) so it sits behind grok; chatgpt is the browser fallback.
@@ -450,14 +403,6 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "deep_research(query=\"compare EU AI-act obligations by company size\", provider=\"parallel\", depth=\"deep\")",
             ],
         },
-        Jina => ProviderExtras {
-            niches: &[],
-            modes: &[
-                ("screenshot", "return a screenshot instead of markdown"),
-                ("links", "append a summary of the page's outbound links"),
-            ],
-            examples: &["read(url=\"https://example.com\", provider=\"jina\")"],
-        },
         Steel => ProviderExtras {
             niches: &[],
             modes: &[
@@ -483,16 +428,6 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             modes: &[("(model picks the tier — see usage models)", "")],
             examples: &[
                 "search(query=\"latest webb telescope findings\", provider=\"gemini_web\", model=\"3.1 pro\")",
-            ],
-        },
-        PerplexityWeb => ProviderExtras {
-            niches: &[],
-            modes: &[
-                ("reasoning", "reasoning-model answer"),
-                ("deep research", "multi-round research report"),
-            ],
-            examples: &[
-                "deep_research(query=\"survey of RAG eval methods\", provider=\"perplexity_web\", mode=\"deep research\")",
             ],
         },
         ChatgptWeb => ProviderExtras {
@@ -637,14 +572,12 @@ impl Provider {
             ProviderKind::Tavily => tavily::call(b, key, client, cap, input).await,
             ProviderKind::Exa => exa::call(b, key, client, cap, input).await,
             ProviderKind::Serper => serper::call(b, key, client, cap, input).await,
-            ProviderKind::Jina => jina::call(b, key, client, cap, input).await,
             ProviderKind::Firecrawl => firecrawl::call(b, key, client, cap, input).await,
             ProviderKind::Parallel => parallel::call(b, key, client, cap, input).await,
             ProviderKind::Steel => steel::call(b, key, client, cap, input).await,
-            ProviderKind::GeminiWeb
-            | ProviderKind::GrokWeb
-            | ProviderKind::PerplexityWeb
-            | ProviderKind::ChatgptWeb => Err(Error::Unsupported(self.kind.as_str())),
+            ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
+                Err(Error::Unsupported(self.kind.as_str()))
+            }
         }
     }
 
@@ -659,7 +592,6 @@ impl Provider {
         match self.kind {
             ProviderKind::GeminiWeb => gemini_web::call(b, client, cap, input).await,
             ProviderKind::GrokWeb => grok_web::call(b, client, cap, input).await,
-            ProviderKind::PerplexityWeb => perplexity_web::call(b, client, cap, input).await,
             ProviderKind::ChatgptWeb => chatgpt_web::call(b, client, cap, input).await,
             _ => Err(Error::Unsupported(self.kind.as_str())),
         }
@@ -702,7 +634,6 @@ impl Provider {
             ProviderKind::Serper => serper::balance(&self.base, key, client).await.ok(),
             ProviderKind::Tavily => tavily::balance(&self.base, key, client).await.ok(),
             ProviderKind::Firecrawl => firecrawl::balance(&self.base, key, client).await.ok(),
-            ProviderKind::Jina => jina::balance(key, client).await.ok(),
             ProviderKind::Steel => steel::balance(&self.base, key, client).await.ok(),
             _ => None,
         }

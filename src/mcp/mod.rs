@@ -24,14 +24,14 @@ pub struct SearchArgs {
     /// Resume token from a previous web-provider result; continues that conversation with
     /// its history (implies the same provider). Web providers only.
     pub session: Option<String>,
-    /// Provider-specific model selector (e.g. gemini "3.1 pro"/"flash", perplexity "gpt-5",
+    /// Provider-specific model selector (e.g. gemini "3.1 pro"/"flash",
     /// grok "grok-4"). For chatgpt_web this is two axes: a model ("gpt-5.5"/"gpt-5.4"/"o3"), a
     /// thinking level ("instant"/"medium"/"high"), or both ("gpt-5.4 high"). Levels are read live
     /// and vary per model (o3 only offers medium); an unknown name returns the actual options.
     /// Ignored by the API providers.
     pub model: Option<String>,
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
-    /// deep_research to heavy then expert); perplexity: "reasoning"/"deep research".
+    /// deep_research to heavy then expert).
     pub mode: Option<String>,
     /// Research niche: "web" (default), "news", or "academic" — steers to a fitting backend
     /// (academic → scholar/exa papers, news → news sources).
@@ -165,7 +165,7 @@ fn search_input(args: SearchArgs, session: Option<String>) -> Input {
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (perplexity_web, gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing. Attach a local file with `file` (absolute path) to ask about it — defaults to grok_web. Niche knobs: `topic` (web/news/academic), `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
+        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing. Attach a local file with `file` (absolute path) to ask about it — defaults to grok_web. Niche knobs: `topic` (web/news/academic), `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn search(
         &self,
@@ -179,7 +179,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Read a URL and return its main content as clean markdown (jina, firecrawl); auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls."
+        description = "Read a URL and return its main content as clean markdown (firecrawl); auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn read(
         &self,
@@ -194,7 +194,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research over multiple sources (parallel, exa, tavily, perplexity_web, gemini_web, grok_web, chatgpt_web). exa/parallel and the web sessions do true multi-round research; tavily returns a single synthesized answer. May take minutes. gemini_web and chatgpt_web both return a research PLAN plus a `session` first: pass that `session` with query \"start\" to run it, or with a revised research request to replace the plan. gemini returns the finished report in the same call; chatgpt then runs for ~5-30 min, so after \"start\" it hands back a `session` you call again to fetch the report (chatgpt uses its own research model — `model` is ignored). Pass a `session` to continue any web research thread. Niche knobs: `topic` (web/news/academic), `recency`, `domains`, `depth` (standard/deep — deep is slower/pricier). Provider-specific extras (crawl, structured extract, pro tier…) → call usage(provider=…) for exact params & example calls."
+        description = "Deep research over multiple sources (parallel, exa, tavily, gemini_web, grok_web, chatgpt_web). exa/parallel and the web sessions do true multi-round research; tavily returns a single synthesized answer. May take minutes. gemini_web and chatgpt_web both return a research PLAN plus a `session` first: pass that `session` with query \"start\" to run it, or with a revised research request to replace the plan. gemini returns the finished report in the same call; chatgpt then runs for ~5-30 min, so after \"start\" it hands back a `session` you call again to fetch the report (chatgpt uses its own research model — `model` is ignored). Pass a `session` to continue any web research thread. Niche knobs: `topic` (web/news/academic), `recency`, `domains`, `depth` (standard/deep — deep is slower/pricier). Provider-specific extras (crawl, structured extract, pro tier…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn deep_research(
         &self,

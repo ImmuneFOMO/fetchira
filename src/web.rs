@@ -217,12 +217,6 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
                  WIZ_global_data.SNlM0e.length>0)}catch(e){return false}})()",
             ),
         ),
-        ProviderKind::PerplexityWeb => (
-            "https://www.perplexity.ai/",
-            "perplexity.ai",
-            "__Secure-next-auth.session-token",
-            None,
-        ),
         ProviderKind::GrokWeb => ("https://grok.com/", "grok.com", "sso", None),
         ProviderKind::ChatgptWeb => (
             // NextAuth splits the large session token into `.0`/`.1` chunks — there is no

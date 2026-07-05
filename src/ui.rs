@@ -421,7 +421,7 @@ async fn api_test(
 /// and shows up in the route log).
 fn test_call(kind: ProviderKind) -> (Capability, Input) {
     match kind {
-        ProviderKind::Jina | ProviderKind::Firecrawl => (
+        ProviderKind::Firecrawl => (
             Capability::Read,
             Input {
                 url: Some("https://example.com".to_string()),
@@ -1225,7 +1225,7 @@ fn mask_proxy(proxy: &str) -> String {
 fn group_of(provider: &str) -> (&'static str, &'static str) {
     match provider {
         "serper" | "tavily" | "exa" | "parallel" => ("search", "Search"),
-        "jina" | "firecrawl" => ("read", "Read / scrape"),
+        "firecrawl" => ("read", "Read / scrape"),
         "steel" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
     }
@@ -1240,10 +1240,10 @@ fn group_color(provider: &str) -> &'static str {
     }
 }
 
-/// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance, jina =
-/// token wallet) rather than an exact request count — shown with a leading "≈".
+/// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance) rather
+/// than an exact request count — shown with a leading "≈".
 fn approx_quota(provider: &str) -> bool {
-    matches!(provider, "parallel" | "exa" | "steel" | "jina")
+    matches!(provider, "parallel" | "exa" | "steel")
 }
 
 fn desc_of(provider: &str) -> &'static str {
@@ -1252,10 +1252,8 @@ fn desc_of(provider: &str) -> &'static str {
         "tavily" => "Search + extract API",
         "exa" => "Neural search API",
         "parallel" => "Search API",
-        "jina" => "Reader — URL → markdown",
         "firecrawl" => "Crawl + scrape API",
         "steel" => "Headless browser sessions",
-        "perplexity_web" => "Browser session · search + deep research",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         _ => "",
