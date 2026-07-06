@@ -292,6 +292,8 @@ pub fn add_account(
     key: Option<String>,
     proxy: Option<String>,
 ) -> anyhow::Result<String> {
+    let proxy = proxy.and_then(|p| parse_proxy_arg(&p));
+    validate_proxy(&proxy)?;
     let mut cfg = load_or_empty(home);
     let label = match label {
         Some(l) if !l.trim().is_empty() => l.trim().to_string(),
@@ -379,6 +381,60 @@ pub async fn rename_account(home: &Path, old: &str, new: &str) -> anyhow::Result
         .await?
         .rename_account(old, new)
         .await?;
+    Ok(())
+}
+
+/// Interpret a proxy string the user typed: "" / "direct" / "none" / "off" → direct (None),
+/// "pool" → a sticky proxy from the pool, anything else → that specific proxy URL.
+pub fn parse_proxy_arg(s: &str) -> Option<String> {
+    match s.trim() {
+        "" | "direct" | "none" | "off" => None,
+        "pool" => Some("pool".to_string()),
+        url => Some(url.to_string()),
+    }
+}
+
+/// Reject a malformed specific-proxy URL before it reaches the config. "pool"/direct pass through.
+fn validate_proxy(proxy: &Option<String>) -> anyhow::Result<()> {
+    if let Some(p) = proxy {
+        if p != "pool" {
+            crate::proxy::validate(p).with_context(|| format!("not a usable proxy: '{p}'"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Change (or clear) an existing account's proxy: `None` = direct, `Some("pool")` = sticky from the
+/// pool, `Some(url)` = a specific proxy. Drops any sticky assignment so the change takes effect on
+/// the next call. Shared by the CLI and web UI.
+pub async fn set_proxy(home: &Path, label: &str, proxy: Option<String>) -> anyhow::Result<()> {
+    validate_proxy(&proxy)?;
+    let mut cfg = load_or_empty(home);
+    let acc = cfg
+        .accounts
+        .iter_mut()
+        .find(|a| a.label == label)
+        .with_context(|| format!("no account labelled '{label}'"))?;
+    acc.proxy = proxy;
+    config::save(&cfg, &cfg_path(home))?;
+    open_store(home, &cfg).await?.clear_proxy(label).await?;
+    Ok(())
+}
+
+/// `fetchira proxy <label> <direct|pool|URL>` — change an account's proxy.
+pub async fn proxy(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let label = args
+        .next()
+        .context("usage: fetchira proxy <label> <direct|pool|URL>")?;
+    let val = args
+        .next()
+        .context("usage: fetchira proxy <label> <direct|pool|URL>")?;
+    let proxy = parse_proxy_arg(&val);
+    set_proxy(home, &label, proxy.clone()).await?;
+    println!(
+        "proxy for '{label}' → {}",
+        proxy.as_deref().unwrap_or("direct")
+    );
     Ok(())
 }
 
@@ -552,6 +608,7 @@ pub async fn setup(home: &Path) -> anyhow::Result<()> {
             vec![
                 "Add an account",
                 "Log in / re-login a web provider",
+                "Change an account's proxy",
                 "Remove an account",
                 "Quit",
             ],
@@ -560,6 +617,7 @@ pub async fn setup(home: &Path) -> anyhow::Result<()> {
         match action {
             Ok("Add an account") => add_flow(home).await?,
             Ok("Log in / re-login a web provider") => login_flow(home).await?,
+            Ok("Change an account's proxy") => proxy_flow(home).await?,
             Ok("Remove an account") => remove_flow(home).await?,
             _ => break, // Quit or Esc
         }
@@ -645,6 +703,10 @@ async fn add_flow(home: &Path) -> anyhow::Result<()> {
         }
     }
     let proxy = choose_proxy(&cfg).await;
+    if let Err(e) = validate_proxy(&proxy) {
+        pause(&format!("✗ {e}"));
+        return Ok(());
+    }
     cfg.accounts.push(Account {
         provider: kind,
         label: label.clone(),
@@ -724,6 +786,44 @@ async fn pool_proxies(cfg: &Config) -> Vec<String> {
 /// Strip credentials for display: "http://u:p@1.2.3.4:8080" -> "1.2.3.4:8080".
 fn host_port(url: &str) -> String {
     url.rsplit('@').next().unwrap_or(url).to_string()
+}
+
+/// Pick an account, then a new proxy (direct / sticky pool / specific). Esc keeps the current one.
+async fn proxy_flow(home: &Path) -> anyhow::Result<()> {
+    let cfg = load_or_empty(home);
+    if cfg.accounts.is_empty() {
+        pause("No accounts yet.");
+        return Ok(());
+    }
+    let labels: Vec<String> = cfg.accounts.iter().map(|a| a.label.clone()).collect();
+    let label =
+        match Select::new("Change proxy for which account? (Esc to cancel)", labels).prompt() {
+            Ok(l) => l,
+            Err(_) => return Ok(()),
+        };
+    let proxy = match Select::new(
+        "New proxy: (Esc to keep current)",
+        vec![
+            "Direct — no proxy",
+            "Sticky proxy from the pool",
+            "A specific proxy",
+        ],
+    )
+    .prompt()
+    {
+        Ok("Sticky proxy from the pool") => Some("pool".to_string()),
+        Ok("A specific proxy") => specific_proxy(&cfg).await,
+        Ok(_) => None,           // Direct
+        Err(_) => return Ok(()), // Esc → keep current
+    };
+    match set_proxy(home, &label, proxy.clone()).await {
+        Ok(()) => pause(&format!(
+            "✓ proxy for '{label}' → {}",
+            proxy.as_deref().unwrap_or("direct")
+        )),
+        Err(e) => pause(&format!("✗ {e}")),
+    }
+    Ok(())
 }
 
 async fn login_flow(home: &Path) -> anyhow::Result<()> {
@@ -1006,6 +1106,7 @@ pub fn help() {
            fetchira install             register the MCP server into your coding tools (Claude Code, Codex, …)\n  \
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
+           fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
            fetchira login <provider>    (re)capture a web-session login (gemini_web/grok_web/chatgpt_web)\n  \
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
            fetchira update              download & install the latest release\n  \

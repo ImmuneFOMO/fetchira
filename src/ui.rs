@@ -37,6 +37,9 @@ struct AcctMeta {
     has_key: bool,
     is_web: bool,
     logged_in: bool,
+    /// Configured proxy intent ("pool" | url | absent → direct), as opposed to the resolved sticky
+    /// URL the router routes through — so the dashboard shows and edits the setting, not the pick.
+    proxy: Option<String>,
 }
 
 /// The parts that a config mutation rebuilds; behind an RwLock so add/remove/login take effect live.
@@ -94,6 +97,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/account/login", post(api_login))
         .route("/api/account/session", post(api_session))
         .route("/api/account/rename", post(api_rename))
+        .route("/api/account/proxy", post(api_proxy))
         .route("/api/account/test", post(api_test))
         .fallback(static_handler)
         .with_state(state);
@@ -125,6 +129,7 @@ async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
                 has_key: a.api_key.is_some(),
                 is_web: a.provider.is_web(),
                 logged_in,
+                proxy: a.proxy.clone(),
             },
         );
     }
@@ -370,6 +375,13 @@ struct RenameReq {
     new_label: String,
 }
 
+#[derive(Deserialize)]
+struct ProxyReq {
+    label: String,
+    /// Raw user input: "" / "direct" → direct, "pool" → sticky pool, else a proxy URL.
+    proxy: String,
+}
+
 async fn api_add(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -475,6 +487,23 @@ async fn api_rename(
         return r;
     }
     match cli::rename_account(&st.home, &req.label, &req.new_label).await {
+        Ok(()) => {
+            rebuild(&st).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn api_proxy(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ProxyReq>,
+) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    match cli::set_proxy(&st.home, &req.label, cli::parse_proxy_arg(&req.proxy)).await {
         Ok(()) => {
             rebuild(&st).await;
             Json(json!({ "ok": true })).into_response()
@@ -774,7 +803,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "used": v.used,
                 "quota": v.quota,
                 "resetWindow": window_or_period(v.window_secs, &v.period),
-                "proxy": mask_proxy(&v.proxy),
+                "proxy": mask_proxy(m.and_then(|x| x.proxy.as_deref()).unwrap_or("direct")),
                 "status": status,
                 "key": key,
                 "web": web,

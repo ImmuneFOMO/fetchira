@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::config::ProxyPool;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Resolve the proxy pool to a list of `http://user:pass@ip:port` URLs.
 /// Explicit `proxies` win; otherwise download the Webshare list.
@@ -36,6 +36,28 @@ fn parse_line(line: &str) -> Option<String> {
     Some(format!("http://{user}:{pass}@{ip}:{port}"))
 }
 
+/// Reject a specific proxy URL the router couldn't use, so a typo is caught when it's set instead
+/// of silently failing every call through that account. `reqwest::Proxy::all` is too lenient on its
+/// own (it swallows a bad scheme), so check the shape first: known scheme + `host:port`.
+pub fn validate(proxy: &str) -> Result<()> {
+    let bad =
+        |msg: &str| Error::Config(format!("{msg} — expected [scheme://][user:pass@]host:port"));
+    let (scheme, rest) = proxy.split_once("://").unwrap_or(("http", proxy));
+    if !matches!(scheme, "http" | "https" | "socks5" | "socks5h" | "socks4") {
+        return Err(bad(&format!("unsupported proxy scheme '{scheme}'")));
+    }
+    let host_port = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+    let (host, port) = host_port
+        .rsplit_once(':')
+        .ok_or_else(|| bad("missing port"))?;
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return Err(bad("bad host or port"));
+    }
+    let (url, _) = split_auth(proxy);
+    reqwest::Proxy::all(&url)?;
+    Ok(())
+}
+
 /// One reqwest client per account: proxy is a client-level setting. Userinfo in the
 /// URL is split out into explicit basic auth, since proxies are HTTP-CONNECT (`http://`).
 pub fn build_client(proxy: Option<&str>) -> Result<reqwest::Client> {
@@ -62,4 +84,24 @@ pub(crate) fn split_auth(p: &str) -> (String, Option<(String, String)>) {
         }
     }
     (p.to_string(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_accepts_and_rejects() {
+        for ok in [
+            "http://1.2.3.4:8080",
+            "http://u:p@1.2.3.4:8080",
+            "1.2.3.4:3128",
+            "socks5://host.example:1080",
+        ] {
+            assert!(validate(ok).is_ok(), "should accept {ok}");
+        }
+        for bad in ["ht!tp://%%%bad", "1.2.3.4", "http://host:notaport", ""] {
+            assert!(validate(bad).is_err(), "should reject {bad}");
+        }
+    }
 }

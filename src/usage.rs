@@ -265,6 +265,16 @@ impl Store {
         Ok(())
     }
 
+    /// Drop an account's sticky pool assignment so its next call re-resolves — used after its proxy
+    /// setting changes, so a fresh proxy takes effect instead of the old pinned one.
+    pub async fn clear_proxy(&self, label: &str) -> Result<()> {
+        sqlx::query("DELETE FROM proxy_assignment WHERE label = ?")
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Move an account's rows to a new label — usage (incl. the `{label}#dr` budget), proxy
     /// assignment, and web session. The label is the identity key, so a rename must carry these or
     /// the session/quota are orphaned. Mirrors `delete_account`.

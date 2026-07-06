@@ -95,12 +95,59 @@ function RenameModal({ label, onClose }) {
   );
 }
 
+// Change an account's proxy: one-click Direct / Pool, or a specific URL under Custom. A pinned URL
+// is shown masked (creds never reach the browser), so switching to a new custom proxy means typing
+// it in full. The raw string is sent as-is; the server normalises + validates it.
+function ProxyModal({ label, current, onClose }) {
+  const initMode = current === 'pool' ? 'pool' : current === 'direct' ? 'direct' : 'custom';
+  const [mode, setMode] = React.useState(initMode);
+  const [url, setUrl] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const proxy = mode === 'direct' ? '' : mode === 'pool' ? 'pool' : url.trim();
+  const save = async () => {
+    if (busy) return;
+    if (mode === 'custom' && !proxy) { setError('Enter a proxy URL'); return; }
+    setError(null); setBusy(true);
+    try { await window.apiPost('/api/account/proxy', { label, proxy }); onClose(); if (window.fxRefresh) window.fxRefresh(); }
+    catch (e) { setError(String(e.message || e)); setBusy(false); }
+  };
+  const seg = (val, text) => (
+    <button onClick={() => setMode(val)} style={{ flex: 1, padding: '7px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: mode === val ? 'var(--text-hi)' : 'var(--text-lo)', background: mode === val ? 'var(--surface-2)' : 'transparent', border: '1px solid ' + (mode === val ? 'var(--lime-500)' : 'var(--border-hairline)'), borderRadius: 'var(--r-sm)' }}>{text}</button>
+  );
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(4,5,8,0.66)', backdropFilter: 'blur(3px)', padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 440, maxWidth: '100%', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Proxy · <span style={{ color: 'var(--lime-500)' }}>{label}</span></span>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
+        </div>
+        <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 6 }}>{seg('direct', 'Direct')}{seg('pool', 'Pool')}{seg('custom', 'Custom')}</div>
+          {mode === 'custom' && <Input label="Proxy URL" value={url} mono autoFocus
+            placeholder="http://user:pass@host:port"
+            onChange={(e) => setUrl(e.target.value)}
+            hint={initMode === 'custom' ? `Currently ${current} — type a new URL to change it.` : null} />}
+          {mode === 'pool' && <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>A sticky proxy is assigned from your pool on the next call.</span>}
+          {mode === 'direct' && <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>Connect directly — no proxy.</span>}
+          {error && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.3)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>{error}</div>}
+        </div>
+        <div style={{ display: 'flex', gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border-hairline)', justifyContent: 'flex-end' }}>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={save} disabled={busy || (mode === 'custom' && !proxy)}>{busy ? 'Saving…' : 'Save proxy'}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RowActions({ r }) {
   const [busy, setBusy] = React.useState(false);
   const [test, setTest] = React.useState(null);
   const [confirmRm, setConfirmRm] = React.useState(false);
   const [paste, setPaste] = React.useState(false);
   const [edit, setEdit] = React.useState(false);
+  const [proxyEdit, setProxyEdit] = React.useState(false);
   const [browser, setBrowser] = React.useState('chrome');
   const needsLogin = r.status === 'needs-login';
 
@@ -139,9 +186,11 @@ function RowActions({ r }) {
       {r.web && <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={doLogin}>{needsLogin ? 'Login' : 'Re-login'}</Button>}
       {r.web && <Button size="sm" variant="ghost" onClick={() => setPaste(true)}>Session</Button>}
       <Button size="sm" variant="ghost" onClick={() => setEdit(true)}>Edit</Button>
+      <Button size="sm" variant="ghost" onClick={() => setProxyEdit(true)}>Proxy</Button>
       <Button size="sm" variant="ghost" onClick={doRemove} style={{ color: confirmRm ? 'var(--red-500)' : 'var(--text-faint)' }}>{confirmRm ? 'Confirm?' : 'Remove'}</Button>
       {paste && <PasteSessionModal label={r.label} onClose={() => setPaste(false)} />}
       {edit && <RenameModal label={r.label} onClose={() => setEdit(false)} />}
+      {proxyEdit && <ProxyModal label={r.label} current={r.proxy} onClose={() => setProxyEdit(false)} />}
     </div>
   );
 }

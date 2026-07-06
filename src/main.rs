@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         Some("remove") | Some("rm") => return cli::remove(&home, args.next()).await,
         Some("login") => return cli::login(&home, args.next()).await,
         Some("session") => return cli::session(&home, args).await,
+        Some("proxy") => return cli::proxy(&home, args).await,
         Some("ui") => return fetchira::ui::run(&home).await,
         Some("update") => return fetchira::update::run(&home).await,
         Some("--version") | Some("-V") | Some("version") => {
