@@ -42,6 +42,7 @@ function AddAccountModal({ onClose }) {
   const [apiKey, setApiKey] = React.useState('');
   const [proxy, setProxy] = React.useState('');
   const [sessionJson, setSessionJson] = React.useState('');
+  const [browser, setBrowser] = React.useState('chrome');
   const [touched, setTouched] = React.useState(false);
   const [phase, setPhase] = React.useState('form'); // form | logging-in | success
   const [busy, setBusy] = React.useState(false);
@@ -69,7 +70,7 @@ function AddAccountModal({ onClose }) {
     if (busy) return;
     setError(null); setPhase('logging-in');
     try {
-      const res = await window.apiPost('/api/account/add', { provider: providerId, label: label.trim(), proxy: proxy.trim() });
+      const res = await window.apiPost('/api/account/add', { provider: providerId, label: label.trim(), proxy: proxy.trim(), browser });
       setAddedLabel((res && res.label) || (label.trim() || provider.id));
       setPhase('success');
       if (window.fxRefresh) window.fxRefresh();
@@ -120,7 +121,7 @@ function AddAccountModal({ onClose }) {
               <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Guided login</span>
             </div>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-mid)', lineHeight: 1.5 }}>
-              A Chrome window is opening for <span style={{ color: 'var(--lime-500)' }}>{provider.id}</span>. Sign in there — fetchira captures the session automatically and this closes when it's done.
+              A {browser === 'firefox' ? 'Firefox' : 'Chrome'} window is opening for <span style={{ color: 'var(--lime-500)' }}>{provider.id}</span>. Sign in there — fetchira captures the session automatically and this closes when it's done.
             </div>
           </div>
         </Card>
@@ -159,9 +160,21 @@ function AddAccountModal({ onClose }) {
               hint={touched && keyMissing ? 'Enter a valid API key' : 'Stored locally · never displayed again'} />
           ) : (
             <Field label="Authentication">
+              <div style={{ display: 'flex', gap: 6 }}>
+                {['chrome', 'firefox'].map((b) => (
+                  <button key={b} type="button" onClick={() => setBrowser(b)} style={{
+                    flex: 1, padding: '7px 0', cursor: 'pointer', textTransform: 'capitalize',
+                    fontFamily: 'var(--font-mono)', fontSize: 12,
+                    color: browser === b ? 'var(--text-hi)' : 'var(--text-lo)',
+                    background: browser === b ? 'var(--surface-2)' : 'transparent',
+                    border: '1px solid', borderColor: browser === b ? 'var(--lime-dim)' : 'var(--border-hairline)',
+                    borderRadius: 'var(--r-sm)',
+                  }}>{b}</button>
+                ))}
+              </div>
               <Button variant="secondary" onClick={startLogin} style={{ width: '100%', justifyContent: 'center' }}
                 iconLeft={<span style={{ fontSize: 13 }}>◧</span>}>Log in with browser</Button>
-              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>Opens Chrome or Firefox so you can sign in. The session is captured locally — no password is stored.</span>
+              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>Opens the chosen browser so you can sign in. The session is captured locally — no password is stored.</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 2px' }}>
                 <div style={{ flex: 1, height: 1, background: 'var(--border-hairline)' }} />
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>or paste a session</span>

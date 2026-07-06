@@ -265,7 +265,7 @@ pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
         let cfg = load_or_empty(home);
         // Best-effort: the account is saved either way. On a headless box with no browser,
         // tell the user how to attach the session by hand.
-        if let Err(e) = do_login(home, &cfg, kind, &label).await {
+        if let Err(e) = do_login(home, &cfg, kind, &label, None).await {
             println!("login skipped: {e}");
             println!("attach a session manually:  fetchira session {label} < session.json");
         }
@@ -356,7 +356,11 @@ pub async fn rename_account(home: &Path, old: &str, new: &str) -> anyhow::Result
 }
 
 /// Capture (or re-capture) a web session for an existing account. Shared by CLI + web UI.
-pub async fn capture_login(home: &Path, label: &str) -> anyhow::Result<()> {
+pub async fn capture_login(
+    home: &Path,
+    label: &str,
+    browser: Option<String>,
+) -> anyhow::Result<()> {
     let cfg = load_or_empty(home);
     let acc = cfg
         .accounts
@@ -367,7 +371,7 @@ pub async fn capture_login(home: &Path, label: &str) -> anyhow::Result<()> {
         bail!("'{}' is not a web-session provider", acc.provider.as_str());
     }
     let kind = acc.provider;
-    do_login(home, &cfg, kind, label).await
+    do_login(home, &cfg, kind, label, browser).await
 }
 
 /// Validate a session JSON captured elsewhere (cookies exported from any browser) and store it
@@ -443,7 +447,7 @@ pub async fn login(home: &Path, who: Option<String>) -> anyhow::Result<()> {
     if !acc.provider.is_web() && !acc.provider.balance_session() {
         bail!("'{}' is not a web-session provider", acc.provider.as_str());
     }
-    do_login(home, &cfg, acc.provider, &acc.label).await
+    do_login(home, &cfg, acc.provider, &acc.label, None).await
 }
 
 async fn do_login(
@@ -451,12 +455,13 @@ async fn do_login(
     cfg: &Config,
     kind: ProviderKind,
     label: &str,
+    browser: Option<String>,
 ) -> anyhow::Result<()> {
     println!(
         "opening a browser to log into {} ({label}) — finish login; the window closes itself once you're in…",
         kind.as_str()
     );
-    let session = web::login(home, kind, label).await?;
+    let session = web::login(home, kind, label, browser).await?;
     open_store(home, cfg)
         .await?
         .save_session(label, kind.as_str(), &serde_json::to_string(&session)?)
@@ -600,7 +605,7 @@ async fn add_flow(home: &Path) -> anyhow::Result<()> {
         .prompt()
         .unwrap_or(false)
     {
-        do_login(home, &cfg, kind, &label).await?;
+        do_login(home, &cfg, kind, &label, None).await?;
         pause("");
     } else {
         pause(&format!("✓ added '{label}'"));
@@ -683,7 +688,7 @@ async fn login_flow(home: &Path) -> anyhow::Result<()> {
     };
     let idx = labels.iter().position(|l| l == &sel).unwrap_or(0);
     let (kind, label) = web[idx].clone();
-    do_login(home, &cfg, kind, &label).await?;
+    do_login(home, &cfg, kind, &label, None).await?;
     pause("");
     Ok(())
 }

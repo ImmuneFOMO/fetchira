@@ -191,7 +191,7 @@ fn find_bin(cands: &[&str]) -> Option<PathBuf> {
 
 /// The preferred usable browser (Chrome, else Firefox). `FETCHIRA_BROWSER=chrome|firefox` pins one.
 pub(crate) fn detect_browser() -> Option<Browser> {
-    browser_candidates().into_iter().next()
+    browser_candidates(None).into_iter().next()
 }
 
 // (url, cookie-domain, auth-cookie, optional page-eval that must be true for a *real* login —
@@ -251,9 +251,10 @@ fn profile_dir(home: &Path, tag: &str, label: &str) -> PathBuf {
     home.join(format!("{tag}-{label}"))
 }
 
-/// Browsers to try for login, in preference order: Chrome (default) then Firefox (fallback).
-/// `FETCHIRA_BROWSER=chrome|firefox` pins one.
-fn browser_candidates() -> Vec<Browser> {
+/// Browsers to try for login. An explicit `pick` (the UI's Chrome/Firefox toggle) is the ONLY
+/// candidate — no silent fallback to the other browser, which surprised users who chose one on
+/// purpose. With no pick, `FETCHIRA_BROWSER=chrome|firefox` pins one, else Chrome then Firefox.
+fn browser_candidates(pick: Option<&str>) -> Vec<Browser> {
     let chromium = || {
         find_bin(CHROMIUM_BINS).map(|bin| Browser {
             kind: BrowserKind::Chromium,
@@ -266,7 +267,10 @@ fn browser_candidates() -> Vec<Browser> {
             bin,
         })
     };
-    match std::env::var("FETCHIRA_BROWSER").ok().as_deref() {
+    let choice = pick
+        .map(str::to_string)
+        .or_else(|| std::env::var("FETCHIRA_BROWSER").ok());
+    match choice.as_deref() {
         Some("firefox" | "ff") => firefox().into_iter().collect(),
         Some("chrome" | "chromium") => chromium().into_iter().collect(),
         _ => [chromium(), firefox()].into_iter().flatten().collect(),
@@ -275,10 +279,16 @@ fn browser_candidates() -> Vec<Browser> {
 
 /// Launch a real browser on this account's dedicated profile, let the user log in, and capture
 /// the resulting cookie session once auth completes. Chrome is driven over CDP; Firefox (which
-/// dropped CDP) is read straight from its plaintext `cookies.sqlite`. Chrome is the default; if its
-/// capture fails (e.g. the DevTools socket resets on some builds) we fall back to Firefox.
-pub async fn login(home: &Path, kind: ProviderKind, label: &str) -> Result<Session> {
-    let candidates = browser_candidates();
+/// dropped CDP) is read straight from its plaintext `cookies.sqlite`. `browser` (from the UI's
+/// Chrome/Firefox picker) pins one and is then the only candidate; with none, Chrome is preferred
+/// and Firefox is the fallback.
+pub async fn login(
+    home: &Path,
+    kind: ProviderKind,
+    label: &str,
+    browser: Option<String>,
+) -> Result<Session> {
+    let candidates = browser_candidates(browser.as_deref());
     if candidates.is_empty() {
         return Err(Error::Config(
             "no Chrome/Chromium or Firefox found — install one, or attach a session manually \
@@ -460,6 +470,7 @@ async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Resu
         }
         sleep(Duration::from_secs(1)).await;
     };
+    tracing::debug!(%domain, %auth, count = best.len(), "auth cookie present; capturing");
     let mut stable = 0;
     for _ in 0..8 {
         sleep(Duration::from_secs(1)).await;
@@ -502,37 +513,71 @@ struct MozDb {
 }
 
 /// Firefox stores cookie values in plaintext (unlike Chrome), so we read `cookies.sqlite`
-/// directly. Read-only honours the live profile's WAL; transient open/lock errors and a
-/// not-yet-created file just mean "no cookies yet", so the caller keeps polling.
+/// directly — but it's a live WAL-mode DB Firefox holds locked: a read-only/read-write open of the
+/// original fails ("database is locked") and a WAL-blind read sees an empty table, since the fresh
+/// cookies live in the `-wal` sidecar. So snapshot the db + its WAL sidecars into a scratch dir and
+/// open the copy — opening checkpoints the WAL, making the rows visible. Any error just means "no
+/// cookies yet", so the caller keeps polling.
 impl CookieSource for MozDb {
     async fn fetch(&mut self, domain: &str) -> Result<Vec<Cookie>> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let opts = SqliteConnectOptions::new()
-            .filename(&self.path)
-            .read_only(true)
-            .busy_timeout(Duration::from_secs(2));
-        let mut conn = match sqlx::SqliteConnection::connect_with(&opts).await {
-            Ok(c) => c,
-            Err(_) => return Ok(Vec::new()),
+        let Some(dir) = self.path.parent().map(|p| p.join(".fetchira-read")) else {
+            return Ok(Vec::new());
         };
-        let rows = sqlx::query_as::<_, MozCookie>(
-            "SELECT COALESCE(name,'') AS name, COALESCE(value,'') AS value, \
-             COALESCE(host,'') AS host, COALESCE(path,'/') AS path, \
-             COALESCE(expiry,0) AS expiry, COALESCE(isSecure,0) AS is_secure, \
-             COALESCE(isHttpOnly,0) AS is_http_only FROM moz_cookies",
-        )
-        .fetch_all(&mut conn)
-        .await
-        .unwrap_or_default();
-        conn.close().await.ok();
-        Ok(rows
+        let _ = std::fs::remove_dir_all(&dir);
+        let snap = dir.join("cookies.sqlite");
+        if std::fs::create_dir_all(&dir).is_err() || std::fs::copy(&self.path, &snap).is_err() {
+            return Ok(Vec::new());
+        }
+        for suffix in ["-wal", "-shm"] {
+            let side = wal_sibling(&self.path, suffix);
+            if side.exists() {
+                let _ = std::fs::copy(&side, wal_sibling(&snap, suffix));
+            }
+        }
+        let opts = SqliteConnectOptions::new()
+            .filename(&snap)
+            .busy_timeout(Duration::from_secs(2));
+        let rows = match sqlx::SqliteConnection::connect_with(&opts).await {
+            Ok(mut conn) => {
+                let rows = sqlx::query_as::<_, MozCookie>(
+                    "SELECT COALESCE(name,'') AS name, COALESCE(value,'') AS value, \
+                     COALESCE(host,'') AS host, COALESCE(path,'/') AS path, \
+                     COALESCE(expiry,0) AS expiry, COALESCE(isSecure,0) AS is_secure, \
+                     COALESCE(isHttpOnly,0) AS is_http_only FROM moz_cookies",
+                )
+                .fetch_all(&mut conn)
+                .await
+                .unwrap_or_default();
+                conn.close().await.ok();
+                rows
+            }
+            Err(_) => Vec::new(),
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        let total = rows.len();
+        let scoped: Vec<Cookie> = rows
             .into_iter()
             .map(Cookie::from)
             .filter(|c| dom_match(&c.domain, domain))
-            .collect())
+            .collect();
+        tracing::debug!(
+            total,
+            scoped = scoped.len(),
+            "firefox cookies.sqlite snapshot read"
+        );
+        Ok(scoped)
     }
+}
+
+/// Sibling path with `suffix` appended to the file name (`cookies.sqlite` + `-wal`), matching
+/// SQLite's WAL/shm naming so a snapshot's sidecars line up with its db.
+fn wal_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
 }
 
 #[derive(sqlx::FromRow)]

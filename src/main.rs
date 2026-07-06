@@ -18,6 +18,16 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::from_path(home.join(".env")).ok();
     dotenvy::dotenv().ok();
 
+    // Logs → stderr (stdout is the MCP protocol channel on the serve path). RUST_LOG overrides;
+    // default `info`. Initialising here — before the command match — means `ui`/`login` finally
+    // surface the browser-capture diagnostics that used to be swallowed.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
     use std::io::IsTerminal;
     let mut args = std::env::args().skip(1);
     let cmd = args.next();
@@ -62,13 +72,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Default: serve the MCP server over stdio. Logs go to stderr (stdout is the MCP channel).
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cfg_path = home.join("fetchira.toml");
     let mut cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
         .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira setup` first."))?;

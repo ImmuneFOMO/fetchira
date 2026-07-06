@@ -84,6 +84,7 @@ function RowActions({ r }) {
   const [confirmRm, setConfirmRm] = React.useState(false);
   const [paste, setPaste] = React.useState(false);
   const [edit, setEdit] = React.useState(false);
+  const [browser, setBrowser] = React.useState('chrome');
   const needsLogin = r.status === 'needs-login';
 
   const doTest = async () => {
@@ -96,7 +97,7 @@ function RowActions({ r }) {
   const doLogin = async () => {
     if (busy) return;
     setBusy(true); setTest(null);
-    try { await window.apiPost('/api/account/login', { label: r.label }); if (window.fxRefresh) window.fxRefresh(); }
+    try { await window.apiPost('/api/account/login', { label: r.label, browser }); if (window.fxRefresh) window.fxRefresh(); }
     catch (e) { setTest({ ok: false, error: String(e.message || e) }); setBusy(false); }
   };
   const doRemove = async () => {
@@ -111,6 +112,13 @@ function RowActions({ r }) {
     <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
       {test && <span title={test.error || ''} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: test.ok ? 'var(--green-500)' : 'var(--red-500)' }}>{test.ok ? ('✓ ' + test.latencyMs + 'ms') : '✕ failed'}</span>}
       <Button size="sm" variant="ghost" onClick={doTest}>Test</Button>
+      {r.web && (
+        <select value={browser} onChange={(e) => setBrowser(e.target.value)} title="Browser for login"
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)', background: 'var(--surface-sunken, rgba(255,255,255,0.03))', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', padding: '3px 4px' }}>
+          <option value="chrome">Chrome</option>
+          <option value="firefox">Firefox</option>
+        </select>
+      )}
       {r.web && <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={doLogin}>{needsLogin ? 'Login' : 'Re-login'}</Button>}
       {r.web && <Button size="sm" variant="ghost" onClick={() => setPaste(true)}>Session</Button>}
       <Button size="sm" variant="ghost" onClick={() => setEdit(true)}>Edit</Button>

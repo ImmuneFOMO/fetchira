@@ -297,11 +297,15 @@ struct AddReq {
     proxy: Option<String>,
     /// Web providers only: a session pasted by hand instead of the guided browser login.
     session: Option<String>,
+    /// Web providers only: "chrome" | "firefox" — which browser to open for the guided login.
+    browser: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct LabelReq {
     label: String,
+    /// Login only: "chrome" | "firefox". Ignored by remove/test.
+    browser: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -337,7 +341,7 @@ async fn api_add(
     if kind.is_web() {
         let outcome = match req.session.filter(|s| !s.trim().is_empty()) {
             Some(raw) => cli::set_session(&st.home, &label, &raw).await.map(|_| ()),
-            None => cli::capture_login(&st.home, &label).await,
+            None => cli::capture_login(&st.home, &label, req.browser).await,
         };
         if let Err(e) = outcome {
             // A brand-new account whose first login failed: drop it so it doesn't linger
@@ -393,7 +397,7 @@ async fn api_login(
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
     }
-    match cli::capture_login(&st.home, &req.label).await {
+    match cli::capture_login(&st.home, &req.label, req.browser).await {
         Ok(()) => {
             rebuild(&st).await;
             Json(json!({ "ok": true })).into_response()
