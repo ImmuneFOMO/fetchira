@@ -12,6 +12,7 @@ const PROVIDER_CATALOG = [
   { id: 'steel', kind: 'key', note: 'Headless browser sessions' },
   { id: 'gemini_web', kind: 'web', note: 'Browser session · search + #dr' },
   { id: 'grok_web', kind: 'web', note: 'Browser session · search + #dr' },
+  { id: 'chatgpt_web', kind: 'web', note: 'Browser session · search + #dr' },
 ];
 
 function Overlay({ children, onClose }) {
