@@ -75,6 +75,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/account/remove", post(api_remove))
         .route("/api/account/login", post(api_login))
         .route("/api/account/session", post(api_session))
+        .route("/api/account/rename", post(api_rename))
         .route("/api/account/test", post(api_test))
         .fallback(static_handler)
         .with_state(state);
@@ -309,6 +310,12 @@ struct SessionReq {
     session: String,
 }
 
+#[derive(Deserialize)]
+struct RenameReq {
+    label: String,
+    new_label: String,
+}
+
 async fn api_add(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -387,6 +394,23 @@ async fn api_login(
         return r;
     }
     match cli::capture_login(&st.home, &req.label).await {
+        Ok(()) => {
+            rebuild(&st).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn api_rename(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<RenameReq>,
+) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    match cli::rename_account(&st.home, &req.label, &req.new_label).await {
         Ok(()) => {
             rebuild(&st).await;
             Json(json!({ "ok": true })).into_response()

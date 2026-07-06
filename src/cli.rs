@@ -327,6 +327,34 @@ pub async fn remove_account(home: &Path, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rename an account. The label is its identity across config + the DB, so migrate both. Shared
+/// by the CLI and web UI.
+pub async fn rename_account(home: &Path, old: &str, new: &str) -> anyhow::Result<()> {
+    let new = new.trim();
+    if new.is_empty() {
+        bail!("new label is empty");
+    }
+    if new == old {
+        return Ok(());
+    }
+    let mut cfg = load_or_empty(home);
+    if !cfg.accounts.iter().any(|a| a.label == old) {
+        bail!("no account labelled '{old}'");
+    }
+    if cfg.accounts.iter().any(|a| a.label == new) {
+        bail!("an account labelled '{new}' already exists");
+    }
+    for a in cfg.accounts.iter_mut().filter(|a| a.label == old) {
+        a.label = new.to_string();
+    }
+    config::save(&cfg, &cfg_path(home))?;
+    open_store(home, &cfg)
+        .await?
+        .rename_account(old, new)
+        .await?;
+    Ok(())
+}
+
 /// Capture (or re-capture) a web session for an existing account. Shared by CLI + web UI.
 pub async fn capture_login(home: &Path, label: &str) -> anyhow::Result<()> {
     let cfg = load_or_empty(home);

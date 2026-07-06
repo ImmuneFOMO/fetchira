@@ -1,5 +1,5 @@
 /* Accounts: management table. API keys never shown — masked chip only. */
-const { Card, Badge, Button, QuotaMeter, StatusDot } = window.FetchiraDesignSystem_6526df;
+const { Card, Badge, Button, QuotaMeter, StatusDot, Input } = window.FetchiraDesignSystem_6526df;
 
 function statusBadge(s) {
   if (s === 'exhausted') return <Badge tone="out" dot>exhausted</Badge>;
@@ -45,11 +45,45 @@ function PasteSessionModal({ label, onClose }) {
   );
 }
 
+// Rename an account (label is its identity — the backend migrates the session/quota/proxy rows).
+function RenameModal({ label, onClose }) {
+  const [val, setVal] = React.useState(label);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const save = async () => {
+    const next = val.trim();
+    if (busy || !next) return;
+    if (next === label) { onClose(); return; }
+    setError(null); setBusy(true);
+    try { await window.apiPost('/api/account/rename', { label, new_label: next }); onClose(); if (window.fxRefresh) window.fxRefresh(); }
+    catch (e) { setError(String(e.message || e)); setBusy(false); }
+  };
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(4,5,8,0.66)', backdropFilter: 'blur(3px)', padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 420, maxWidth: '100%', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Rename · <span style={{ color: 'var(--lime-500)' }}>{label}</span></span>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
+        </div>
+        <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Input label="New label" value={val} mono onChange={(e) => setVal(e.target.value)} />
+          {error && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.3)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>{error}</div>}
+        </div>
+        <div style={{ display: 'flex', gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border-hairline)', justifyContent: 'flex-end' }}>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={save} disabled={busy || !val.trim()}>{busy ? 'Saving…' : 'Rename'}</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RowActions({ r }) {
   const [busy, setBusy] = React.useState(false);
   const [test, setTest] = React.useState(null);
   const [confirmRm, setConfirmRm] = React.useState(false);
   const [paste, setPaste] = React.useState(false);
+  const [edit, setEdit] = React.useState(false);
   const needsLogin = r.status === 'needs-login';
 
   const doTest = async () => {
@@ -79,8 +113,10 @@ function RowActions({ r }) {
       <Button size="sm" variant="ghost" onClick={doTest}>Test</Button>
       {r.web && <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={doLogin}>{needsLogin ? 'Login' : 'Re-login'}</Button>}
       {r.web && <Button size="sm" variant="ghost" onClick={() => setPaste(true)}>Session</Button>}
+      <Button size="sm" variant="ghost" onClick={() => setEdit(true)}>Edit</Button>
       <Button size="sm" variant="ghost" onClick={doRemove} style={{ color: confirmRm ? 'var(--red-500)' : 'var(--text-faint)' }}>{confirmRm ? 'Confirm?' : 'Remove'}</Button>
       {paste && <PasteSessionModal label={r.label} onClose={() => setPaste(false)} />}
+      {edit && <RenameModal label={r.label} onClose={() => setEdit(false)} />}
     </div>
   );
 }

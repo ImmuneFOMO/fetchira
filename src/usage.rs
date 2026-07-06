@@ -209,6 +209,33 @@ impl Store {
         Ok(())
     }
 
+    /// Move an account's rows to a new label — usage (incl. the `{label}#dr` budget), proxy
+    /// assignment, and web session. The label is the identity key, so a rename must carry these or
+    /// the session/quota are orphaned. Mirrors `delete_account`.
+    pub async fn rename_account(&self, old: &str, new: &str) -> Result<()> {
+        for (from, to) in [
+            (old.to_string(), new.to_string()),
+            (format!("{old}#dr"), format!("{new}#dr")),
+        ] {
+            sqlx::query("UPDATE usage SET label = ? WHERE label = ?")
+                .bind(&to)
+                .bind(&from)
+                .execute(&self.pool)
+                .await?;
+        }
+        sqlx::query("UPDATE proxy_assignment SET label = ? WHERE label = ?")
+            .bind(new)
+            .bind(old)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE web_session SET label = ? WHERE label = ?")
+            .bind(new)
+            .bind(old)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn remaining(&self, label: &str, quota: i64, period: &str) -> Result<i64> {
         let u = self.usage_for(label, period).await?;
         Ok(if u.exhausted {
