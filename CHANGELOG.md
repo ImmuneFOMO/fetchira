@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.5...v0.1.6) - 2026-07-06
+
+### Added
+
+- *(ui)* per-card loader until each provider's live figure lands
+- *(accounts)* capture account email — masked chip + duplicate detection
+- *(ui)* rename accounts from the dashboard
+- *(ui)* list chatgpt_web in the add-account dropdown
+
+### Fixed
+
+- *(login)* browser picker, Firefox WAL cookie capture, and login logs
+- *(ui)* drop a new web account when its first login fails
+
+### Other
+
+- *(ui)* boot the live fetch during warm-up so no global spinner shows
+- *(ui)* paint accounts instantly, warm live limits in the background
+
 ## [0.1.5](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.4...v0.1.5) - 2026-07-05
 
 ### Other
