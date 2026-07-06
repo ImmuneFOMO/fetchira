@@ -537,6 +537,27 @@ async fn subscription(base: &str, client: &wreq::Client) -> (bool, Option<String
     (active, sub["tier"].as_str().map(str::to_string))
 }
 
+/// The signed-in account's email, for the dashboard's masked display and duplicate-account
+/// detection. `/rest/auth/get-user` takes the degraded statsig like the subscription poll. Prefer
+/// `email`; fall back to `xUsername` (X-login accounts carry no email) then `googleEmail`.
+pub(crate) async fn identity(base: &str, client: &wreq::Client) -> Result<Option<String>> {
+    let resp = client
+        .get(format!("{base}/rest/auth/get-user"))
+        .header("x-statsig-id", statsig_id())
+        .header("x-xai-request-id", uuid4())
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::BadResponse("grok_web"));
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("grok_web"))?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Ok(s("email")
+        .or_else(|| s("xUsername"))
+        .or_else(|| s("googleEmail")))
+}
+
 /// `SUBSCRIPTION_TIER_GROK_PRO` -> `"grok pro"`, suffixed `(inactive)` when lapsed. No record = free.
 fn friendly_tier(raw: Option<String>, active: bool) -> Option<String> {
     let name = match raw {

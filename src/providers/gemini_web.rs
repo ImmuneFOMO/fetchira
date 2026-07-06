@@ -650,6 +650,48 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
     })
 }
 
+/// Best-effort account email for the signed-in session. `ListAccounts` on accounts.google.com comes
+/// back empty (a gemini login captures google.com cookies, not the accounts.google.com set that
+/// endpoint needs), and a gmail bootstrap doesn't embed the email in plaintext — so this scans the
+/// `/app` HTML and usually finds nothing (a workspace account may still surface a real address).
+pub(crate) async fn identity(base: &str, client: &wreq::Client) -> Result<Option<String>> {
+    let _ = client.get("https://www.google.com").send().await;
+    let page = client
+        .get(format!("{base}/app"))
+        .send()
+        .await?
+        .text()
+        .await
+        .unwrap_or_default();
+    Ok(scan_emails(&page).into_iter().next())
+}
+
+/// A plausible personal account email in the bootstrap HTML, skipping Google-internal decoys
+/// (`googlers@google.com`) and malformed tokens (`.@.null`).
+fn scan_emails(html: &str) -> std::collections::BTreeSet<String> {
+    const SKIP: &[&str] = &["google.com", "gstatic.com", "googleusercontent.com"];
+    let mut out = std::collections::BTreeSet::new();
+    for (i, _) in html.match_indices('@') {
+        let start = html[..i]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || ".+-_".contains(c)))
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let rest = &html[i + 1..];
+        let dend = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || ".-".contains(c)))
+            .unwrap_or(rest.len());
+        let (local, domain) = (&html[start..i], &rest[..dend]);
+        let tld_ok = domain
+            .rsplit('.')
+            .next()
+            .is_some_and(|t| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()));
+        if local.len() >= 3 && !local.starts_with('.') && tld_ok && !SKIP.contains(&domain) {
+            out.insert(format!("{local}@{domain}"));
+        }
+    }
+    out
+}
+
 /// One batchexecute RPC. Envelope: `f.req=[[[rpcid, <payload-json-string>, null, "generic"]]]` + `at`.
 #[allow(clippy::too_many_arguments)]
 async fn rpc(

@@ -188,6 +188,32 @@ fn parse_balance(v: &Value) -> LiveBalance {
     }
 }
 
+/// Account email via the dashboard's cookie session (same origin as `balance`, api-key can't read
+/// it). `{kind:"ok", data:{userEmail,...}}`.
+pub async fn identity(client: &wreq::Client) -> Result<Option<String>> {
+    let resp = client
+        .post("https://platform.parallel.ai/api/rpc/auth/get-my-api-key-and-session-details")
+        .header("content-type", "application/json")
+        .header("origin", "https://platform.parallel.ai")
+        .header(
+            "referer",
+            "https://platform.parallel.ai/settings?tab=billing",
+        )
+        .body("{}")
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "parallel",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("parallel"))?;
+    Ok(v["data"]["userEmail"].as_str().map(String::from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

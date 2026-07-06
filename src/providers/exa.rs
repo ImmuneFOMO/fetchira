@@ -167,6 +167,25 @@ fn parse_balance(v: &Value) -> LiveBalance {
     }
 }
 
+/// Account email via the same dashboard cookie session as `balance` (masked in the dashboard, and
+/// used for duplicate-account detection). `GET /api/auth/session` → `{user:{email}}`.
+pub async fn identity(client: &wreq::Client) -> Result<Option<String>> {
+    let resp = client
+        .get("https://dashboard.exa.ai/api/auth/session")
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "exa",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("exa"))?;
+    Ok(v["user"]["email"].as_str().map(str::to_owned))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

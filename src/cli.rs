@@ -265,9 +265,19 @@ pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
         let cfg = load_or_empty(home);
         // Best-effort: the account is saved either way. On a headless box with no browser,
         // tell the user how to attach the session by hand.
-        if let Err(e) = do_login(home, &cfg, kind, &label, None).await {
-            println!("login skipped: {e}");
-            println!("attach a session manually:  fetchira session {label} < session.json");
+        match do_login(home, &cfg, kind, &label, None).await {
+            Ok(()) => {
+                if let Ok(Some((other, id))) = identity_dup(home, kind, &label).await {
+                    let _ = remove_account(home, &label).await;
+                    bail!(
+                        "that account ({id}) is already added as '{other}' — log in with a different one"
+                    );
+                }
+            }
+            Err(e) => {
+                println!("login skipped: {e}");
+                println!("attach a session manually:  fetchira session {label} < session.json");
+            }
         }
     }
     Ok(())
@@ -292,6 +302,23 @@ pub fn add_account(
     }
     if !kind.is_web() && key.as_deref().unwrap_or("").trim().is_empty() {
         bail!("{} needs an API key", kind.as_str());
+    }
+    // Reject re-adding the same API key under a new label — it's the same account/quota pool.
+    if let Some(nk) = key.as_deref().and_then(|k| config::resolve_secret(k).ok()) {
+        if let Some(dup) = cfg.accounts.iter().find(|a| {
+            a.provider == kind
+                && a.api_key
+                    .as_deref()
+                    .and_then(|k| config::resolve_secret(k).ok())
+                    .as_deref()
+                    == Some(nk.as_str())
+        }) {
+            bail!(
+                "that {} key is already used by '{}'",
+                kind.as_str(),
+                dup.label
+            );
+        }
     }
     cfg.accounts.push(Account {
         provider: kind,
@@ -353,6 +380,23 @@ pub async fn rename_account(home: &Path, old: &str, new: &str) -> anyhow::Result
         .rename_account(old, new)
         .await?;
     Ok(())
+}
+
+/// If a web account's captured identity (email) already belongs to another account of the same
+/// provider, returns (that other label, the identity) — so the add flow can reject a duplicate.
+pub async fn identity_dup(
+    home: &Path,
+    kind: ProviderKind,
+    label: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    let store = open_store(home, &load_or_empty(home)).await?;
+    let Some(id) = store.load_identity(label).await? else {
+        return Ok(None);
+    };
+    Ok(store
+        .identity_conflict(kind.as_str(), &id, label)
+        .await?
+        .map(|other| (other, id)))
 }
 
 /// Capture (or re-capture) a web session for an existing account. Shared by CLI + web UI.
@@ -462,10 +506,26 @@ async fn do_login(
         kind.as_str()
     );
     let session = web::login(home, kind, label, browser).await?;
-    open_store(home, cfg)
-        .await?
+    let store = open_store(home, cfg).await?;
+    store
         .save_session(label, kind.as_str(), &serde_json::to_string(&session)?)
         .await?;
+    // Best-effort: record the account email (dashboard display + dup detection). Direct egress is
+    // fine for this one-off identity read; the router uses the sticky proxy for real calls.
+    let proxy = cfg
+        .accounts
+        .iter()
+        .find(|a| a.label == label)
+        .and_then(|a| a.proxy.as_deref())
+        .filter(|p| p.starts_with("http"));
+    if let Ok(client) = web::build_client(&session.cookies, &session.headers, proxy) {
+        if let Some(id) = crate::providers::Provider::new(kind)
+            .account_identity(&client)
+            .await
+        {
+            let _ = store.set_identity(label, &id).await;
+        }
+    }
     println!(
         "captured {} cookies; session '{label}' ready",
         session.cookies.len()

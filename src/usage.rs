@@ -113,11 +113,18 @@ impl Store {
                 label    TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 cookies  TEXT NOT NULL,
-                updated  TEXT NOT NULL
+                updated  TEXT NOT NULL,
+                identity TEXT
             )",
         )
         .execute(&pool)
         .await?;
+        // Existing DBs predate `identity` (account email, for the dashboard + dup detection);
+        // add it idempotently (ignore "duplicate column name").
+        sqlx::query("ALTER TABLE web_session ADD COLUMN identity TEXT")
+            .execute(&pool)
+            .await
+            .ok();
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS route_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,6 +197,55 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.get("cookies")))
+    }
+
+    /// Record the account identity (email) captured at login — for the dashboard + dup detection.
+    pub async fn set_identity(&self, label: &str, identity: &str) -> Result<()> {
+        sqlx::query("UPDATE web_session SET identity = ? WHERE label = ?")
+            .bind(identity)
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_identity(&self, label: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT identity FROM web_session WHERE label = ?")
+            .bind(label)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("identity")))
+    }
+
+    /// Another account of the same provider already logged into this identity → its label. Lets the
+    /// add flow reject re-adding an account you already have.
+    pub async fn identity_conflict(
+        &self,
+        provider: &str,
+        identity: &str,
+        exclude: &str,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT label FROM web_session WHERE provider = ? AND identity = ? AND label != ? LIMIT 1",
+        )
+        .bind(provider)
+        .bind(identity)
+        .bind(exclude)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get("label")))
+    }
+
+    /// All captured account identities (label -> email), for the dashboard rows.
+    pub async fn all_identities(&self) -> Result<std::collections::HashMap<String, String>> {
+        let rows =
+            sqlx::query("SELECT label, identity FROM web_session WHERE identity IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get("label"), r.get("identity")))
+            .collect())
     }
 
     /// Remove all rows for an account (usage, proxy assignment, web session).

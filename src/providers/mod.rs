@@ -653,6 +653,25 @@ impl Provider {
             _ => None,
         }
     }
+
+    /// The signed-in account's email/identity, when the provider exposes it (dashboard display +
+    /// duplicate-account detection). Best-effort: `None` when unsupported or the fetch fails.
+    pub async fn account_identity(&self, client: &wreq::Client) -> Option<String> {
+        match self.kind {
+            ProviderKind::Exa => exa::identity(client).await.ok().flatten(),
+            ProviderKind::Parallel => parallel::identity(client).await.ok().flatten(),
+            ProviderKind::ChatgptWeb => chatgpt_web::identity(&self.base, client)
+                .await
+                .ok()
+                .flatten(),
+            ProviderKind::GrokWeb => grok_web::identity(&self.base, client).await.ok().flatten(),
+            ProviderKind::GeminiWeb => gemini_web::identity(&self.base, client)
+                .await
+                .ok()
+                .flatten(),
+            _ => None,
+        }
+    }
 }
 
 struct Hit {

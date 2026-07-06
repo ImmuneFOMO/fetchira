@@ -294,6 +294,18 @@ fn account_from_jwt(bearer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn email_from_jwt(bearer: &str) -> Option<String> {
+    let payload = bearer.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("https://api.openai.com/profile")
+        .and_then(|p| p.get("email"))
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+}
+
 fn message_node(query: &str, hints: &[&str], dr: bool) -> Value {
     let mut md = json!({"system_hints": hints, "selected_sources": []});
     if dr {
@@ -575,6 +587,26 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
         features,
         models,
     })
+}
+
+/// Best-effort account email (masked in the dashboard + duplicate-account detection): `user.email`
+/// from the session, falling back to the access-token JWT's `.../profile` email claim.
+pub(crate) async fn identity(base: &str, client: &wreq::Client) -> Result<Option<String>> {
+    let sess = client
+        .get(format!("{base}/api/auth/session"))
+        .send()
+        .await?
+        .text()
+        .await
+        .unwrap_or_default();
+    let sess: Value = serde_json::from_str(&sess)?;
+    if let Some(email) = sess.pointer("/user/email").and_then(|x| x.as_str()) {
+        return Ok(Some(email.to_string()));
+    }
+    Ok(sess
+        .get("accessToken")
+        .and_then(|x| x.as_str())
+        .and_then(email_from_jwt))
 }
 
 /// The composer's selectable chat models, from `GET /backend-api/models`'s `categories` (the picker

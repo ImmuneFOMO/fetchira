@@ -7,6 +7,23 @@ function statusBadge(s) {
   return <Badge tone="ok" dot>healthy</Badge>;
 }
 
+// "anton.bavirov@gmail.com" -> "an****@gm****om"
+function maskEmail(e) {
+  const at = String(e).indexOf('@');
+  if (at < 1) return e;
+  const local = e.slice(0, at), domain = e.slice(at + 1);
+  return `${local.slice(0, 2)}****@${domain.slice(0, 2)}****${domain.slice(-2)}`;
+}
+
+// Account email chip: masked by default, click to reveal (loopback-only data, but not shouted).
+function EmailChip({ email }) {
+  const [show, setShow] = React.useState(false);
+  return (
+    <span onClick={(e) => { e.stopPropagation(); setShow((s) => !s); }} title="click to reveal"
+      style={{ cursor: 'pointer', color: 'var(--text-lo)' }}>{show ? email : maskEmail(email)}</span>
+  );
+}
+
 function Th({ children, style }) {
   return <th style={{ textAlign: 'left', fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)', padding: '0 14px 10px', ...style }}>{children}</th>;
 }
@@ -166,7 +183,7 @@ function AccountsTab({ onAdd }) {
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</div>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{r.provider}</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{r.provider}{r.email ? <span> · <EmailChip email={r.email} /></span> : null}</div>
                     {r.limits && (
                       <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 280 }}>
                         {r.limits.tier && <Badge tone="cyan" variant="outline">{r.limits.tier}</Badge>}
