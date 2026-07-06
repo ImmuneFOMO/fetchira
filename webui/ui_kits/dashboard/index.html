@@ -20,6 +20,19 @@
 <script src="../../vendor/babel.min.js"></script>
 <script src="../../_ds_bundle.js"></script>
 <script src="data.js"></script>
+<!-- Kick the first live fetch during babel warm-up so the app mounts already-live: the account
+     cards paint immediately with per-card loaders instead of a global "loading live quota…". The
+     fetch (cached snapshot, ~ms) finishes long before babel transforms the JSX below. -->
+<script>
+  (function () {
+    var t = new URLSearchParams(location.search).get('token');
+    if (!t) return;
+    window.__fxBoot = fetch('/api/state', { headers: { 'x-fetchira-token': t } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d) { window.FX = Object.assign({}, window.FX || {}, d); window.__fxLive = true; } })
+      .catch(function () {});
+  })();
+</script>
 </head>
 <body class="fx-backplate">
 <div id="root"></div>
@@ -113,6 +126,9 @@ function App() {
         bump((n) => n + 1);
       } catch (e) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); }
     };
+    // If the boot fetch (kicked during babel warm-up) is still resolving, flip to live the moment
+    // it lands — don't wait for the first poll, and never flash the global spinner.
+    if (window.__fxBoot) window.__fxBoot.then(() => { if (window.__fxLive) { setPhase('live'); bump((n) => n + 1); } });
     ping();
     const id = setInterval(ping, 5000);
     return () => clearInterval(id);
