@@ -209,8 +209,17 @@ function AccountsTab({ onAdd }) {
                     )}
                   </td>
                   <td style={{ padding: '12px 14px' }}>
-                    <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>
+                    {r.pending ? (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                        <span style={{ width: 10, height: 10, border: '1.5px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%', display: 'inline-block', animation: 'fx-spin 0.8s linear infinite' }} />
+                        loading…
+                      </span>
+                    ) : (
+                      <React.Fragment>
+                        <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>
+                      </React.Fragment>
+                    )}
                   </td>
                   <td style={{ padding: '12px 14px' }}><Badge tone="neutral" variant="outline" uppercase>{r.resetWindow}</Badge></td>
                   <td style={{ padding: '12px 14px', fontFamily: 'var(--font-mono)', fontSize: 12, color: r.proxy === 'direct' ? 'var(--text-faint)' : 'var(--text-mid)' }}>

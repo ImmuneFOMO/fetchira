@@ -780,6 +780,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "web": web,
                 "loggedIn": logged,
                 "email": idents.get(v.label.as_str()),
+                "pending": v.pending,
                 "limits": v.limits.as_ref().map(|ll| json!({
                     "tier": ll.tier,
                     "features": ll.features.iter().map(|f| json!({
@@ -806,6 +807,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         e.used += v.used;
         e.quota += v.quota;
         e.accounts += 1;
+        e.pending |= v.pending;
         e.window_secs = e.window_secs.or(v.window_secs);
         if let Some(u) = v.usd {
             e.usd = Some(e.usd.unwrap_or(0.0) + u);
@@ -916,6 +918,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                     "resetsIn": resets_in,
                     "accounts": a.accounts,
                     "key": !a.web,
+                    "pending": a.pending,
                 });
                 if a.web {
                     tile["webSession"] = json!(true);
@@ -1166,6 +1169,8 @@ struct Agg {
     dr_reset_after: Option<String>,
     /// Summed real $ balance for top-up providers (exa/parallel/steel); None for credit providers.
     usd: Option<f64>,
+    /// Any account still awaiting its first live figure (cached snapshot) → the card shows a loader.
+    pending: bool,
 }
 
 impl Agg {
@@ -1185,6 +1190,7 @@ impl Agg {
             dr_period: String::new(),
             dr_reset_after: None,
             usd: None,
+            pending: false,
         }
     }
 }

@@ -63,6 +63,10 @@ pub struct UsageView {
     /// Real dollar balance for top-up $ providers (exa/parallel/steel); None for credit providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usd: Option<f64>,
+    /// Cached snapshot only: the live figure isn't fetched yet, so the dashboard shows a loader
+    /// instead of the soft placeholder. Never set in a fetching snapshot.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 pub struct Router {
@@ -463,6 +467,23 @@ impl Router {
         self.patch_live(b, false, &mut mv, fetch).await;
         self.patch_live_balance(b, &mut mv, fetch).await;
         mv.limits = ll.clone();
+        // Cached snapshot: flag accounts whose live figure isn't cached yet so the UI shows a loader
+        // instead of a soft placeholder. Web → limits cache; API-key → balance cache.
+        if !fetch {
+            mv.pending = if b.provider.kind.is_web() {
+                !self
+                    .live_limits
+                    .lock()
+                    .map(|m| m.contains_key(&b.label))
+                    .unwrap_or(true)
+            } else {
+                !self
+                    .balance
+                    .lock()
+                    .map(|m| m.contains_key(&b.label))
+                    .unwrap_or(true)
+            };
+        }
         let mut out = vec![mv];
         // Web providers track deep_research against a separate daily budget.
         if b.provider.kind.is_web() {
@@ -661,6 +682,7 @@ impl Router {
             window_secs: None,
             limits: None,
             usd: None,
+            pending: false,
         })
     }
 }
@@ -994,6 +1016,7 @@ mod tests {
             window_secs: None,
             limits: None,
             usd: None,
+            pending: false,
         };
         let sheet = provider_sheet(ProviderKind::Serper, &[v]);
         assert!(sheet.contains("2400/2500 left"));

@@ -182,19 +182,28 @@ function FxProviderCard(p) {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-        {active.map((l) => <LimitRow key={l.label} {...l} off={needsLogin} />)}
-        {showSpent && spent.map((l) => <LimitRow key={l.label} {...l} off={needsLogin} />)}
-        {features.map((f) => <FeatureRow key={f.label} {...f} />)}
+        {p.pending ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>
+            <span style={{ width: 12, height: 12, border: '2px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%', display: 'inline-block', animation: 'fx-spin 0.8s linear infinite' }} />
+            loading limits…
+          </div>
+        ) : (
+          <React.Fragment>
+            {active.map((l) => <LimitRow key={l.label} {...l} off={needsLogin} />)}
+            {showSpent && spent.map((l) => <LimitRow key={l.label} {...l} off={needsLogin} />)}
+            {features.map((f) => <FeatureRow key={f.label} {...f} />)}
+          </React.Fragment>
+        )}
       </div>
 
-      {spent.length > 0 && (
+      {!p.pending && spent.length > 0 && (
         <button onClick={() => setShowSpent((s) => !s)}
           style={{ alignSelf: 'flex-start', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
           {showSpent ? '− hide locked / used up' : `+ ${spent.length} more · locked / used up`}
         </button>
       )}
 
-      {catalog.length > 0 && (
+      {!p.pending && catalog.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>chat models · pick per search</span>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
