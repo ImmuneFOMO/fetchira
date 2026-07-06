@@ -333,6 +333,9 @@ async fn api_add(
             None => cli::capture_login(&st.home, &label).await,
         };
         if let Err(e) = outcome {
+            // A brand-new account whose first login failed: drop it so it doesn't linger
+            // session-less and consume the auto-name (gemini-2 -> gap on the next add).
+            let _ = cli::remove_account(&st.home, &label).await;
             rebuild(&st).await;
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
         }
