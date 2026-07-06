@@ -41,7 +41,7 @@ struct AcctMeta {
 
 /// The parts that a config mutation rebuilds; behind an RwLock so add/remove/login take effect live.
 struct Inner {
-    router: Router,
+    router: Arc<Router>,
     meta: HashMap<String, AcctMeta>,
 }
 
@@ -69,6 +69,20 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     // Best-effort: fill in account emails for already-logged-in accounts (otherwise missing until
     // their next login) so the dashboard shows them. Background — doesn't delay the first paint.
     tokio::spawn(backfill_identities(home.to_path_buf(), state.store.clone()));
+
+    // Keep the live-limit/balance caches warm in the background so the dashboard's cached snapshot
+    // paints instantly and fills in per provider as each fetch lands — never blocking on a cold
+    // fan-out. Clone the Arc out from under the lock so `warm`'s network I/O holds no guard.
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let router = st.inner.read().await.router.clone();
+                router.warm().await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+        });
+    }
 
     let app = AxumRouter::new()
         .route("/api/state", get(api_state))
@@ -115,7 +129,10 @@ async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
         );
     }
     let router = Router::build(cfg, store.clone()).await?;
-    Ok(Inner { router, meta })
+    Ok(Inner {
+        router: Arc::new(router),
+        meta,
+    })
 }
 
 async fn rebuild(st: &AppState) {
@@ -707,7 +724,7 @@ fn models_json(models: &[crate::providers::ModelInfo]) -> Vec<Value> {
 }
 
 async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
-    let views = inner.router.usage_snapshot().await?;
+    let views = inner.router.usage_snapshot_cached().await?;
 
     let mut dr: HashMap<&str, &crate::router::UsageView> = HashMap::new();
     for v in &views {

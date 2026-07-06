@@ -201,6 +201,12 @@ function AccountsTab({ onAdd }) {
                         ))}
                       </div>
                     )}
+                    {r.web && !r.limits && (
+                      <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
+                        <span style={{ width: 9, height: 9, border: '1.5px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%', display: 'inline-block', animation: 'fx-spin 0.8s linear infinite' }} />
+                        loading limits…
+                      </div>
+                    )}
                   </td>
                   <td style={{ padding: '12px 14px' }}>
                     <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />

@@ -233,7 +233,7 @@ impl Router {
                 if rem > 0 && forced.is_none() {
                     if let Some(feature) = live_feature(cap) {
                         if let Some(live) = self
-                            .live_limits_for(b)
+                            .live_limits_for(b, true)
                             .await
                             .and_then(|l| l.remaining(feature))
                         {
@@ -426,10 +426,21 @@ impl Router {
         Err(Error::NoCandidate(cap.as_str()))
     }
 
+    /// One-shot snapshot that fetches missing live figures inline (CLI `list`/`usage`, MCP usage).
     pub async fn usage_snapshot(&self) -> Result<Vec<UsageView>> {
-        // A cold snapshot hits every provider's live endpoint; fan the buckets out concurrently
-        // so the dashboard's first paint waits for the slowest single provider, not the sum.
-        let per = self.buckets.iter().map(|b| self.bucket_views(b));
+        self.snapshot(true).await
+    }
+
+    /// Cached-only snapshot: never blocks on a provider, so the dashboard paints instantly and the
+    /// background `warm` loop fills each account's limits/balance in as its fetch lands.
+    pub async fn usage_snapshot_cached(&self) -> Result<Vec<UsageView>> {
+        self.snapshot(false).await
+    }
+
+    async fn snapshot(&self, fetch: bool) -> Result<Vec<UsageView>> {
+        // Fan the buckets out concurrently: a fetching snapshot waits for the slowest single
+        // provider (not the sum), a cached one returns immediately.
+        let per = self.buckets.iter().map(|b| self.bucket_views(b, fetch));
         let mut out = Vec::with_capacity(self.buckets.len());
         for r in futures_util::future::join_all(per).await {
             out.extend(r?);
@@ -437,14 +448,20 @@ impl Router {
         Ok(out)
     }
 
-    async fn bucket_views(&self, b: &Bucket) -> Result<Vec<UsageView>> {
+    /// Refresh every live cache (called on a timer by the dashboard) so cached snapshots stay fresh
+    /// without any request blocking on a cold provider fan-out.
+    pub async fn warm(&self) {
+        let _ = self.snapshot(true).await;
+    }
+
+    async fn bucket_views(&self, b: &Bucket, fetch: bool) -> Result<Vec<UsageView>> {
         let proxy = b.proxy.clone().unwrap_or_else(|| "direct".to_string());
-        let ll = self.live_limits_for(b).await;
+        let ll = self.live_limits_for(b, fetch).await;
         let mut mv = self
             .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
             .await?;
-        self.patch_live(b, false, &mut mv).await;
-        self.patch_live_balance(b, &mut mv).await;
+        self.patch_live(b, false, &mut mv, fetch).await;
+        self.patch_live_balance(b, &mut mv, fetch).await;
         mv.limits = ll.clone();
         let mut out = vec![mv];
         // Web providers track deep_research against a separate daily budget.
@@ -459,7 +476,7 @@ impl Router {
                     &proxy,
                 )
                 .await?;
-            self.patch_live(b, true, &mut dv).await;
+            self.patch_live(b, true, &mut dv, fetch).await;
             // Prefer the provider's live deep-research allowance over the soft counter. A live
             // `total` (grok, tier-aware) overrides the ceiling too, so a locked tier reads 0/0
             // instead of the nominal daily budget.
@@ -481,17 +498,18 @@ impl Router {
 
     /// Replace the soft local counter with the provider's live figure when it reports one (grok),
     /// caching it briefly. Best-effort: a failed fetch leaves the soft view untouched.
-    async fn patch_live(&self, b: &Bucket, deep: bool, v: &mut UsageView) {
+    async fn patch_live(&self, b: &Bucket, deep: bool, v: &mut UsageView, fetch: bool) {
         let Conn::Web(c, _) = &b.conn else { return };
         let key = format!("{}|{}", b.label, deep);
         let cached = self.live.lock().ok().and_then(|m| {
             m.get(&key)
-                .filter(|(t, _)| t.elapsed() < Duration::from_secs(20))
-                .map(|(_, lq)| *lq)
+                .map(|(t, lq)| (t.elapsed() < Duration::from_secs(20), *lq))
         });
         let lq = match cached {
-            Some(lq) => lq,
-            None => {
+            Some((true, lq)) => lq,
+            Some((false, lq)) if !fetch => lq,
+            None if !fetch => return,
+            _ => {
                 let Some(lq) = b.provider.live_quota(c, deep).await else {
                     return;
                 };
@@ -511,16 +529,17 @@ impl Router {
     /// Overwrite an API-key bucket's soft counter with the provider's live balance when it reports
     /// one (serper/tavily/firecrawl, and steel on paid tiers). Cached 20s; a miss is cached too,
     /// so providers without a usable endpoint (exa/parallel/steel-free) keep the corrected constant.
-    async fn patch_live_balance(&self, b: &Bucket, v: &mut UsageView) {
+    async fn patch_live_balance(&self, b: &Bucket, v: &mut UsageView, fetch: bool) {
         let Conn::Api(c) = &b.conn else { return };
         let cached = self.balance.lock().ok().and_then(|m| {
             m.get(&b.label)
-                .filter(|(t, _)| t.elapsed() < Duration::from_secs(20))
-                .map(|(_, bal)| *bal)
+                .map(|(t, bal)| (t.elapsed() < Duration::from_secs(20), *bal))
         });
         let bal = match cached {
-            Some(bal) => bal,
-            None => {
+            Some((true, bal)) => bal,
+            Some((false, bal)) if !fetch => bal,
+            None if !fetch => return,
+            _ => {
                 // exa/parallel read their $ balance through the dashboard cookie session; the rest
                 // (serper/tavily/firecrawl/steel) through the api-key. The dashboard re-issues a
                 // rolling NextAuth token on every fetch, so re-save it to keep the session alive.
@@ -582,16 +601,19 @@ impl Router {
 
     /// Live per-tier limits for a web bucket, cached 20s (a miss is cached too, so a provider
     /// without them isn't re-polled on every snapshot).
-    async fn live_limits_for(&self, b: &Bucket) -> Option<LiveLimits> {
+    async fn live_limits_for(&self, b: &Bucket, fetch: bool) -> Option<LiveLimits> {
         let Conn::Web(c, _) = &b.conn else {
             return None;
         };
-        if let Some(hit) = self.live_limits.lock().ok().and_then(|m| {
+        let cached = self.live_limits.lock().ok().and_then(|m| {
             m.get(&b.label)
-                .filter(|(t, _)| t.elapsed() < Duration::from_secs(20))
-                .map(|(_, v)| v.clone())
-        }) {
-            return hit;
+                .map(|(t, v)| (t.elapsed() < Duration::from_secs(20), v.clone()))
+        });
+        match cached {
+            Some((true, v)) => return v,            // fresh
+            Some((false, v)) if !fetch => return v, // stale, but the caller won't wait on a fetch
+            None if !fetch => return None,          // nothing cached and we mustn't block
+            _ => {}
         }
         let fresh = b.provider.live_limits(c).await;
         if let Ok(mut m) = self.live_limits.lock() {
@@ -604,7 +626,7 @@ impl Router {
     /// feature (an absolute reset for chatgpt, a rolling window for grok). `None` if unavailable.
     async fn reset_hint(&self, b: &Bucket, cap: Capability) -> Option<String> {
         let feature = live_feature(cap)?;
-        let ll = self.live_limits_for(b).await?;
+        let ll = self.live_limits_for(b, true).await?;
         let f = ll.feature(feature)?;
         if let Some(iso) = f.reset_after.as_deref() {
             return Some(format!("resets at {iso}"));
