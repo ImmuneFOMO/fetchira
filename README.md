@@ -31,9 +31,22 @@ so the free quota gets spent evenly instead of one key burning out while the res
 It also ships with a **local dashboard** so a human can watch the same thing in real time and
 manage accounts without touching a config file.
 
+## Quickstart
+
+```sh
+brew install ImmuneFOMO/tap/fetchira    # or: curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
+fetchira setup                          # guided: pick providers, paste keys, log into the web ones
+fetchira install                        # register the MCP server with your coding tools
+```
+
+Restart your coding tool and ask it to search the web — fetchira takes it from there.
+`fetchira ui` opens the dashboard. The details: [picking providers](#picking-providers),
+[registering tools](#register-with-your-coding-tools), [web sessions](#web-sessions),
+[configuration](#configuration).
+
 ## What you get
 
-| Capability | The agent calls | fetchira routes to (in preference order) |
+| Capability | The agent calls | fetchira routes to (default order — reorder with `fetchira priority`) |
 |---|---|---|
 | **search** | `search` | serper → tavily → exa → parallel → gemini_web → grok_web → chatgpt_web |
 | **read** | `read` | firecrawl (auto-escalates to a headless browser if the plain read is empty) |
@@ -77,7 +90,8 @@ fetchira ui          # opens http://127.0.0.1:7878 in your browser
 
 An instrument panel for the router. The **Overview** groups every provider by capability and
 shows, per account, how much free quota is left and when it resets — next to a live log of
-calls as they happen.
+calls as they happen. A **Routing priority** panel on the same tab reorders which provider each
+capability tries first (the same order `fetchira priority` sets on the CLI).
 
 ![Overview tab](docs/overview.png)
 
@@ -164,6 +178,31 @@ a browser to log in (web-session), and writes everything to **global config** in
 `~/.config/fetchira/` — no manual `.env` editing. Re-run any time. Config lives in
 `$FETCHIRA_HOME` or `~/.config/fetchira` (`fetchira.toml` + `usage.db`), so the binary works no
 matter which directory an MCP client launches it from.
+
+### Picking providers
+
+Every provider is optional — add what you have and the router routes around the rest. Two good
+starting points: **serper + firecrawl** (solid search + read on generous free keys), or just
+**gemini_web** (one Google login gives search, deep research, images and file Q&A with no API
+key at all). Add more later with `fetchira add <provider>`; they slot into the routing order
+automatically.
+
+| Provider | Auth | Gives you | Free tier (approx.) | Get it |
+|---|---|---|---|---|
+| `serper` | API key | Google results: search, scholar, news, places, patents, page scrape | 2,500 one-time credits | [serper.dev](https://serper.dev) |
+| `tavily` | API key | LLM-tuned search + answers, page extract, site crawl | 1,000 credits/mo | [app.tavily.com](https://app.tavily.com) |
+| `exa` | API key | neural/semantic search, deep research | free $ credit grant | [dashboard.exa.ai](https://dashboard.exa.ai/api-keys) |
+| `parallel` | API key | async multi-round deep research | free $ credit grant | [parallel.ai](https://parallel.ai) |
+| `firecrawl` | API key | read/scrape/crawl pages to clean markdown | 1,000 credits/mo | [firecrawl.dev](https://firecrawl.dev) |
+| `steel` | API key | headless-browser scrape: JS pages, screenshots, PDFs | $ credit grant | [steel.dev](https://steel.dev) |
+| `gemini_web` | browser login | Gemini search, deep research, images, file Q&A | your Google account | `fetchira login gemini_web` |
+| `grok_web` | browser login | Grok search, deepsearch, images, file Q&A | your X/Grok account | `fetchira login grok_web` |
+| `chatgpt_web` | browser login | ChatGPT chat + web search, deep research, images | your OpenAI account | `fetchira login chatgpt_web` |
+
+Free tiers drift; the column is a rough guide. Once an account is added, the dashboard and
+`usage` show the **real** live balance read from the provider, not these estimates. Web
+sessions ride whatever plan the account has — a paid tier (Gemini Pro, SuperGrok, ChatGPT
+Plus) simply shows up as bigger live limits.
 
 ## CLI
 
@@ -284,25 +323,53 @@ Caveats, inherent to reverse-engineered web access:
   use `fetchira session` instead. The first build compiles BoringSSL (needs `cmake` + a C/C++
   toolchain — Xcode CLT on macOS, `build-essential` on Linux).
 
-## Tuning quota
+## Configuration
 
-API providers (serper, tavily, firecrawl, exa, parallel, steel) report their real remaining balance,
-so their numbers are live and need no tuning. The web sessions have no balance endpoint, so their
-per-account numbers are nominal defaults you set in `fetchira.toml` to match your plan — tracked as
-separate chat and deep-research budgets:
+Everything lives in the fetchira home dir — `$FETCHIRA_HOME`, default `~/.config/fetchira`:
+`fetchira.toml` (accounts + settings), `.env` (secrets referenced as `env:VAR`), `usage.db`
+(quota counters, web sessions, route/debug logs). `setup`, `add`, `priority` and the dashboard
+all write the same `fetchira.toml`, so hand-editing is never required — but it is plain TOML
+if you want to (see `fetchira.toml.example` and `.env.example`):
 
 ```toml
+db_path = "usage.db"              # relative paths resolve against the fetchira home dir
+
+[debug_log]                       # full request/response capture (the Debug tab)
+enabled = true                    # default on; bounded by retention + row/size caps
+retention_hours = 24
+
+[proxy_pool]                      # optional: accounts with proxy = "pool" draw a sticky IP here
+webshare_url = "https://proxy.webshare.io/api/v2/proxy/list/download/<token>/…"
+# proxies = ["http://user:pass@host:port"]   # or a static list
+
+[priority]                        # optional: your provider order per capability
+search        = ["grok_web", "serper"]       # listed ones are tried first, in this order;
+deep_research = ["gemini_web"]               # unlisted providers follow in the built-in order.
+                                             # capabilities: search, read, deep_research, image
+
 [[account]]
-provider = "gemini_web"
+provider = "tavily"
+label    = "tavily-1"             # unique name; shows up in the dashboard and route log
+api_key  = "env:TAVILY_API_KEY"   # literal key, or env:VAR resolved from .env / the environment
+proxy    = "pool"                 # "pool" | "http://user:pass@host:port" | omit for direct
+
+[[account]]
+provider = "gemini_web"           # web sessions carry no api_key — cookies live in usage.db
 label    = "gemini-1"
-quota    = 5000          # chat/search budget
-reset    = "monthly"     # monthly | daily | once
-dr_quota = 100           # deep-research budget (e.g. an AI Pro/Ultra tier)
+quota    = 5000                   # nominal chat/search budget (web providers have no balance endpoint)
+reset    = "monthly"              # monthly | daily | once
+dr_quota = 100                    # separate deep-research budget — set it to match your plan
 dr_reset = "daily"
 ```
 
-A Webshare proxy pool is optional; accounts with `proxy = "pool"` draw a sticky proxy from it.
-See `fetchira.toml.example` and `.env.example` for the full shape.
+**Quota numbers.** API providers report their real remaining balance live, so their rows need no
+tuning. Web sessions have no balance endpoint — `quota`/`dr_quota` are soft failover guards, and
+the provider's own `429` is always the source of truth.
+
+**Environment variables.** `FETCHIRA_HOME` — config dir override. `FETCHIRA_BROWSER=chrome|firefox`
+— force the login-capture browser. `FETCHIRA_NO_UI=1` — bare `fetchira` in a terminal serves MCP
+instead of opening the dashboard. `FETCHIRA_NO_OPEN=1` — `fetchira ui` prints the URL without
+opening a browser. `RUST_LOG` — log verbosity (logs go to stderr).
 
 ## Build and verify
 
