@@ -12,6 +12,13 @@ db_path = "usage.db"
 # [proxy_pool]
 # webshare_url = "https://proxy.webshare.io/api/v2/proxy/list/download/<token>/-/any/username/direct/-/?plan_id=<id>"
 
+# Optional: per-capability provider order (`fetchira priority`, or the dashboard's Routing
+# priority panel). Listed providers are tried first, in this order; unlisted ones follow in
+# the built-in order. Capabilities: search, read, deep_research, image.
+# [priority]
+# search = ["grok_web", "serper", "tavily"]
+# deep_research = ["gemini_web", "parallel"]
+
 # --- Key-based providers (api_key = literal or "env:VAR" resolved from .env) ---
 [[account]]
 provider = "serper"
@@ -30,11 +37,6 @@ label = "exa-1"
 api_key = "env:EXA_API_KEY"
 
 [[account]]
-provider = "jina"
-label = "jina-1"
-api_key = "env:JINA_API_KEY"
-
-[[account]]
 provider = "firecrawl"
 label = "firecrawl-1"
 api_key = "env:FIRECRAWL_API_KEY"
@@ -50,10 +52,6 @@ label = "steel-1"
 api_key = "env:STEEL_API_KEY"
 
 # --- Web-session providers (no api_key). Run `fetchira login <provider>` once to capture cookies. ---
-[[account]]
-provider = "perplexity_web"
-label = "perplexity-1"
-
 [[account]]
 provider = "gemini_web"
 label = "gemini-1"

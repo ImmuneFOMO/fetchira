@@ -23,9 +23,10 @@ starts returning `429`. Nobody wants to do that by hand, and an agent certainly 
 fetchira is that bookkeeping, turned into a program. It is a single Rust binary that speaks
 **MCP** (the Model Context Protocol) to your coding agent. The agent asks for a generic
 capability — *search this*, *read this URL*, *do deep research*, *drive a browser* — and
-fetchira chooses the least-exhausted account for that capability, calls it, and fails over to
-the next one if it errors. It keeps a running count of what each account has left, so the
-free quota gets spent evenly instead of one key burning out while the rest sit idle.
+fetchira walks that capability's provider order (built-in, or set yours with `fetchira
+priority`), picks the least-exhausted account of each provider, and fails over to the next
+the moment one errors or runs out. It keeps a running count of what each account has left,
+so the free quota gets spent evenly instead of one key burning out while the rest sit idle.
 
 It also ships with a **local dashboard** so a human can watch the same thing in real time and
 manage accounts without touching a config file.
@@ -175,6 +176,8 @@ fetchira add <provider>         # add an account (prompts for key, or logs in if
 fetchira remove <label>         # delete an account (and its session/usage)
 fetchira login <provider>       # (re)capture a web-session login via a browser
 fetchira session <label>        # attach a web session by hand (cookies JSON on stdin or --file)
+fetchira priority [cap]         # show or set the provider order per capability
+                                #   e.g. fetchira priority search grok_web,serper   (reset: … search reset)
 fetchira install                # register fetchira with your coding tools
 fetchira update                 # download & install the latest release (or `brew upgrade`)
 fetchira --version              # print the installed version

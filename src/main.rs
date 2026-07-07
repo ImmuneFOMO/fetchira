@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         Some("login") => return cli::login(&home, args.next()).await,
         Some("session") => return cli::session(&home, args).await,
         Some("proxy") => return cli::proxy(&home, args).await,
+        Some("priority") => return cli::priority(&home, args),
         Some("ui") => return fetchira::ui::run(&home).await,
         Some("update") => return fetchira::update::run(&home).await,
         Some("--version") | Some("-V") | Some("version") => {

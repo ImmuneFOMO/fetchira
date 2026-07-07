@@ -7,7 +7,7 @@ use inquire::{Confirm, MultiSelect, Select, Text};
 use serde_json::{json, Value};
 
 use crate::config::{self, Account, Config};
-use crate::providers::ProviderKind;
+use crate::providers::{order_for, Capability, ProviderKind};
 use crate::usage::{period_key, Store};
 use crate::web;
 
@@ -435,6 +435,78 @@ pub async fn proxy(home: &Path, mut args: impl Iterator<Item = String>) -> anyho
         "proxy for '{label}' → {}",
         proxy.as_deref().unwrap_or("direct")
     );
+    Ok(())
+}
+
+/// The capabilities whose provider order is user-tunable (browser has a single backend).
+pub const PRIORITY_CAPS: [Capability; 4] = [
+    Capability::Search,
+    Capability::Read,
+    Capability::DeepResearch,
+    Capability::Image,
+];
+
+/// Set (or clear, with an empty list) the provider order for one capability. Rejects providers
+/// that don't serve it. Shared by the CLI and web UI. Routers read this at startup, so running
+/// MCP servers keep the old order until restarted.
+pub fn set_priority(home: &Path, cap: Capability, list: Vec<ProviderKind>) -> anyhow::Result<()> {
+    if let Some(p) = list.iter().find(|p| !p.supports(cap)) {
+        bail!("{} does not serve {}", p.as_str(), cap.as_str());
+    }
+    let mut cfg = load_or_empty(home);
+    cfg.priority.set(cap, list);
+    config::save(&cfg, &cfg_path(home))?;
+    Ok(())
+}
+
+fn print_priority(cfg: &Config) {
+    for cap in PRIORITY_CAPS {
+        let custom = cfg.priority.for_cap(cap);
+        let eff: Vec<&str> = order_for(cap, None, custom)
+            .iter()
+            .map(|p| p.as_str())
+            .collect();
+        let mark = if custom.is_empty() { ' ' } else { '*' };
+        println!("{:<14}{mark} {}", cap.as_str(), eff.join(" → "));
+    }
+    println!("\n* custom order — set: fetchira priority <capability> <provider,provider,…>   reset: fetchira priority <capability> reset");
+}
+
+/// `fetchira priority` — show the per-capability provider order; `<cap> <p1,p2,…>` sets it,
+/// `<cap> reset` restores the default.
+pub fn priority(home: &Path, args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let mut vals = args.flat_map(|a| {
+        a.split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    let Some(cap_arg) = vals.next() else {
+        print_priority(&load_or_empty(home));
+        return Ok(());
+    };
+    let cap = Capability::parse(&cap_arg)
+        .filter(|c| PRIORITY_CAPS.contains(c))
+        .with_context(|| {
+            format!("unknown capability '{cap_arg}' (search, read, deep_research, image)")
+        })?;
+    let vals: Vec<String> = vals.collect();
+    if vals.is_empty() {
+        bail!(
+            "usage: fetchira priority {0} <provider,provider,…>   or: fetchira priority {0} reset",
+            cap.as_str()
+        );
+    }
+    let list = match vals.as_slice() {
+        [one] if one == "reset" || one == "default" => Vec::new(),
+        _ => vals
+            .iter()
+            .map(|s| parse_provider(s))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    };
+    set_priority(home, cap, list)?;
+    print_priority(&load_or_empty(home));
+    println!("\nsaved — applies to newly started fetchira processes (restart running MCP servers to pick it up)");
     Ok(())
 }
 
@@ -1107,6 +1179,7 @@ pub fn help() {
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
+           fetchira priority [cap]      show or set the provider order per capability (search/read/deep_research/image)\n  \
            fetchira login <provider>    (re)capture a web-session login (gemini_web/grok_web/chatgpt_web)\n  \
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
            fetchira update              download & install the latest release\n  \
