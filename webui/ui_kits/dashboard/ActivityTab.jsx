@@ -1,5 +1,16 @@
-/* Activity: filterable full route log + usage sparkline charts + health list. */
-const { Card, Badge, Button, StatusDot, RouteLogLine } = window.FetchiraDesignSystem_6526df;
+/* Activity: one stream for everything the router did — every attempt (success or failure) with
+   a response preview, expandable to the full request/response/error and raw HTTP. Filterable by
+   capability / errors, live-tailing, with usage sparklines and provider health alongside.
+   (Absorbed the old Debug tab — same data, one place.) */
+const { Card, Badge, StatusDot, RouteLogLine } = window.FetchiraDesignSystem_6526df;
+
+const CAP_COLOR = {
+  search: 'var(--lime-500)',
+  read: 'var(--cyan-500)',
+  deep_research: '#C792EA',
+  browser: 'var(--amber-500)',
+  create_image: 'var(--amber-500)',
+};
 
 function Sparkline({ data, color }) {
   const w = 132, h = 38, max = Math.max(...data, 1);
@@ -28,19 +39,6 @@ function FilterChip({ label, active, onClick }) {
       cursor: 'pointer', border: `1px solid ${active ? 'var(--border-accent)' : 'var(--border-hairline)'}`,
       background: active ? 'var(--lime-dim)' : 'transparent', color: active ? 'var(--lime-500)' : 'var(--text-lo)',
     }}>{label}</button>
-  );
-}
-
-// Tag on a route-log row when the request carried a niche filter: green "native" = the filter hit a
-// real provider param; amber "rewrite" = served best-effort via query text (hint: add a provider that
-// filters natively). Absent field → no tag.
-function NicheBadge({ niche }) {
-  if (niche !== 'native' && niche !== 'rewrite') return null;
-  const native = niche === 'native';
-  return (
-    <Badge tone={native ? 'ok' : 'low'} variant="soft" uppercase
-      title={native ? 'niche filter mapped to a native provider param' : 'niche served via query text — add a provider that filters natively'}
-      style={{ height: 16, padding: '0 6px', fontSize: 10, flexShrink: 0 }}>{niche}</Badge>
   );
 }
 
@@ -79,9 +77,7 @@ function RawHttp({ trace, pre, cap }) {
   );
 }
 
-// Drill-in for a route-log row: full request + response/error from GET /api/debug/{id}.
-// Mirrors DebugTab's DebugDetail; the error border keys off full.status since route lines carry no `ok`.
-function LogDetail({ full }) {
+function AttemptDetail({ ok, full }) {
   if (!full) return <div style={{ padding: '6px 10px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>loading…</div>;
   const body = full.response != null ? full.response : full.error;
   const label = full.response != null ? 'response' : 'error';
@@ -95,36 +91,31 @@ function LogDetail({ full }) {
       </div>
       <div>
         <div style={cap}>{label}</div>
-        <pre style={{ ...pre, maxHeight: 320, overflowY: 'auto', borderLeft: full.status < 400 ? 'none' : '2px solid var(--red-500)' }}>{body != null ? body : '—'}</pre>
+        <pre style={{ ...pre, maxHeight: 320, overflowY: 'auto', borderLeft: ok ? 'none' : '2px solid var(--red-500)' }}>{body != null ? body : '—'}</pre>
       </div>
       <RawHttp trace={full.httpTrace} pre={pre} cap={cap} />
     </div>
   );
 }
 
-function LogRow(l) {
-  const [open, setOpen] = React.useState(false);
-  const [full, setFull] = React.useState(null);
-  const hasDebug = l.debugId != null;
-
-  const toggle = async () => {
-    const opening = !open;
-    setOpen(opening);
-    if (!opening || full) return;
-    try {
-      const r = await fetch(`/api/debug/${l.debugId}`, { headers: { 'x-fetchira-token': window.FX_TOKEN } });
-      if (r.ok) setFull(await r.json());
-    } catch (e) { /* offline */ }
-  };
-
+function AttemptRow({ row, open, full, onToggle }) {
+  const capColor = CAP_COLOR[row.capability] || 'var(--text-mid)';
   return (
-    <div style={{ borderRadius: 'var(--r-xs)', background: open ? 'var(--surface-2)' : 'transparent' }}>
-      <div onClick={hasDebug ? toggle : undefined} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: hasDebug ? 'pointer' : 'default' }}>
-        <span style={{ width: 10, flexShrink: 0, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>{hasDebug ? (open ? '▾' : '▸') : ''}</span>
-        <RouteLogLine {...l} style={{ flex: 1, minWidth: 0 }} />
-        {l.niche && <NicheBadge niche={l.niche} />}
+    <div style={{ borderRadius: 'var(--r-xs)', background: open ? 'var(--surface-2)' : row.fresh ? 'var(--surface-2)' : 'transparent', animation: row.fresh ? 'fx-log-in var(--dur-mid) var(--ease-out)' : 'none' }}>
+      <div onClick={onToggle} style={{ cursor: 'pointer', padding: '5px 10px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '10px auto 100px 1fr auto', alignItems: 'center', gap: 10, fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.2 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{open ? '▾' : '▸'}</span>
+          <span style={{ color: 'var(--text-faint)' }}>{row.time}</span>
+          <span style={{ color: capColor, fontWeight: 500 }}>{row.capability === 'create_image' ? 'image' : row.capability.replace('_', ' ')}</span>
+          <span style={{ color: 'var(--text-hi)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.provider}{row.account != null ? `-${row.account}` : ''}</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, justifySelf: 'end' }}>
+            <span style={{ color: row.ok ? 'var(--text-faint)' : 'var(--red-500)' }}>{row.status}</span>
+            <span style={{ color: row.latencyMs > 800 ? 'var(--amber-500)' : 'var(--text-lo)', minWidth: 48, textAlign: 'right' }}>{row.latencyMs}ms</span>
+          </span>
+        </div>
+        {row.preview && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: row.ok ? 'var(--text-lo)' : 'var(--red-500)', marginTop: 3, paddingLeft: 20, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.preview}</div>}
       </div>
-      {open && <LogDetail full={full} />}
+      {open && <AttemptDetail ok={row.ok} full={full} />}
     </div>
   );
 }
@@ -147,9 +138,66 @@ function HealthRow({ h }) {
 
 function ActivityTab() {
   const [filter, setFilter] = React.useState('all');
-  const caps = ['all', 'search', 'read', 'deep_research', 'browser', 'failures'];
-  const all = window.FX.log;
-  const lines = all.filter((l) => filter === 'all' ? true : filter === 'failures' ? !!l.failover : l.capability === filter);
+  const [rows, setRows] = React.useState([]);
+  const [loaded, setLoaded] = React.useState(false);
+  const [paused, setPaused] = React.useState(false);
+  const [openId, setOpenId] = React.useState(null);
+  const [details, setDetails] = React.useState({});
+  const lastId = React.useRef(0);
+
+  const fetchRows = async (after) => {
+    try {
+      const r = await fetch(`/api/debug?after=${after}&limit=200`, { headers: { 'x-fetchira-token': window.FX_TOKEN } });
+      if (r.ok) return await r.json();
+    } catch (e) { /* offline / opened as a static file */ }
+  };
+
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      const d = await fetchRows(0);
+      if (!alive) return;
+      if (d) {
+        lastId.current = d.maxId;
+        setRows(d.rows.slice().reverse().map((r) => ({ ...r, fresh: false }))); // newest first
+      }
+      setLoaded(true);
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  React.useEffect(() => {
+    if (paused) return;
+    const id = setInterval(async () => {
+      const d = await fetchRows(lastId.current);
+      if (!d || !d.rows.length) return;
+      lastId.current = d.maxId;
+      setRows((prev) => [...d.rows.slice().reverse().map((r) => ({ ...r, fresh: true })), ...prev].slice(0, 300));
+    }, 1500);
+    return () => clearInterval(id);
+  }, [paused]);
+
+  const toggle = async (row) => {
+    const closing = openId === row.id;
+    setOpenId(closing ? null : row.id);
+    if (closing || details[row.id]) return;
+    try {
+      const r = await fetch(`/api/debug/${row.id}`, { headers: { 'x-fetchira-token': window.FX_TOKEN } });
+      if (!r.ok) return;
+      const full = await r.json();
+      setDetails((prev) => ({ ...prev, [row.id]: full }));
+    } catch (e) { /* offline */ }
+  };
+
+  const caps = ['all', 'search', 'read', 'deep_research', 'browser', 'image', 'errors'];
+  const shown = rows.filter((r) =>
+    filter === 'all' ? true
+      : filter === 'errors' ? !r.ok
+      : filter === 'image' ? r.capability === 'create_image'
+      : r.capability === filter);
+  // Full capture disabled (debug_log.enabled = false) or already expired: fall back to the
+  // route-log snapshot so the tab still tells the routing story.
+  const fallback = loaded && !rows.length && (window.FX.log || []).length > 0;
   const usage = (window.FX.usage && window.FX.usage.length) ? window.FX.usage : [];
 
   return (
@@ -157,11 +205,23 @@ function ActivityTab() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <Card pad={0} style={{ overflow: 'hidden' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--border-faint)', flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', marginRight: 4 }}>Route log</span>
+            <StatusDot tone={paused ? 'off' : 'accent'} pulse={!paused} size={7} />
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', marginRight: 4 }}>Activity</span>
             {caps.map((c) => <FilterChip key={c} label={c.replace('_', ' ')} active={filter === c} onClick={() => setFilter(c)} />)}
+            <span style={{ flex: 1 }} />
+            <button onClick={() => setPaused(p => !p)} style={{ background: 'transparent', border: '1px solid var(--border-hairline)', color: 'var(--text-lo)', fontFamily: 'var(--font-mono)', fontSize: 11, padding: '3px 8px', borderRadius: 'var(--r-xs)', cursor: 'pointer' }}>{paused ? '▶ resume' : '❚❚ pause'}</button>
           </div>
-          <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 1 }}>
-            {lines.length ? lines.map((l, i) => <LogRow key={i} {...l} />) : <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>No matching calls</div>}
+          <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 1, maxHeight: 'calc(100vh - 230px)', overflowY: 'auto' }}>
+            {fallback ? (
+              <React.Fragment>
+                <div style={{ padding: '4px 10px 10px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                  full capture is off or expired (debug_log in fetchira.toml) — showing the routed-call log
+                </div>
+                {window.FX.log.map((l, i) => <RouteLogLine key={i} {...l} />)}
+              </React.Fragment>
+            ) : shown.length
+              ? shown.map((row) => <AttemptRow key={row.id} row={row} open={openId === row.id} full={details[row.id]} onToggle={() => toggle(row)} />)
+              : <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>{loaded ? 'No matching calls yet' : 'loading…'}</div>}
           </div>
         </Card>
 
