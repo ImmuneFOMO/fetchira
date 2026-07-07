@@ -279,14 +279,20 @@ impl ProviderKind {
 }
 
 /// Preference order per capability: try providers left-to-right, skipping exhausted.
+/// Economics set the defaults — renewable monthly credits (tavily/firecrawl) burn before
+/// serper's one-time grant, which burns before real $ balances (exa/parallel); the slower,
+/// session-fragile web providers back-stop search but lead deep research, where their free
+/// true multi-round runs beat spending exa/parallel money.
 pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
         Capability::Search => &[
-            Serper, Tavily, Exa, Parallel, GeminiWeb, GrokWeb, ChatgptWeb,
+            Tavily, Serper, Exa, Parallel, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
-        Capability::Read => &[Firecrawl],
-        Capability::DeepResearch => &[Parallel, Exa, Tavily, GeminiWeb, GrokWeb, ChatgptWeb],
+        Capability::Read => &[Firecrawl, Tavily, Serper, Exa],
+        // tavily last: its "deep research" is one synthesized answer, not a real multi-round run;
+        // chatgpt behind grok because every send drives a live browser and takes 5-30 min.
+        Capability::DeepResearch => &[GeminiWeb, Parallel, Exa, GrokWeb, ChatgptWeb, Tavily],
         Capability::Browser => &[Steel],
         // grok generates in-process and is region-agnostic; gemini image-gen is EU-gated (falls back
         // to text) so it sits behind grok; chatgpt is the browser fallback.

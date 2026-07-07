@@ -48,9 +48,9 @@ Restart your coding tool and ask it to search the web — fetchira takes it from
 
 | Capability | The agent calls | fetchira routes to (default order — reorder with `fetchira priority`) |
 |---|---|---|
-| **search** | `search` | serper → tavily → exa → parallel → gemini_web → grok_web → chatgpt_web |
-| **read** | `read` | firecrawl (auto-escalates to a headless browser if the plain read is empty) |
-| **deep research** | `deep_research` | parallel → exa → tavily → gemini_web → grok_web → chatgpt_web |
+| **search** | `search` | tavily → serper → exa → parallel → gemini_web → grok_web → chatgpt_web |
+| **read** | `read` | firecrawl → tavily → serper → exa (then auto-escalates to a headless browser) |
+| **deep research** | `deep_research` | gemini_web → parallel → exa → grok_web → chatgpt_web → tavily |
 | **image** | `create_image` | grok_web → gemini_web → chatgpt_web |
 | **file Q&A** | `search` / `deep_research` + `file` | attach local files to a grok / gemini / chatgpt turn and ask about them |
 | **browser** | `browser` | steel |

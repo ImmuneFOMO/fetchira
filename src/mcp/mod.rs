@@ -181,7 +181,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Read a URL and return its main content as clean markdown (firecrawl); auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls."
+        description = "Read a URL and return its main content as clean markdown; auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn read(
         &self,
