@@ -141,14 +141,53 @@ function ProxyModal({ label, current, onClose }) {
   );
 }
 
-function RowActions({ r }) {
-  const [busy, setBusy] = React.useState(false);
-  const [test, setTest] = React.useState(null);
+// Everything beyond Test/Login lives here so the action column stays one width for every row.
+function RowMenu({ r, onLogin, onError }) {
+  const [open, setOpen] = React.useState(false);
   const [confirmRm, setConfirmRm] = React.useState(false);
   const [paste, setPaste] = React.useState(false);
   const [edit, setEdit] = React.useState(false);
   const [proxyEdit, setProxyEdit] = React.useState(false);
-  const [browser, setBrowser] = React.useState('chrome');
+
+  const close = () => { setOpen(false); setConfirmRm(false); };
+  const doRemove = async () => {
+    if (!confirmRm) { setConfirmRm(true); return; }
+    close();
+    try { await window.apiPost('/api/account/remove', { label: r.label }); if (window.fxRefresh) window.fxRefresh(); }
+    catch (e) { onError(String(e.message || e)); }
+  };
+  const item = (label, onClick, danger) => (
+    <button onClick={onClick} style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', padding: '7px 12px', fontFamily: 'var(--font-mono)', fontSize: 12, color: danger ? 'var(--red-500)' : 'var(--text-mid)', whiteSpace: 'nowrap' }}
+      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-2)'}
+      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>{label}</button>
+  );
+
+  return (
+    <span style={{ position: 'relative', display: 'inline-block' }}>
+      <Button size="sm" variant="ghost" onClick={() => setOpen((o) => !o)} title="more actions">⋯</Button>
+      {open && (
+        <React.Fragment>
+          <div onClick={close} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+          <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 41, minWidth: 170, padding: '4px 0', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
+            {item('Rename…', () => { close(); setEdit(true); })}
+            {item('Proxy…', () => { close(); setProxyEdit(true); })}
+            {r.web && item('Paste session…', () => { close(); setPaste(true); })}
+            {r.web && item('Log in via Chrome', () => { close(); onLogin('chrome'); })}
+            {r.web && item('Log in via Firefox', () => { close(); onLogin('firefox'); })}
+            {item(confirmRm ? 'Really remove?' : 'Remove', doRemove, true)}
+          </div>
+        </React.Fragment>
+      )}
+      {paste && <PasteSessionModal label={r.label} onClose={() => setPaste(false)} />}
+      {edit && <RenameModal label={r.label} onClose={() => setEdit(false)} />}
+      {proxyEdit && <ProxyModal label={r.label} current={r.proxy} onClose={() => setProxyEdit(false)} />}
+    </span>
+  );
+}
+
+function RowActions({ r }) {
+  const [busy, setBusy] = React.useState(false);
+  const [test, setTest] = React.useState(null);
   const needsLogin = r.status === 'needs-login';
 
   const doTest = async () => {
@@ -158,40 +197,115 @@ function RowActions({ r }) {
     catch (e) { setTest({ ok: false, error: String(e.message || e) }); }
     setBusy(false);
   };
-  const doLogin = async () => {
+  const doLogin = async (browser) => {
     if (busy) return;
     setBusy(true); setTest(null);
     try { await window.apiPost('/api/account/login', { label: r.label, browser }); if (window.fxRefresh) window.fxRefresh(); }
-    catch (e) { setTest({ ok: false, error: String(e.message || e) }); setBusy(false); }
-  };
-  const doRemove = async () => {
-    if (busy) return;
-    if (!confirmRm) { setConfirmRm(true); return; }
-    setBusy(true);
-    try { await window.apiPost('/api/account/remove', { label: r.label }); if (window.fxRefresh) window.fxRefresh(); }
-    catch (e) { setTest({ ok: false, error: String(e.message || e) }); setBusy(false); setConfirmRm(false); }
+    catch (e) { setTest({ ok: false, error: String(e.message || e) }); }
+    setBusy(false);
   };
 
   return (
-    <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
-      {test && <span title={test.error || ''} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: test.ok ? 'var(--green-500)' : 'var(--red-500)' }}>{test.ok ? ('✓ ' + test.latencyMs + 'ms') : '✕ failed'}</span>}
+    <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+      {/* fixed-width slot so a result appearing never shifts the buttons */}
+      <span title={test ? (test.error || '') : ''} style={{ width: 74, textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: test ? (test.ok ? 'var(--green-500)' : 'var(--red-500)') : 'transparent', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {busy ? <span style={{ color: 'var(--text-faint)' }}>working…</span> : test ? (test.ok ? '✓ ' + test.latencyMs + 'ms' : '✕ failed') : '·'}
+      </span>
       <Button size="sm" variant="ghost" onClick={doTest}>Test</Button>
-      {r.web && (
-        <select value={browser} onChange={(e) => setBrowser(e.target.value)} title="Browser for login"
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)', background: 'var(--surface-sunken, rgba(255,255,255,0.03))', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', padding: '3px 4px' }}>
-          <option value="chrome">Chrome</option>
-          <option value="firefox">Firefox</option>
-        </select>
-      )}
-      {r.web && <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={doLogin}>{needsLogin ? 'Login' : 'Re-login'}</Button>}
-      {r.web && <Button size="sm" variant="ghost" onClick={() => setPaste(true)}>Session</Button>}
-      <Button size="sm" variant="ghost" onClick={() => setEdit(true)}>Edit</Button>
-      <Button size="sm" variant="ghost" onClick={() => setProxyEdit(true)}>Proxy</Button>
-      <Button size="sm" variant="ghost" onClick={doRemove} style={{ color: confirmRm ? 'var(--red-500)' : 'var(--text-faint)' }}>{confirmRm ? 'Confirm?' : 'Remove'}</Button>
-      {paste && <PasteSessionModal label={r.label} onClose={() => setPaste(false)} />}
-      {edit && <RenameModal label={r.label} onClose={() => setEdit(false)} />}
-      {proxyEdit && <ProxyModal label={r.label} current={r.proxy} onClose={() => setProxyEdit(false)} />}
+      {r.web
+        ? <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={() => doLogin('chrome')}>{needsLogin ? 'Login' : 'Re-login'}</Button>
+        : <span style={{ width: 62 }} />}
+      <RowMenu r={r} onLogin={doLogin} onError={(e) => setTest({ ok: false, error: e })} />
     </div>
+  );
+}
+
+// The variable-length detail — tier, per-feature limits, the model catalog — lives in a drawer
+// under the row, so every collapsed row keeps the same height.
+function LimitChips({ limits }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+      {limits.tier && <Badge tone="cyan" variant="outline">{limits.tier}</Badge>}
+      {(limits.features || []).map((f) => (
+        <span key={f.feature} title={f.resetAfter ? 'resets ' + f.resetAfter : ''}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px' }}>
+          {f.feature} <b style={{ color: 'var(--text-hi)' }}>{f.total != null ? f.remaining + '/' + f.total : f.remaining}</b>
+        </span>
+      ))}
+      {(limits.models || []).map((m) => (
+        <span key={m.id} title={m.windowSecs ? 'rolling ' + Math.round(m.windowSecs / 3600) + 'h' : (m.resetAfter ? 'resets ' + m.resetAfter : (m.locked ? 'locked on this tier' : ''))}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: m.locked ? 'var(--text-faint)' : 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px', opacity: m.locked ? 0.65 : 1 }}>
+          {m.name}{m.levels && m.levels.length ? ' ·' + m.levels.join('/') : ''} <b style={{ color: m.locked ? 'var(--text-faint)' : 'var(--text-hi)' }}>{m.locked ? '0/0' : (m.total != null ? m.remaining + '/' + m.total : (m.remaining != null ? m.remaining : '—'))}</b>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// One fixed-height row; the tier/limits/models detail expands in a drawer row underneath so
+// nothing in the table jumps as live limits stream in per account.
+function AccountRow({ r }) {
+  const [open, setOpen] = React.useState(false);
+  const needsLogin = r.status === 'needs-login';
+  const spinner = (text) => (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+      <span style={{ width: 10, height: 10, border: '1.5px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%', display: 'inline-block', animation: 'fx-spin 0.8s linear infinite' }} />
+      {text}
+    </span>
+  );
+  const hasDetail = !!r.limits || (r.web && r.loggedIn);
+  const td = { padding: '11px 14px', whiteSpace: 'nowrap' };
+  return (
+    <React.Fragment>
+      <tr style={{ borderTop: '1px solid var(--border-faint)', height: 58, cursor: hasDetail ? 'pointer' : 'default' }}
+        onClick={hasDetail ? () => setOpen((o) => !o) : undefined}
+        onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-2)'}
+        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+        <td style={{ width: 8, padding: 0 }}>
+          <span style={{ display: 'block', width: 3, height: 34, marginLeft: 6, borderRadius: 2, background: r.status === 'exhausted' ? 'var(--red-500)' : needsLogin ? 'var(--grey-500)' : 'var(--green-500)' }} />
+        </td>
+        <td style={td}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 10, flexShrink: 0, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>{hasDetail ? (open ? '▾' : '▸') : ''}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {r.provider}
+                {r.email ? <span> · <EmailChip email={r.email} /></span> : null}
+                {r.limits && r.limits.tier ? <span style={{ color: 'var(--cyan-500)' }}> · {r.limits.tier}</span> : null}
+              </div>
+            </div>
+          </div>
+        </td>
+        <td style={{ ...td, width: 220 }}>
+          {r.pending ? spinner('loading…') : (
+            <React.Fragment>
+              <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>
+            </React.Fragment>
+          )}
+        </td>
+        <td style={td}><Badge tone="neutral" variant="outline" uppercase>{r.resetWindow}</Badge></td>
+        <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 12, color: r.proxy === 'direct' ? 'var(--text-faint)' : 'var(--text-mid)' }}>
+          {r.proxy === 'pool' ? <Badge tone="cyan" variant="outline">pool</Badge> : r.proxy}
+        </td>
+        <td style={td}>
+          {r.key ? <Badge tone="ok" variant="outline">•••• key set</Badge> : r.web ? <Badge tone={r.loggedIn ? 'cyan' : 'off'} variant="outline">{r.loggedIn ? 'session ✓' : 'no session'}</Badge> : <Badge tone="off" variant="outline">no key</Badge>}
+        </td>
+        <td style={td}>{statusBadge(r.status)}</td>
+        <td style={td}><RowActions r={r} /></td>
+      </tr>
+      {open && (
+        <tr style={{ background: 'var(--surface-inset)' }}>
+          <td />
+          <td colSpan={7} style={{ padding: '10px 14px 14px 30px' }}>
+            {r.limits
+              ? <LimitChips limits={r.limits} />
+              : spinner('loading live limits…')}
+          </td>
+        </tr>
+      )}
+    </React.Fragment>
   );
 }
 
@@ -221,69 +335,7 @@ function AccountsTab({ onAdd }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => {
-              const needsLogin = r.status === 'needs-login';
-              return (
-                <tr key={r.label} style={{ borderTop: '1px solid var(--border-faint)' }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-2)'}
-                  onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-                  <td style={{ width: 8, padding: 0 }}>
-                    <span style={{ display: 'block', width: 3, height: 34, marginLeft: 6, borderRadius: 2, background: r.status === 'exhausted' ? 'var(--red-500)' : needsLogin ? 'var(--grey-500)' : 'var(--green-500)' }} />
-                  </td>
-                  <td style={{ padding: '12px 14px' }}>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</div>
-                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{r.provider}{r.email ? <span> · <EmailChip email={r.email} /></span> : null}</div>
-                    {r.limits && (
-                      <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 280 }}>
-                        {r.limits.tier && <Badge tone="cyan" variant="outline">{r.limits.tier}</Badge>}
-                        {(r.limits.features || []).map((f) => (
-                          <span key={f.feature} title={f.resetAfter ? 'resets ' + f.resetAfter : ''}
-                            style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px' }}>
-                            {f.feature} <b style={{ color: 'var(--text-hi)' }}>{f.total != null ? f.remaining + '/' + f.total : f.remaining}</b>
-                          </span>
-                        ))}
-                        {(r.limits.models || []).map((m) => (
-                          <span key={m.id} title={m.windowSecs ? 'rolling ' + Math.round(m.windowSecs / 3600) + 'h' : (m.resetAfter ? 'resets ' + m.resetAfter : (m.locked ? 'locked on this tier' : ''))}
-                            style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: m.locked ? 'var(--text-faint)' : 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px', opacity: m.locked ? 0.65 : 1 }}>
-                            {m.name}{m.levels && m.levels.length ? ' ·' + m.levels.join('/') : ''} <b style={{ color: m.locked ? 'var(--text-faint)' : 'var(--text-hi)' }}>{m.locked ? '0/0' : (m.total != null ? m.remaining + '/' + m.total : (m.remaining != null ? m.remaining : '—'))}</b>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {r.web && !r.limits && (
-                      <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
-                        <span style={{ width: 9, height: 9, border: '1.5px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%', display: 'inline-block', animation: 'fx-spin 0.8s linear infinite' }} />
-                        loading limits…
-                      </div>
-                    )}
-                  </td>
-                  <td style={{ padding: '12px 14px' }}>
-                    {r.pending ? (
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-                        <span style={{ width: 10, height: 10, border: '1.5px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%', display: 'inline-block', animation: 'fx-spin 0.8s linear infinite' }} />
-                        loading…
-                      </span>
-                    ) : (
-                      <React.Fragment>
-                        <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>
-                      </React.Fragment>
-                    )}
-                  </td>
-                  <td style={{ padding: '12px 14px' }}><Badge tone="neutral" variant="outline" uppercase>{r.resetWindow}</Badge></td>
-                  <td style={{ padding: '12px 14px', fontFamily: 'var(--font-mono)', fontSize: 12, color: r.proxy === 'direct' ? 'var(--text-faint)' : 'var(--text-mid)' }}>
-                    {r.proxy === 'pool' ? <Badge tone="cyan" variant="outline">pool</Badge> : r.proxy}
-                  </td>
-                  <td style={{ padding: '12px 14px' }}>
-                    {r.key ? <Badge tone="ok" variant="outline">•••• key set</Badge> : r.web ? <Badge tone={r.loggedIn ? 'cyan' : 'off'} variant="outline">{r.loggedIn ? 'session ✓' : 'no session'}</Badge> : <Badge tone="off" variant="outline">no key</Badge>}
-                  </td>
-                  <td style={{ padding: '12px 14px' }}>{statusBadge(r.status)}</td>
-                  <td style={{ padding: '12px 14px' }}>
-                    <RowActions r={r} />
-                  </td>
-                </tr>
-              );
-            })}
+            {rows.map((r) => <AccountRow key={r.label} r={r} />)}
           </tbody>
         </table>
       </div>
