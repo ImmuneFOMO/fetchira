@@ -59,6 +59,81 @@ function BurnRadar() {
   );
 }
 
+// Routing priority: the provider order the router walks per capability (first → last, failing
+// over as each exhausts). ‹ › reorder, + floats in an off-route provider, reset restores the
+// built-in order. Saved to fetchira.toml; running MCP servers pick it up on their next start.
+function RoutingPriority() {
+  const rows = window.FX.priority || [];
+  const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  if (!rows.length) return null;
+
+  const post = async (capability, order) => {
+    setBusy(true); setErr(null);
+    try { await window.apiPost('/api/priority', { capability, order }); if (window.fxRefresh) window.fxRefresh(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  const move = (row, i, d) => {
+    const order = row.order.slice();
+    const j = i + d;
+    if (j < 0 || j >= order.length) return;
+    [order[i], order[j]] = [order[j], order[i]];
+    post(row.capability, order);
+  };
+
+  const arrowStyle = (on) => ({ background: 'transparent', border: 'none', cursor: on ? 'pointer' : 'default', padding: '0 2px', fontFamily: 'var(--font-mono)', fontSize: 11, color: on ? 'var(--text-lo)' : 'var(--text-faint)', opacity: on ? 1 : 0.35 });
+
+  return (
+    <section>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, marginBottom: open ? 12 : 0 }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--text-lo)' }}>Routing priority</span>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{rows.some((r) => r.custom) ? 'custom' : 'default'}</span>
+        <span style={{ flex: 1, height: 1, background: 'var(--border-faint)' }} />
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{open ? '− hide' : '+ show'}</span>
+      </button>
+      {open && (
+        <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {err && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--red-500)' }}>{err}</div>}
+          {rows.map((row) => (
+            <div key={row.capability} style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)', width: 110, flexShrink: 0 }}>
+                {row.capability}{row.custom && <span title="custom order" style={{ color: 'var(--lime-500)' }}> *</span>}
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                {row.order.map((p, i) => (
+                  <span key={p} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-hi)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '2px 4px 2px 7px' }}>
+                    {p}
+                    <button onClick={() => move(row, i, -1)} disabled={busy || i === 0} title="try earlier" style={arrowStyle(!busy && i > 0)}>‹</button>
+                    <button onClick={() => move(row, i, 1)} disabled={busy || i === row.order.length - 1} title="try later" style={arrowStyle(!busy && i < row.order.length - 1)}>›</button>
+                  </span>
+                ))}
+                {row.available.map((p) => (
+                  <button key={p} onClick={() => post(row.capability, [...row.order, p])} disabled={busy} title="add to this capability's order"
+                    style={{ background: 'transparent', border: '1px dashed var(--border-faint)', borderRadius: 4, padding: '2px 7px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                    + {p}
+                  </button>
+                ))}
+                {row.custom && (
+                  <button onClick={() => post(row.capability, [])} disabled={busy}
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', textDecoration: 'underline' }}>
+                    reset
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
+            tried first → last, failing over as each runs out · agents can still force one with provider=… · running MCP servers pick changes up on restart
+          </span>
+        </Card>
+      )}
+    </section>
+  );
+}
+
 // Human twin of the agent's usage(provider) drill-in: per-provider niches + call modes.
 function CapabilityMatrix() {
   const caps = window.FX.capabilities || [];
@@ -311,6 +386,7 @@ function OverviewTab() {
             </div>
           </section>
         ))}
+        <RoutingPriority />
         <CapabilityMatrix />
       </div>
       <div style={{ position: 'sticky', top: 84, height: 'calc(100vh - 104px)' }}>

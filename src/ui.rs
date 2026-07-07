@@ -46,6 +46,7 @@ struct AcctMeta {
 struct Inner {
     router: Arc<Router>,
     meta: HashMap<String, AcctMeta>,
+    priority: config::Priority,
 }
 
 struct AppState {
@@ -99,6 +100,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/account/rename", post(api_rename))
         .route("/api/account/proxy", post(api_proxy))
         .route("/api/account/test", post(api_test))
+        .route("/api/priority", post(api_priority))
         .fallback(static_handler)
         .with_state(state);
 
@@ -133,10 +135,12 @@ async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
             },
         );
     }
+    let priority = cfg.priority.clone();
     let router = Router::build(cfg, store.clone()).await?;
     Ok(Inner {
         router: Arc::new(router),
         meta,
+        priority,
     })
 }
 
@@ -504,6 +508,42 @@ async fn api_proxy(
         return r;
     }
     match cli::set_proxy(&st.home, &req.label, cli::parse_proxy_arg(&req.proxy)).await {
+        Ok(()) => {
+            rebuild(&st).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PriorityReq {
+    capability: String,
+    /// The full provider order for the capability; empty = back to the built-in default.
+    #[serde(default)]
+    order: Vec<String>,
+}
+
+async fn api_priority(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PriorityReq>,
+) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    let Some(cap) = Capability::parse(&req.capability).filter(|c| cli::PRIORITY_CAPS.contains(c))
+    else {
+        return (StatusCode::BAD_REQUEST, "unknown capability").into_response();
+    };
+    let mut kinds = Vec::with_capacity(req.order.len());
+    for s in &req.order {
+        let Some(k) = parse_kind(s) else {
+            return (StatusCode::BAD_REQUEST, format!("unknown provider '{s}'")).into_response();
+        };
+        kinds.push(k);
+    }
+    match cli::set_priority(&st.home, cap, kinds) {
         Ok(()) => {
             rebuild(&st).await;
             Json(json!({ "ok": true })).into_response()
@@ -1167,6 +1207,27 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
+    // Routing priority per capability: the effective order (user custom applied) plus the
+    // supported-but-unrouted providers the user could float in.
+    let priority: Vec<Value> = cli::PRIORITY_CAPS
+        .iter()
+        .map(|&cap| {
+            let custom = inner.priority.for_cap(cap);
+            let eff = crate::providers::order_for(cap, None, custom);
+            let avail: Vec<&str> = ProviderKind::all()
+                .iter()
+                .filter(|p| p.supports(cap) && !eff.contains(p))
+                .map(|p| p.as_str())
+                .collect();
+            json!({
+                "capability": cap.as_str(),
+                "order": eff.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+                "custom": !custom.is_empty(),
+                "available": avail,
+            })
+        })
+        .collect();
+
     Ok(json!({
         "groups": groups,
         "accounts": accounts,
@@ -1179,6 +1240,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         "deadEnds": { "routed": routes.len(), "ranOut": ran_out },
         "burn": burn,
         "capabilities": capabilities,
+        "priority": priority,
     }))
 }
 
