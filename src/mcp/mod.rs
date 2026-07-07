@@ -17,31 +17,28 @@ pub struct SearchArgs {
     /// running deep-research `session` for its report.
     #[serde(default)]
     pub query: Option<String>,
-    /// Force a specific provider instead of letting the router choose.
+    /// Force a specific provider instead of the priority order.
     pub provider: Option<ProviderKind>,
     /// Maximum number of results (default 5, capped at 20).
     pub max_results: Option<u32>,
-    /// Resume token from a previous web-provider result; continues that conversation with
-    /// its history (implies the same provider). Web providers only.
+    /// Resume token from a previous web-provider result; continues that conversation
+    /// on the same provider. Web providers only.
     pub session: Option<String>,
-    /// Provider-specific model selector (e.g. gemini "3.1 pro"/"flash",
-    /// grok "grok-4"). For chatgpt_web this is two axes: a model ("gpt-5.5"/"gpt-5.4"/"o3"), a
-    /// thinking level ("instant"/"medium"/"high"), or both ("gpt-5.4 high"). Levels are read live
-    /// and vary per model (o3 only offers medium); an unknown name returns the actual options.
-    /// Ignored by the API providers.
+    /// Web-provider model and/or thinking level (gemini "3.1 pro"/"flash", grok "grok-4",
+    /// chatgpt "gpt-5.4 high"/"o3"/"high" — levels vary per model; an unknown name returns
+    /// the actual options). Ignored by the API providers.
     pub model: Option<String>,
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
     /// deep_research to heavy then expert).
     pub mode: Option<String>,
-    /// Research niche: "web" (default), "news", or "academic" — steers to a fitting backend
-    /// (academic → scholar/exa papers, news → news sources).
+    /// Research niche: "web" (default), "news", or "academic" — steers to a fitting backend.
     pub topic: Option<String>,
     /// Recency filter: "day"/"week"/"month"/"year" or an ISO date (e.g. "2024-01-01").
     pub recency: Option<String>,
     /// Restrict to these domains; prefix one with "-" to exclude it (e.g. ["nature.com","-reddit.com"]).
     pub domains: Option<Vec<String>>,
-    /// Absolute paths to local files/images to attach and ask about (uploaded to the web session,
-    /// then referenced in the turn). Defaults to grok_web when no `provider` is forced. Web providers only.
+    /// Absolute paths of local files/images to attach and ask about. Web providers only;
+    /// defaults to grok_web when no `provider` is forced.
     pub file: Option<Vec<String>>,
 }
 
@@ -58,7 +55,7 @@ pub struct ResearchArgs {
 pub struct ReadArgs {
     /// The URL to read and return as clean markdown.
     pub url: String,
-    /// Force a specific provider instead of letting the router choose.
+    /// Force a specific provider instead of the priority order.
     pub provider: Option<ProviderKind>,
     /// Provider-specific escape hatch: firecrawl "crawl"/"extract"/"screenshot", tavily "extract",
     /// serper "scrape", steel "screenshot"/"pdf". Call usage(provider=…) for the exact set.
@@ -78,7 +75,7 @@ pub struct ImageArgs {
     /// What to draw.
     pub prompt: String,
     /// Force a specific provider (gemini_web / grok_web generate in-process over HTTP; chatgpt_web
-    /// drives the browser). Otherwise the router picks the least-exhausted one and fails over.
+    /// drives the browser). Otherwise the priority order applies, with failover.
     pub provider: Option<ProviderKind>,
 }
 
@@ -170,7 +167,7 @@ fn search_input(args: SearchArgs, session: Option<String>) -> Input {
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; cookie-auth web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-ups. Force one with `provider`, pick a `model`/`mode`, or pass a `session` to continue a chat. For chatgpt_web this is a chat turn; `model` picks the composer's model and/or its thinking level (e.g. \"gpt-5.4 high\", \"o3\", or just \"high\" — levels are per-model, and an unknown name returns the options) with web search on by default — pass `mode=\"chat\"` to answer from the model alone without browsing. Attach one or more local files with `file` (array of absolute paths) to ask about them — defaults to grok_web. Niche knobs: `topic` (web/news/academic), `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
+        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-up turns. For chatgpt_web this is a full chat turn with web search on by default — `mode=\"chat\"` answers from the model alone. Attach local files with `file` to ask about them. Niche knobs: `topic`, `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn search(
         &self,
@@ -199,7 +196,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research over multiple sources (parallel, exa, tavily, gemini_web, grok_web, chatgpt_web). exa/parallel and the web sessions do true multi-round research; tavily returns a single synthesized answer. May take minutes. gemini_web and chatgpt_web both return a research PLAN plus a `session` first: pass that `session` with query \"start\" to run it, or with a revised research request to replace the plan. gemini returns the finished report in the same call; chatgpt then runs for ~5-30 min, so after \"start\" it hands back a `session` you call again to fetch the report (chatgpt uses its own research model — `model` is ignored). Pass a `session` to continue any web research thread. Niche knobs: `topic` (web/news/academic), `recency`, `domains`, `depth` (standard/deep — deep is slower/pricier). Provider-specific extras (crawl, structured extract, pro tier…) → call usage(provider=…) for exact params & example calls."
+        description = "Deep research over multiple sources (parallel, exa, tavily, gemini_web, grok_web, chatgpt_web); may take minutes. gemini_web and chatgpt_web first return a research PLAN plus a `session`: pass that `session` with query \"start\" to run it, or with a revised request to replace the plan. gemini returns the finished report in the same call; chatgpt runs ~5-30 min after \"start\" — call again with the returned `session` to fetch the report (`model` is ignored there). Knobs: `topic`, `recency`, `domains`, `depth` (\"deep\" is slower/pricier). Provider-specific extras → call usage(provider=…)."
     )]
     pub async fn deep_research(
         &self,
@@ -266,8 +263,9 @@ impl ServerHandler for Fetchira {
             .with_server_info(Implementation::new("fetchira", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Quota-aware router over free web-search/scrape providers. \
-                 Tools: search, read, deep_research, browser, create_image, usage. Pass `provider` to \
-                 force a specific backend; otherwise the least-exhausted one is chosen.",
+                 Tools: search, read, deep_research, browser, create_image, usage. Pass `provider` \
+                 to force a specific backend (it is used even if its quota looks spent); otherwise \
+                 providers are tried in the user's priority order with automatic failover.",
             )
     }
 }
