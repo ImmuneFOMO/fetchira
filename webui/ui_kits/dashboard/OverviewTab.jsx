@@ -59,31 +59,66 @@ function BurnRadar() {
   );
 }
 
-// Routing priority: the provider order the router walks per capability (first → last, failing
-// over as each exhausts). ‹ › reorder, + floats in an off-route provider, reset restores the
-// built-in order. Saved to fetchira.toml; running MCP servers pick it up on their next start.
+// Routing priority: the failover chain the router walks per capability. Chips are numbered
+// slots joined by "→" (1 is the default, the rest are failover); drag a chip to reorder —
+// one save on drop. Providers without an account are dimmed (the router skips them live).
+// Saved to fetchira.toml; running MCP servers pick it up on their next start.
 function RoutingPriority() {
   const rows = window.FX.priority || [];
   const [open, setOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
+  // Local order override per capability while dragging / awaiting the save.
+  const [draft, setDraft] = React.useState({});
+  const drag = React.useRef(null); // { cap, name, moved }
   if (!rows.length) return null;
+
+  const configured = new Set((window.FX.accounts || []).map((a) => a.provider));
+  const orderOf = (row) => draft[row.capability] || row.order;
 
   const post = async (capability, order) => {
     setBusy(true); setErr(null);
-    try { await window.apiPost('/api/priority', { capability, order }); if (window.fxRefresh) window.fxRefresh(); }
-    catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
-  };
-  const move = (row, i, d) => {
-    const order = row.order.slice();
-    const j = i + d;
-    if (j < 0 || j >= order.length) return;
-    [order[i], order[j]] = [order[j], order[i]];
-    post(row.capability, order);
+    try {
+      await window.apiPost('/api/priority', { capability, order });
+      if (window.fxRefresh) await window.fxRefresh();
+    } catch (e) { setErr(e.message); }
+    finally {
+      setBusy(false);
+      setDraft((d) => { const n = { ...d }; delete n[capability]; return n; });
+    }
   };
 
-  const arrowStyle = (on) => ({ background: 'transparent', border: 'none', cursor: on ? 'pointer' : 'default', padding: '0 2px', fontFamily: 'var(--font-mono)', fontSize: 11, color: on ? 'var(--text-lo)' : 'var(--text-faint)', opacity: on ? 1 : 0.35 });
+  // Pointer-based drag: capture on the chip, live-preview the reorder as the pointer crosses
+  // sibling chips, save once on release. A press without movement across a sibling is a no-op.
+  const onDown = (row, name) => (e) => {
+    if (busy) return;
+    drag.current = { cap: row.capability, name, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onMove = (row) => (e) => {
+    const d = drag.current;
+    if (!d || d.cap !== row.capability) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const chip = el && el.closest && el.closest(`[data-prio-cap="${row.capability}"][data-prio-name]`);
+    if (!chip) return;
+    const over = chip.getAttribute('data-prio-name');
+    if (over === d.name) return;
+    const order = orderOf(row).slice();
+    const from = order.indexOf(d.name);
+    const to = order.indexOf(over);
+    if (from < 0 || to < 0) return;
+    order.splice(from, 1);
+    order.splice(to, 0, d.name);
+    d.moved = true;
+    setDraft((prev) => ({ ...prev, [row.capability]: order }));
+  };
+  const onUp = (row) => () => {
+    const d = drag.current;
+    drag.current = null;
+    if (d && d.cap === row.capability && d.moved) post(row.capability, orderOf(row));
+  };
+
+  const dragged = (row, p) => drag.current && drag.current.cap === row.capability && drag.current.name === p;
 
   return (
     <section>
@@ -95,37 +130,54 @@ function RoutingPriority() {
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{open ? '− hide' : '+ show'}</span>
       </button>
       {open && (
-        <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
           {err && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--red-500)' }}>{err}</div>}
           {rows.map((row) => (
-            <div key={row.capability} style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+            <div key={row.capability} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)', width: 110, flexShrink: 0 }}>
-                {row.capability}{row.custom && <span title="custom order" style={{ color: 'var(--lime-500)' }}> *</span>}
+                {row.capability}{row.custom && <span title="custom order — reset restores the default" style={{ color: 'var(--lime-500)' }}> *</span>}
               </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                {row.order.map((p, i) => (
-                  <span key={p} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-hi)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '2px 4px 2px 7px' }}>
-                    {p}
-                    <button onClick={() => move(row, i, -1)} disabled={busy || i === 0} title="try earlier" style={arrowStyle(!busy && i > 0)}>‹</button>
-                    <button onClick={() => move(row, i, 1)} disabled={busy || i === row.order.length - 1} title="try later" style={arrowStyle(!busy && i < row.order.length - 1)}>›</button>
-                  </span>
-                ))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', rowGap: 7 }}>
+                {orderOf(row).map((p, i) => {
+                  const noAcct = !configured.has(p);
+                  const lift = dragged(row, p);
+                  return (
+                    <React.Fragment key={p}>
+                      {i > 0 && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', userSelect: 'none' }}>→</span>}
+                      <span data-prio-cap={row.capability} data-prio-name={p}
+                        onPointerDown={onDown(row, p)} onPointerMove={onMove(row)} onPointerUp={onUp(row)}
+                        title={(noAcct ? 'no account yet — skipped when routing · ' : '') + 'drag to reorder'}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 11,
+                          padding: '3px 9px 3px 7px', borderRadius: 4, cursor: busy ? 'default' : 'grab',
+                          touchAction: 'none', userSelect: 'none',
+                          color: noAcct ? 'var(--text-faint)' : 'var(--text-hi)',
+                          border: i === 0 ? '1px solid color-mix(in srgb, var(--lime-500) 45%, transparent)' : `1px ${noAcct ? 'dashed' : 'solid'} var(--border-faint)`,
+                          background: lift ? 'color-mix(in srgb, var(--lime-500) 10%, transparent)' : i === 0 ? 'color-mix(in srgb, var(--lime-500) 5%, transparent)' : 'transparent',
+                          boxShadow: lift ? '0 2px 8px rgba(0,0,0,0.45)' : 'none',
+                        }}>
+                        <span style={{ fontSize: 10, color: i === 0 ? 'var(--lime-500)' : 'var(--text-faint)' }}>{i + 1}</span>
+                        {p}
+                      </span>
+                    </React.Fragment>
+                  );
+                })}
                 {/* steel is read's built-in last resort (browser escalation) even when not in the order */}
-                {row.capability === 'read' && !row.order.includes('steel') && (
+                {row.capability === 'read' && !orderOf(row).includes('steel') && (
                   <span title="when every read provider fails or returns empty, the router retries via the steel headless browser automatically"
-                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-                    → steel (auto-escalation)
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', userSelect: 'none' }}>
+                    → steel · auto
                   </span>
                 )}
                 {row.available.map((p) => (
-                  <button key={p} onClick={() => post(row.capability, [...row.order, p])} disabled={busy} title="add to this capability's order — dashed = not routed yet, not disabled"
-                    style={{ background: 'transparent', border: '1px dashed var(--border-faint)', borderRadius: 4, padding: '2px 7px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                  <button key={p} onClick={() => post(row.capability, [...orderOf(row), p])} disabled={busy} title="add to this capability's routing order"
+                    style={{ background: 'transparent', border: '1px dashed var(--border-faint)', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
                     + {p}
                   </button>
                 ))}
                 {row.custom && (
                   <button onClick={() => post(row.capability, [])} disabled={busy}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', textDecoration: 'underline' }}>
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, marginLeft: 3, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', textDecoration: 'underline' }}>
                     reset
                   </button>
                 )}
@@ -133,7 +185,7 @@ function RoutingPriority() {
             </div>
           ))}
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
-            tried first → last, failing over as each runs out · agents can still force one with provider=… · running MCP servers pick changes up on restart
+            drag to reorder — 1 is tried first, the rest are failover · dimmed = no account yet · agents can force one with provider=… · running MCP servers pick changes up on restart
           </span>
         </Card>
       )}
