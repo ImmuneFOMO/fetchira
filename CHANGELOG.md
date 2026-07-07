@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.6...v0.1.7) - 2026-07-07
+
+### Added
+
+- *(ui)* fold the debug firehose into activity, drop the debug tab
+- *(ui)* drag-to-reorder priority chips with ranked failover chain
+- *(router)* quality-rank image and deep-research defaults
+- *(router)* rebalance default provider order around quota economics
+- *(ui)* routing priority panel in the dashboard
+- *(cli)* priority command to view and set the provider order
+- *(router)* user-configurable provider priority per capability
+- *(serper)* scrape endpoint for the read tool
+- *(accounts)* edit an account's proxy in CLI and UI
+
+### Fixed
+
+- *(ui)* uniform account rows — limits drawer + overflow action menu
+- *(ui)* show steel auto-escalation hint on the read priority row
+
+### Other
+
+- *(readme)* quickstart, provider picking guide, full config reference
+- *(mcp)* correct router instructions and slim tool descriptions
+
 ## [0.1.6](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.5...v0.1.6) - 2026-07-06
 
 ### Added

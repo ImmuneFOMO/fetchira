@@ -1,6 +1,6 @@
 [package]
 name = "fetchira"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Quota-aware web-search/scrape MCP server and CLI that routes across free provider tiers"
 repository = "https://github.com/ImmuneFOMO/fetchira"
