@@ -58,9 +58,12 @@ pub async fn call(
     base: &str,
     key: &str,
     client: &reqwest::Client,
-    _cap: Capability,
+    cap: Capability,
     input: &Input,
 ) -> Result<Outcome> {
+    if cap == Capability::Read {
+        return scrape(base, key, client, input).await;
+    }
     let (path, body, arr) = build_req(input)?;
     let resp = crate::httptrace::send_traced(
         client
@@ -86,6 +89,25 @@ pub async fn call(
         })
         .unwrap_or_default();
     Ok(Outcome::new(fmt_hits(&hits), 1))
+}
+
+// Serper's scraper lives on its own host (scrape.serper.dev, POST /), not under the SERP api;
+// the swap keeps a mocked test base pointing at the mock. Returns markdown when available.
+async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
+    let resp = crate::httptrace::send_traced(
+        client
+            .post(base.replace("google.serper", "scrape.serper"))
+            .header("X-API-KEY", key)
+            .json(&json!({ "url": input.need_url()?, "includeMarkdown": true })),
+    )
+    .await?;
+    let v: Value = check("serper", resp).await?.json().await?;
+    let text = [&v["markdown"], &v["text"]]
+        .iter()
+        .find_map(|f| f.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(Outcome::new(text, v["credits"].as_i64().unwrap_or(1)))
 }
 
 /// `GET /account` → `{balance, rateLimit}`. Free, read-only, authoritative (the dashboard's own
