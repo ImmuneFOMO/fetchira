@@ -110,8 +110,15 @@ function RoutingPriority() {
                     <button onClick={() => move(row, i, 1)} disabled={busy || i === row.order.length - 1} title="try later" style={arrowStyle(!busy && i < row.order.length - 1)}>›</button>
                   </span>
                 ))}
+                {/* steel is read's built-in last resort (browser escalation) even when not in the order */}
+                {row.capability === 'read' && !row.order.includes('steel') && (
+                  <span title="when every read provider fails or returns empty, the router retries via the steel headless browser automatically"
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                    → steel (auto-escalation)
+                  </span>
+                )}
                 {row.available.map((p) => (
-                  <button key={p} onClick={() => post(row.capability, [...row.order, p])} disabled={busy} title="add to this capability's order"
+                  <button key={p} onClick={() => post(row.capability, [...row.order, p])} disabled={busy} title="add to this capability's order — dashed = not routed yet, not disabled"
                     style={{ background: 'transparent', border: '1px dashed var(--border-faint)', borderRadius: 4, padding: '2px 7px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
                     + {p}
                   </button>
