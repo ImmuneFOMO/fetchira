@@ -290,13 +290,16 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
             Tavily, Serper, Exa, Parallel, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
         Capability::Read => &[Firecrawl, Tavily, Serper, Exa],
-        // tavily last: its "deep research" is one synthesized answer, not a real multi-round run;
-        // chatgpt behind grok because every send drives a live browser and takes 5-30 min.
-        Capability::DeepResearch => &[GeminiWeb, Parallel, Exa, GrokWeb, ChatgptWeb, Tavily],
+        // Report quality ranks the leaders: gemini and chatgpt run the top-tier true deep
+        // research (gemini first — better quota, no browser); grok's deepsearch is quicker but
+        // shallower, and tavily's "deep research" is one synthesized answer, so they trail the
+        // $-billed api researchers (parallel/exa).
+        Capability::DeepResearch => &[GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily],
         Capability::Browser => &[Steel],
-        // grok generates in-process and is region-agnostic; gemini image-gen is EU-gated (falls back
-        // to text) so it sits behind grok; chatgpt is the browser fallback.
-        Capability::Image => &[GrokWeb, GeminiWeb, ChatgptWeb],
+        // Arena quality order: gpt-image leads every blind-vote board, gemini (nano banana) is
+        // the 4K/editing runner-up, grok trails both. gemini's EU region gate maps to an error,
+        // so the failover chain survives it.
+        Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
     }
 }
 

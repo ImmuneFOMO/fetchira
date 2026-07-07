@@ -50,8 +50,8 @@ Restart your coding tool and ask it to search the web — fetchira takes it from
 |---|---|---|
 | **search** | `search` | tavily → serper → exa → parallel → gemini_web → grok_web → chatgpt_web |
 | **read** | `read` | firecrawl → tavily → serper → exa (then auto-escalates to a headless browser) |
-| **deep research** | `deep_research` | gemini_web → parallel → exa → grok_web → chatgpt_web → tavily |
-| **image** | `create_image` | grok_web → gemini_web → chatgpt_web |
+| **deep research** | `deep_research` | gemini_web → chatgpt_web → parallel → exa → grok_web → tavily |
+| **image** | `create_image` | chatgpt_web → gemini_web → grok_web |
 | **file Q&A** | `search` / `deep_research` + `file` | attach local files to a grok / gemini / chatgpt turn and ask about them |
 | **browser** | `browser` | steel |
 | **usage** | `usage` | live balance + per-tier limits + model/mode catalog, and a per-provider capability sheet |
