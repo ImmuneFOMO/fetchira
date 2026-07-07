@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::config::{resolve_secret, Config, Reset};
+use crate::config::{resolve_secret, Config, Priority, Reset};
 use crate::error::{Error, Result};
 use crate::httptrace;
 use crate::providers::{
@@ -72,6 +72,8 @@ pub struct UsageView {
 pub struct Router {
     buckets: Vec<Bucket>,
     store: Store,
+    // User's per-capability provider order (fetchira priority); empty = built-in order.
+    priority: Priority,
     // Short-lived cache of provider-reported quota, keyed by "{label}|{deep}", so polling the
     // dashboard or `usage` doesn't hit grok's rate-limit endpoint on every call.
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
@@ -89,6 +91,7 @@ impl Router {
         Self {
             buckets,
             store,
+            priority: Priority::default(),
             live: Mutex::new(HashMap::new()),
             live_limits: Mutex::new(HashMap::new()),
             balance: Mutex::new(HashMap::new()),
@@ -96,11 +99,19 @@ impl Router {
         }
     }
 
+    /// Replace the user priority after construction (`build` reads it from config; this is for
+    /// callers assembling a router from parts, e.g. tests).
+    pub fn with_priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
     pub async fn build(cfg: Config, store: Store) -> Result<Self> {
         let debug = cfg
             .debug_log
             .enabled
             .then_some(cfg.debug_log.retention_hours);
+        let priority = cfg.priority.clone();
         // Only fetch the proxy list if a "pool" account still lacks a (cached) assignment —
         // otherwise every server launch would re-download it and block the MCP handshake.
         let mut needs_pool = false;
@@ -198,6 +209,7 @@ impl Router {
         Ok(Self {
             buckets,
             store,
+            priority,
             live: Mutex::new(HashMap::new()),
             live_limits: Mutex::new(HashMap::new()),
             balance: Mutex::new(HashMap::new()),
@@ -218,10 +230,14 @@ impl Router {
         // The most recent failed attempt in this call, so a later success records the failover hop.
         let mut prev_fail: Option<(String, i64)> = None;
 
-        for &kind in &order_for(cap, input.topic.as_deref()) {
-            if matches!(forced, Some(f) if f != kind) {
-                continue;
-            }
+        // A forced provider is tried directly (it may serve the cap without being in the auto-route
+        // order, e.g. read via tavily/serper/steel); auto-choice walks the preference order.
+        let order = match forced {
+            Some(f) if !f.supports(cap) => return Err(Error::Unsupported(f.as_str())),
+            Some(f) => vec![f],
+            None => order_for(cap, input.topic.as_deref(), self.priority.for_cap(cap)),
+        };
+        for &kind in &order {
             let mut cands: Vec<(usize, i64, String, i64, String)> = Vec::new();
             for (i, b) in self.buckets.iter().enumerate() {
                 if b.provider.kind != kind {

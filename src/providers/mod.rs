@@ -50,6 +50,17 @@ impl Capability {
             Capability::Image => "create_image",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Capability> {
+        match s {
+            "search" => Some(Capability::Search),
+            "read" => Some(Capability::Read),
+            "deep_research" | "dr" => Some(Capability::DeepResearch),
+            "browser" => Some(Capability::Browser),
+            "image" | "create_image" => Some(Capability::Image),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -154,10 +165,10 @@ impl ProviderKind {
             (self, cap),
             (Tavily, Search | Read | DeepResearch)
                 | (Exa, Search | Read | DeepResearch)
-                | (Serper, Search)
+                | (Serper, Search | Read)
                 | (Firecrawl, Search | Read)
                 | (Parallel, Search | DeepResearch)
-                | (Steel, Browser)
+                | (Steel, Browser | Read)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
@@ -283,11 +294,31 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
     }
 }
 
-/// `order(cap)` re-ranked for a research niche: academic floats Exa (papers) then Serper (scholar)
-/// to the front, news floats Serper then Tavily. Only reorders providers already serving the cap;
-/// `None`/`web` is the plain order. Quota-aware failover still runs within the returned list.
-pub fn order_for(cap: Capability, topic: Option<&str>) -> Vec<ProviderKind> {
+/// `order(cap)` re-ranked. A user `custom` list (`fetchira priority`) comes first verbatim —
+/// filtered to providers serving the cap, with the remaining built-in order appended — and beats
+/// the niche re-rank, since the user set it explicitly. Otherwise a research niche floats its
+/// native providers: academic → Exa (papers) then Serper (scholar), news → Serper then Tavily.
+/// Quota-aware failover still runs within the returned list.
+pub fn order_for(
+    cap: Capability,
+    topic: Option<&str>,
+    custom: &[ProviderKind],
+) -> Vec<ProviderKind> {
     use ProviderKind::*;
+    if !custom.is_empty() {
+        let mut list: Vec<ProviderKind> = Vec::with_capacity(custom.len());
+        for &p in custom {
+            if p.supports(cap) && !list.contains(&p) {
+                list.push(p);
+            }
+        }
+        for &p in order(cap) {
+            if !list.contains(&p) {
+                list.push(p);
+            }
+        }
+        return list;
+    }
     let mut list = order(cap).to_vec();
     let front: &[ProviderKind] = match topic {
         Some("academic") => &[Exa, Serper],
@@ -802,26 +833,46 @@ mod tests {
     #[test]
     fn order_for_floats_niche_providers() {
         // academic -> Exa then Serper to the front, rest of the order preserved
-        let acad = order_for(Capability::Search, Some("academic"));
+        let acad = order_for(Capability::Search, Some("academic"), &[]);
         assert_eq!(acad[0], Exa);
         assert_eq!(acad[1], Serper);
         assert_eq!(acad.len(), order(Capability::Search).len());
         // news -> Serper then Tavily
-        let news = order_for(Capability::Search, Some("news"));
+        let news = order_for(Capability::Search, Some("news"), &[]);
         assert_eq!(&news[..2], &[Serper, Tavily]);
         // web / none leaves the base order untouched
         assert_eq!(
-            order_for(Capability::Search, None),
+            order_for(Capability::Search, None, &[]),
             order(Capability::Search)
         );
         assert_eq!(
-            order_for(Capability::Search, Some("web")),
+            order_for(Capability::Search, Some("web"), &[]),
             order(Capability::Search)
         );
         // only reorders providers already present for the cap (Serper isn't a DeepResearch backend)
-        let dr = order_for(Capability::DeepResearch, Some("academic"));
+        let dr = order_for(Capability::DeepResearch, Some("academic"), &[]);
         assert_eq!(dr[0], Exa);
         assert!(!dr.contains(&Serper));
+    }
+
+    #[test]
+    fn order_for_custom_priority_wins() {
+        // custom list leads, unlisted providers follow in the built-in order
+        let custom = order_for(Capability::Search, None, &[GrokWeb, Serper]);
+        assert_eq!(&custom[..2], &[GrokWeb, Serper]);
+        assert_eq!(custom.len(), order(Capability::Search).len());
+        assert!(custom.contains(&Tavily));
+        // beats the niche re-rank
+        let acad = order_for(Capability::Search, Some("academic"), &[GrokWeb]);
+        assert_eq!(acad[0], GrokWeb);
+        // providers not serving the cap are dropped; duplicates collapse
+        let dr = order_for(Capability::DeepResearch, None, &[Serper, Exa, Exa]);
+        assert_eq!(dr[0], Exa);
+        assert!(!dr.contains(&Serper));
+        assert_eq!(dr.len(), order(Capability::DeepResearch).len());
+        // can float a provider the built-in order doesn't route (read via tavily)
+        let read = order_for(Capability::Read, None, &[Tavily]);
+        assert_eq!(&read[..2], &[Tavily, Firecrawl]);
     }
 
     #[test]

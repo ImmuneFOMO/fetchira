@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::providers::ProviderKind;
+use crate::providers::{Capability, ProviderKind};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -13,6 +13,8 @@ pub struct Config {
     pub debug_log: DebugLog,
     #[serde(default, skip_serializing_if = "ProxyPool::is_empty")]
     pub proxy_pool: ProxyPool,
+    #[serde(default, skip_serializing_if = "Priority::is_empty")]
+    pub priority: Priority,
     #[serde(default, rename = "account")]
     pub accounts: Vec<Account>,
 }
@@ -23,7 +25,51 @@ impl Default for Config {
             db_path: default_db(),
             debug_log: DebugLog::default(),
             proxy_pool: ProxyPool::default(),
+            priority: Priority::default(),
             accounts: Vec::new(),
+        }
+    }
+}
+
+/// User override of the per-capability provider order (`fetchira priority`, UI Routing panel).
+/// Listed providers are tried first, in this order; unlisted ones follow in the built-in order.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct Priority {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search: Vec<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deep_research: Vec<ProviderKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image: Vec<ProviderKind>,
+}
+
+impl Priority {
+    pub fn is_empty(&self) -> bool {
+        self.search.is_empty()
+            && self.read.is_empty()
+            && self.deep_research.is_empty()
+            && self.image.is_empty()
+    }
+
+    pub fn for_cap(&self, cap: Capability) -> &[ProviderKind] {
+        match cap {
+            Capability::Search => &self.search,
+            Capability::Read => &self.read,
+            Capability::DeepResearch => &self.deep_research,
+            Capability::Image => &self.image,
+            Capability::Browser => &[],
+        }
+    }
+
+    pub fn set(&mut self, cap: Capability, list: Vec<ProviderKind>) {
+        match cap {
+            Capability::Search => self.search = list,
+            Capability::Read => self.read = list,
+            Capability::DeepResearch => self.deep_research = list,
+            Capability::Image => self.image = list,
+            Capability::Browser => {}
         }
     }
 }

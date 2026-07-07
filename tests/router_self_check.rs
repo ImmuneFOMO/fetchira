@@ -1,4 +1,4 @@
-use fetchira::config::Reset;
+use fetchira::config::{Priority, Reset};
 use fetchira::providers::{Capability, Input, Provider, ProviderKind};
 use fetchira::router::{Bucket, Conn, Router};
 use fetchira::usage::{period_key, Store};
@@ -159,6 +159,84 @@ async fn usage_reports_remaining() {
     assert_eq!(tv.used, 2);
     assert_eq!(tv.remaining, 98);
     assert_eq!(tv.proxy, "direct");
+}
+
+// (e) a custom priority beats the built-in order (and the most-remaining account).
+#[tokio::test]
+async fn custom_priority_reorders() {
+    let tav = MockServer::start().await;
+    mount_search(&tav, tavily_body()).await;
+    let exa = MockServer::start().await;
+    mount_search(&exa, exa_body()).await;
+
+    let store = fresh_store("e").await;
+    let period = period_key(Reset::Monthly);
+    // tavily has more left than exa — without a custom priority it would win.
+    store.record("exa", "exa-1", &period, 50).await.unwrap();
+
+    let buckets = vec![
+        bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1"),
+        bucket(ProviderKind::Exa, &exa.uri(), "exa-1"),
+    ];
+    let router = Router::from_parts(buckets, store).with_priority(Priority {
+        search: vec![ProviderKind::Exa],
+        ..Default::default()
+    });
+    let out = router
+        .call(Capability::Search, &query("hi"), None)
+        .await
+        .unwrap();
+    assert!(
+        out.text.contains("EXA_HIT"),
+        "expected exa first, got: {}",
+        out.text
+    );
+}
+
+// (f) forcing a provider outside the capability's auto-route order still works (read via serper's
+// scrape endpoint, which the built-in read order doesn't route).
+#[tokio::test]
+async fn forced_off_route_provider_works() {
+    let srp = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "text": "SCRAPED_OK" })))
+        .mount(&srp)
+        .await;
+
+    let store = fresh_store("f").await;
+    let buckets = vec![bucket(ProviderKind::Serper, &srp.uri(), "serper-1")];
+    let router = Router::from_parts(buckets, store);
+    let out = router
+        .call(
+            Capability::Read,
+            &Input {
+                url: Some("https://example.com".into()),
+                ..Default::default()
+            },
+            Some(ProviderKind::Serper),
+        )
+        .await
+        .unwrap();
+    assert!(out.text.contains("SCRAPED_OK"), "got: {}", out.text);
+}
+
+// (g) forcing a provider that can't serve the capability -> clear error, no dial-out.
+#[tokio::test]
+async fn forced_unsupported_errors() {
+    let store = fresh_store("g").await;
+    let router = Router::from_parts(vec![], store);
+    let res = router
+        .call(
+            Capability::DeepResearch,
+            &query("hi"),
+            Some(ProviderKind::Serper),
+        )
+        .await;
+    assert!(
+        matches!(res, Err(fetchira::Error::Unsupported(_))),
+        "got: {res:?}"
+    );
 }
 
 // (d) forced provider that is exhausted -> error, no silent switch.
