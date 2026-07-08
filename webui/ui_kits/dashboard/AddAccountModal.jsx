@@ -188,7 +188,7 @@ function AddAccountModal({ onClose }) {
             </Field>
           )}
 
-          <Input label="Proxy · optional" placeholder="pool, direct, or http://host:port" value={proxy} mono
+          <Input label="Proxy · optional" placeholder="pool, direct, ip:port:user:pass or http://user:pass@host:port" value={proxy} mono
             onChange={(e) => setProxy(e.target.value)} hint="Leave blank for a direct connection" />
 
           {error && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.3)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>{error}</div>}

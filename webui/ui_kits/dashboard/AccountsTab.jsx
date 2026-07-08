@@ -125,7 +125,7 @@ function ProxyModal({ label, current, onClose }) {
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ display: 'flex', gap: 6 }}>{seg('direct', 'Direct')}{seg('pool', 'Pool')}{seg('custom', 'Custom')}</div>
           {mode === 'custom' && <Input label="Proxy URL" value={url} mono autoFocus
-            placeholder="http://user:pass@host:port"
+            placeholder="ip:port:user:pass or http://user:password@host:port or user:password@host:port"
             onChange={(e) => setUrl(e.target.value)}
             hint={initMode === 'custom' ? `Currently ${current} — type a new URL to change it.` : null} />}
           {mode === 'pool' && <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>A sticky proxy is assigned from your pool on the next call.</span>}

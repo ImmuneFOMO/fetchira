@@ -390,7 +390,7 @@ pub fn parse_proxy_arg(s: &str) -> Option<String> {
     match s.trim() {
         "" | "direct" | "none" | "off" => None,
         "pool" => Some("pool".to_string()),
-        url => Some(url.to_string()),
+        url => Some(crate::proxy::normalize(url)),
     }
 }
 
@@ -835,7 +835,7 @@ async fn specific_proxy(cfg: &Config) -> Option<String> {
     };
     let idx = opts.iter().position(|o| o == &sel).unwrap_or(0);
     if idx == 0 {
-        Text::new("Proxy URL (http://user:pass@host:port):")
+        Text::new("Proxy (ip:port:user:pass or http://user:pass@host:port):")
             .prompt()
             .ok()
             .map(|s| s.trim().to_string())
