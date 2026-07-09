@@ -814,8 +814,12 @@ async fn static_handler(uri: Uri) -> Response {
         path = "ui_kits/dashboard/index.html".to_string();
     }
     match Assets::get(&path) {
+        // no-cache: a restarted/upgraded server must not run against stale cached JSX.
         Some(c) => (
-            [(header::CONTENT_TYPE, mime_for(&path))],
+            [
+                (header::CONTENT_TYPE, mime_for(&path)),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             c.data.into_owned(),
         )
             .into_response(),

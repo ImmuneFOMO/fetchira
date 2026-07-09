@@ -16,9 +16,11 @@ function InstallTargets({ onDone }) {
   const [busy, setBusy] = React.useState(false);
   const [results, setResults] = React.useState(null);
 
+  const [failed, setFailed] = React.useState(false);
   React.useEffect(() => {
     apiGet('/api/install/targets').then((d) => {
-      const ts = (d && d.targets) || [];
+      if (!d) { setFailed(true); return; }
+      const ts = d.targets || [];
       setTargets(ts);
       const pre = {};
       ts.forEach((t) => { if (t.present && !t.installed) pre[t.name] = true; });
@@ -38,7 +40,9 @@ function InstallTargets({ onDone }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {!targets ? (
+      {failed ? (
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)' }}>couldn't reach the server — reload this tab</span>
+      ) : !targets ? (
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>detecting tools…</span>
       ) : results ? (
         <React.Fragment>

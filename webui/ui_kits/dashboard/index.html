@@ -57,12 +57,14 @@ function Loading() {
   );
 }
 
-function OfflineToast() {
+function OfflineToast({ stale }) {
   return (
     <div style={{ position: 'fixed', bottom: 16, left: 0, right: 0, zIndex: 100, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.4)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
         <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--red-500)' }} />
-        UI server offline — restart with <code style={{ color: 'var(--text-hi)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4 }}>fetchira ui</code> in your terminal
+        {stale
+          ? <span>this tab is from a previous session — open the fresh URL printed by <code style={{ color: 'var(--text-hi)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4 }}>fetchira ui</code></span>
+          : <span>UI server offline — restart with <code style={{ color: 'var(--text-hi)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4 }}>fetchira ui</code> in your terminal</span>}
       </div>
     </div>
   );
@@ -107,6 +109,9 @@ function App() {
   // onboarding flow, which sticks until the user leaves it (adds keep it on screen).
   const [onboard, setOnboard] = React.useState(null);
   const [online, setOnline] = React.useState(true);
+  // The server restarted and minted a new token: this tab will 401 forever. Say so instead
+  // of silently falling back to the demo mock.
+  const [stale, setStale] = React.useState(false);
   // 'loading' until the first live /api/state; a served page starts here so the shell paints
   // instantly instead of blocking on the (cold) fan-out. No token / a failed fetch = opened
   // standalone, so fall back to the bundled mock. A mutation re-mount (fxRefresh already loaded
@@ -124,7 +129,11 @@ function App() {
     const ping = async () => {
       try {
         const r = await fetch('/api/state', { headers: { 'x-fetchira-token': window.FX_TOKEN } });
-        if (!r.ok) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); return; }
+        if (!r.ok) {
+          if (r.status === 401 || r.status === 403) setStale(true);
+          setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); return;
+        }
+        setStale(false);
         everOnline.current = true;
         setOnline(true);
         window.FX = Object.assign({}, window.FX, await r.json());
@@ -150,7 +159,7 @@ function App() {
   if (onboard) {
     return (
       <React.Fragment>
-        {!online && everOnline.current && <OfflineToast />}
+        {stale ? <OfflineToast stale /> : !online && everOnline.current && <OfflineToast />}
         <window.Onboarding onDone={() => setOnboard(false)} />
       </React.Fragment>
     );
@@ -158,7 +167,7 @@ function App() {
 
   return (
     <React.Fragment>
-      {!online && everOnline.current && <OfflineToast />}
+      {stale ? <OfflineToast stale /> : !online && everOnline.current && <OfflineToast />}
       <window.TopBar onAdd={() => setModal(true)} />
 
       <div style={{ position: 'sticky', top: 'var(--topbar-h)', zIndex: 15, background: 'rgba(10,12,17,0.8)', backdropFilter: 'blur(12px)', borderBottom: '1px solid var(--border-faint)', padding: '10px 20px', display: 'flex', alignItems: 'center' }}>
