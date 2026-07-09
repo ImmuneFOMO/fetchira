@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.7...v0.1.8) - 2026-07-09
+
+### Added
+
+- *(ui)* first-run onboarding, ghost provider cards, one-click update
+- *(proxy)* accept raw webshare lines in both field orders
+
+### Fixed
+
+- *(ui)* keep checklist items clickable when done
+- *(ui)* flag stale-token tabs instead of silent mock fallback
+
 ## [0.1.7](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.6...v0.1.7) - 2026-07-07
 
 ### Added
