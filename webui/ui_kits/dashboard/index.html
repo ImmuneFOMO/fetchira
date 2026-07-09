@@ -42,29 +42,11 @@
 <script type="text/babel" src="AccountsTab.jsx"></script>
 <script type="text/babel" src="ActivityTab.jsx"></script>
 <script type="text/babel" src="AddAccountModal.jsx"></script>
+<script type="text/babel" src="Onboarding.jsx"></script>
+<script type="text/babel" src="GettingStarted.jsx"></script>
 
 <script type="text/babel">
-const { Tabs, Button, Card, Badge } = window.FetchiraDesignSystem_6526df;
-
-function EmptyState({ onAdd }) {
-  return (
-    <div style={{ maxWidth: 560, margin: '8vh auto 0', textAlign: 'center', padding: '0 20px' }}>
-      <div style={{ fontFamily: 'var(--font-display)', fontSize: 24, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.02em', marginBottom: 8 }}>No providers yet</div>
-      <div style={{ fontFamily: 'var(--font-ui)', fontSize: 14, color: 'var(--text-mid)', marginBottom: 24, lineHeight: 1.55 }}>
-        fetchira routes search, read and deep-research calls across free-tier providers.
-        Add your first account to start filling the tank.
-      </div>
-      <div style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 28 }}>
-        {['serper','tavily','exa','firecrawl','steel','gemini_web','grok_web'].map((p) => (
-          <Badge key={p} tone="neutral" variant="outline">{p}</Badge>
-        ))}
-      </div>
-      <div>
-        <Button variant="primary" size="lg" iconLeft={<span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>+</span>} onClick={onAdd}>Add your first provider</Button>
-      </div>
-    </div>
-  );
-}
+const { Tabs, Button } = window.FetchiraDesignSystem_6526df;
 
 function Loading() {
   return (
@@ -87,10 +69,33 @@ function OfflineToast() {
 }
 
 function UpdateBanner({ u }) {
+  const [busy, setBusy] = React.useState(false);
+  const [done, setDone] = React.useState(null); // { ok, msg } after the update ran
+  const brew = u.command !== 'fetchira update';
+
+  const update = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { setDone(await window.apiPost('/api/update')); }
+    catch (e) { setDone({ ok: false, msg: String(e.message || e) }); }
+    setBusy(false);
+  };
+
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 auto 16px', padding: '10px 16px', background: 'var(--lime-dim, rgba(170,230,90,0.12))', border: '1px solid rgba(170,230,90,0.35)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-ui)', fontSize: 13, color: 'var(--text-hi)' }}>
-      <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--lime-500)' }} />
-      <span>fetchira <b>{u.latest}</b> is available — run <code style={{ fontFamily: 'var(--font-mono)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4, color: 'var(--text-hi)' }}>{u.command}</code></span>
+      <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--lime-500)', flexShrink: 0 }} />
+      {done ? (
+        <span>{done.msg}</span>
+      ) : (
+        <React.Fragment>
+          <span style={{ flex: 1 }}>fetchira <b>{u.latest}</b> is available{brew && <> — run <code style={{ fontFamily: 'var(--font-mono)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4, color: 'var(--text-hi)' }}>{u.command}</code></>}</span>
+          {!brew && (
+            <Button variant="primary" size="sm" onClick={update} disabled={busy}>
+              {busy ? 'Updating…' : 'Update'}
+            </Button>
+          )}
+        </React.Fragment>
+      )}
     </div>
   );
 }
@@ -98,7 +103,9 @@ function UpdateBanner({ u }) {
 function App() {
   const [tab, setTab] = React.useState(new URLSearchParams(location.search).get('tab') || 'overview');
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
-  const [seeded, setSeeded] = React.useState(true);
+  // null until the first live state answers; a fresh install (zero accounts) opens the
+  // onboarding flow, which sticks until the user leaves it (adds keep it on screen).
+  const [onboard, setOnboard] = React.useState(null);
   const [online, setOnline] = React.useState(true);
   // 'loading' until the first live /api/state; a served page starts here so the shell paints
   // instantly instead of blocking on the (cold) fan-out. No token / a failed fetch = opened
@@ -122,12 +129,13 @@ function App() {
         setOnline(true);
         window.FX = Object.assign({}, window.FX, await r.json());
         setPhase('live');
+        setOnboard((o) => o === null ? (window.FX.accounts || []).length === 0 : o);
         bump((n) => n + 1);
       } catch (e) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); }
     };
     // If the boot fetch (kicked during babel warm-up) is still resolving, flip to live the moment
     // it lands — don't wait for the first poll, and never flash the global spinner.
-    if (window.__fxBoot) window.__fxBoot.then(() => { if (window.__fxLive) { setPhase('live'); bump((n) => n + 1); } });
+    if (window.__fxBoot) window.__fxBoot.then(() => { if (window.__fxLive) { setPhase('live'); setOnboard((o) => o === null ? (window.FX.accounts || []).length === 0 : o); bump((n) => n + 1); } });
     ping();
     const id = setInterval(ping, 5000);
     return () => clearInterval(id);
@@ -139,22 +147,27 @@ function App() {
     { id: 'activity', label: 'Activity' },
   ];
 
+  if (onboard) {
+    return (
+      <React.Fragment>
+        {!online && everOnline.current && <OfflineToast />}
+        <window.Onboarding onDone={() => setOnboard(false)} />
+      </React.Fragment>
+    );
+  }
+
   return (
     <React.Fragment>
       {!online && everOnline.current && <OfflineToast />}
       <window.TopBar onAdd={() => setModal(true)} />
 
-      <div style={{ position: 'sticky', top: 'var(--topbar-h)', zIndex: 15, background: 'rgba(10,12,17,0.8)', backdropFilter: 'blur(12px)', borderBottom: '1px solid var(--border-faint)', padding: '10px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ position: 'sticky', top: 'var(--topbar-h)', zIndex: 15, background: 'rgba(10,12,17,0.8)', backdropFilter: 'blur(12px)', borderBottom: '1px solid var(--border-faint)', padding: '10px 20px', display: 'flex', alignItems: 'center' }}>
         <Tabs items={tabs} value={tab} onChange={setTab} />
-        <button onClick={() => setSeeded((s) => !s)} style={{ background: 'transparent', border: '1px solid var(--border-hairline)', color: 'var(--text-faint)', fontFamily: 'var(--font-mono)', fontSize: 11, padding: '4px 9px', borderRadius: 'var(--r-xs)', cursor: 'pointer' }}>
-          {seeded ? 'demo: empty state' : 'demo: seeded'}
-        </button>
       </div>
 
       <main style={{ maxWidth: 'var(--container-max)', margin: '0 auto', padding: '20px' }}>
         {window.FX.update && <UpdateBanner u={window.FX.update} />}
         {phase === 'loading' ? <Loading />
-          : !seeded ? <EmptyState onAdd={() => setModal(true)} />
           : tab === 'overview' ? <window.OverviewTab />
           : tab === 'accounts' ? <window.AccountsTab onAdd={() => setModal(true)} />
           : <window.ActivityTab />}

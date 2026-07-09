@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     // Default: serve the MCP server over stdio. Logs go to stderr (stdout is the MCP channel).
     let cfg_path = home.join("fetchira.toml");
     let mut cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira setup` first."))?;
+        .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira` in a terminal to set up."))?;
     cfg.db_path = config::resolve_db(&home, &cfg.db_path);
     let store = Store::open(&cfg.db_path).await?;
     let router = Router::build(cfg, store).await?;

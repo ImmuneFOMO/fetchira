@@ -197,8 +197,8 @@ impl ProviderKind {
             ProviderKind::Exa => 20_000,     // 20k requests/mo (forever-free)
             ProviderKind::Serper => 2500,    // 2.5k credits, one-time
             ProviderKind::Firecrawl => 1000, // 1k credits/mo
-            ProviderKind::Parallel => 16000, // 16k free requests (no reset advertised)
-            ProviderKind::Steel => 2000,     // $30 one-time ÷ ~$0.015/proxied read ≈ 2k reads
+            ProviderKind::Parallel => 4000, // $20 personal-email grant @ $0.005/search ($80 w/ work email)
+            ProviderKind::Steel => 2000,    // $30 one-time ÷ ~$0.015/proxied read ≈ 2k reads
             // Web sessions: server enforces the real (windowed) limits; these are nominal
             // ceilings so a 429 marks the account exhausted and the router fails over.
             ProviderKind::GeminiWeb => 1000,
@@ -269,10 +269,24 @@ impl ProviderKind {
         match self {
             ProviderKind::Serper => "https://serper.dev",
             ProviderKind::Tavily => "https://app.tavily.com",
-            ProviderKind::Exa => "https://dashboard.exa.ai/api-keys",
-            ProviderKind::Firecrawl => "https://firecrawl.dev",
+            ProviderKind::Exa => "https://exa.ai/?ref=immunefomo",
+            ProviderKind::Firecrawl => "https://firecrawl.link/immunefomo",
             ProviderKind::Parallel => "https://parallel.ai",
             ProviderKind::Steel => "https://steel.dev",
+            _ => "",
+        }
+    }
+
+    /// The provider's advertised free tier, verbatim-verified against its pricing page
+    /// (2026-07-09). Display copy only — the router's soft ceilings live in `default_quota`.
+    pub fn free_tier(self) -> &'static str {
+        match self {
+            ProviderKind::Serper => "2,500 free · one-time",
+            ProviderKind::Tavily => "1,000 free / month",
+            ProviderKind::Exa => "up to 20,000 free / month",
+            ProviderKind::Firecrawl => "1,000 free / month",
+            ProviderKind::Parallel => "$20–$80 credit + $5/mo",
+            ProviderKind::Steel => "$30 credit · one-time",
             _ => "",
         }
     }

@@ -35,12 +35,12 @@ manage accounts without touching a config file.
 
 ```sh
 brew install ImmuneFOMO/tap/fetchira    # or: curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
-fetchira setup                          # guided: pick providers, paste keys, log into the web ones
-fetchira install                        # register the MCP server with your coding tools
+fetchira                                # opens the dashboard: connect a provider, try a search, register your coding tools
 ```
 
+Prefer the terminal? `fetchira setup` (guided TUI) + `fetchira install` do the same.
 Restart your coding tool and ask it to search the web — fetchira takes it from there.
-`fetchira ui` opens the dashboard. The details: [picking providers](#picking-providers),
+The details: [picking providers](#picking-providers),
 [registering tools](#register-with-your-coding-tools), [web sessions](#web-sessions),
 [configuration](#configuration).
 
@@ -191,10 +191,10 @@ automatically.
 |---|---|---|---|---|
 | `serper` | API key | Google results: search, scholar, news, places, patents, page scrape | 2,500 one-time credits | [serper.dev](https://serper.dev) |
 | `tavily` | API key | LLM-tuned search + answers, page extract, site crawl | 1,000 credits/mo | [app.tavily.com](https://app.tavily.com) |
-| `exa` | API key | neural/semantic search, deep research | free $ credit grant | [dashboard.exa.ai](https://dashboard.exa.ai/api-keys) |
-| `parallel` | API key | async multi-round deep research | free $ credit grant | [parallel.ai](https://parallel.ai) |
-| `firecrawl` | API key | read/scrape/crawl pages to clean markdown | 1,000 credits/mo | [firecrawl.dev](https://firecrawl.dev) |
-| `steel` | API key | headless-browser scrape: JS pages, screenshots, PDFs | $ credit grant | [steel.dev](https://steel.dev) |
+| `exa` | API key | neural/semantic search, deep research | up to 20,000 requests/mo | [exa.ai](https://exa.ai/?ref=immunefomo) |
+| `parallel` | API key | async multi-round deep research | $20–$80 signup credit + $5/mo | [parallel.ai](https://parallel.ai) |
+| `firecrawl` | API key | read/scrape/crawl pages to clean markdown | 1,000 credits/mo | [firecrawl.dev](https://firecrawl.link/immunefomo) |
+| `steel` | API key | headless-browser scrape: JS pages, screenshots, PDFs | $30 one-time credit | [steel.dev](https://steel.dev) |
 | `gemini_web` | browser login | Gemini search, deep research, images, file Q&A | your Google account | `fetchira login gemini_web` |
 | `grok_web` | browser login | Grok search, deepsearch, images, file Q&A | your X/Grok account | `fetchira login grok_web` |
 | `chatgpt_web` | browser login | ChatGPT chat + web search, deep research, images | your OpenAI account | `fetchira login chatgpt_web` |

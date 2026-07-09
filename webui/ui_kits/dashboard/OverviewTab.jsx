@@ -1,5 +1,5 @@
 /* Overview: provider grid grouped by capability + pinned live route log. */
-const { RouteLogLine, Card, StatusDot, Badge, QuotaMeter } = window.FetchiraDesignSystem_6526df;
+const { RouteLogLine, Card, StatusDot, Badge, QuotaMeter, Button } = window.FetchiraDesignSystem_6526df;
 
 function GroupHeader({ label, count }) {
   return (
@@ -427,19 +427,58 @@ function LiveLog() {
   );
 }
 
+// A provider with no account yet: dimmed placeholder that connects it right here
+// instead of sending the user hunting through the Accounts tab.
+function GhostProviderCard({ c, onConnect }) {
+  return (
+    <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10, opacity: 0.65, borderStyle: 'dashed' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-mid)' }}>{c.id}</span>
+        {c.free && <Badge tone="neutral" variant="outline">{c.free}</Badge>}
+      </div>
+      <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)', flex: 1 }}>{c.blurb}</span>
+      <Button variant="secondary" onClick={onConnect} style={{ alignSelf: 'flex-start' }}>
+        {c.web ? 'Connect — sign in via browser' : '+ Connect'}
+      </Button>
+    </Card>
+  );
+}
+
+const OVERVIEW_GROUPS = [
+  ['search', 'Search'],
+  ['read', 'Read / scrape'],
+  ['browser', 'Browser'],
+  ['web', 'Web sessions'],
+];
+
 function OverviewTab() {
-  const groups = window.FX.groups;
+  const [modalProv, setModalProv] = React.useState(null);
+  const live = Object.fromEntries((window.FX.groups || []).map((g) => [g.id, g.providers]));
+  const configured = new Set((window.FX.accounts || []).map((a) => a.provider));
+  const catalog = window.FX.catalog || [];
+  const groups = OVERVIEW_GROUPS.map(([id, label]) => ({
+    id,
+    label,
+    providers: live[id] || [],
+    ghosts: catalog.filter((c) => c.group === id && !configured.has(c.id)),
+  })).filter((g) => g.providers.length || g.ghosts.length);
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 380px', gap: 20, alignItems: 'start', height: '100%' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <window.GettingStarted />
         <BurnRadar />
         {groups.map((g) => (
           <section key={g.id}>
-            <GroupHeader label={g.label} count={`${g.providers.length} ${g.providers.length === 1 ? 'provider' : 'providers'}`} />
+            <GroupHeader label={g.label} count={`${g.providers.length}/${g.providers.length + g.ghosts.length} connected`} />
             <div style={{ columnWidth: 290, columnGap: 14 }}>
               {g.providers.map((p) => (
                 <div key={p.name} style={{ breakInside: 'avoid', marginBottom: 14 }}>
                   <FxProviderCard {...p} />
+                </div>
+              ))}
+              {g.ghosts.map((c) => (
+                <div key={c.id} style={{ breakInside: 'avoid', marginBottom: 14 }}>
+                  <GhostProviderCard c={c} onConnect={() => setModalProv(c.id)} />
                 </div>
               ))}
             </div>
@@ -451,6 +490,10 @@ function OverviewTab() {
       <div style={{ position: 'sticky', top: 84, height: 'calc(100vh - 104px)' }}>
         <LiveLog />
       </div>
+      {modalProv && (
+        <window.AddAccountModal initialProvider={modalProv}
+          onClose={() => { setModalProv(null); if (window.fxRefresh) window.fxRefresh(); }} />
+      )}
     </div>
   );
 }

@@ -57,9 +57,9 @@ struct AppState {
 }
 
 pub async fn run(home: &Path) -> anyhow::Result<()> {
-    let cfg_path = home.join("fetchira.toml");
-    let cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira setup` first."))?;
+    // A missing/empty config is fine: the dashboard opens in its onboarding state and the
+    // first `POST /api/account/add` writes fetchira.toml.
+    let cfg = cli::load_or_empty(home);
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let inner = build_inner(home, &store).await?;
     let token = gen_token();
@@ -101,6 +101,10 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/account/proxy", post(api_proxy))
         .route("/api/account/test", post(api_test))
         .route("/api/priority", post(api_priority))
+        .route("/api/try", post(api_try))
+        .route("/api/install/targets", get(api_install_targets))
+        .route("/api/install", post(api_install))
+        .route("/api/update", post(api_update))
         .fallback(static_handler)
         .with_state(state);
 
@@ -108,7 +112,14 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     let url = format!("http://{addr}/ui_kits/dashboard/index.html?token={token}");
     eprintln!("fetchira ui — open {url}");
-    if std::env::var("FETCHIRA_NO_OPEN").is_err() {
+    // Over SSH there's no local browser to open, and the loopback bind isn't reachable
+    // remotely — print the tunnel command instead of silently failing to open.
+    let ssh = std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok();
+    if ssh {
+        let port = addr.port();
+        eprintln!("  remote shell detected — tunnel it from your machine, then open the URL:");
+        eprintln!("  ssh -L {port}:127.0.0.1:{port} <this-host>");
+    } else if std::env::var("FETCHIRA_NO_OPEN").is_err() {
         let _ = open::that(&url);
     }
     axum::serve(listener, app).await?;
@@ -118,9 +129,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
 /// (Re)build the router + per-account metadata from the on-disk config. Called at startup
 /// and after every mutation so the dashboard reflects the new state immediately.
 async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
-    let cfg_path = home.join("fetchira.toml");
-    let cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cfg = cli::load_or_empty(home);
     let mut meta = HashMap::new();
     for a in &cfg.accounts {
         let logged_in = a.provider.is_web() && store.load_session(&a.label).await?.is_some();
@@ -574,6 +583,124 @@ async fn api_test(
         Err(e) => {
             Json(json!({ "ok": false, "latencyMs": ms, "error": e.to_string() })).into_response()
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct TryReq {
+    q: String,
+}
+
+/// Onboarding's "try it": one real routed search, answering with the text plus which
+/// provider/account served it (read back from the route row the call just logged).
+async fn api_try(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<TryReq>,
+) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    let q = req.q.trim();
+    if q.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty query").into_response();
+    }
+    let router = st.inner.read().await.router.clone();
+    let input = Input {
+        query: Some(q.to_string()),
+        ..Default::default()
+    };
+    let before = st.store.max_route_id().await.unwrap_or(0);
+    let t0 = Instant::now();
+    let res = router.call(Capability::Search, &input, None).await;
+    let ms = t0.elapsed().as_millis() as i64;
+    match res {
+        Ok(reply) => {
+            let served = st
+                .store
+                .routes_since(before, 10)
+                .await
+                .ok()
+                .and_then(|rows| rows.into_iter().rev().find(|r| r.status == 200));
+            Json(json!({
+                "ok": true,
+                "latencyMs": ms,
+                "provider": served.as_ref().map(|r| r.provider.clone()),
+                "label": served.as_ref().map(|r| r.label.clone()),
+                "text": reply.text.chars().take(2000).collect::<String>(),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            Json(json!({ "ok": false, "latencyMs": ms, "error": e.to_string() })).into_response()
+        }
+    }
+}
+
+async fn api_install_targets(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(r) = guard(&st, &headers) {
+        return r;
+    }
+    let targets: Vec<Value> = cli::mcp_target_list()
+        .iter()
+        .map(|t| json!({ "name": t.name, "present": t.present, "installed": t.installed }))
+        .collect();
+    Json(json!({ "targets": targets })).into_response()
+}
+
+#[derive(Deserialize)]
+struct InstallReq {
+    targets: Vec<String>,
+}
+
+async fn api_install(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<InstallReq>,
+) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    let bin = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let all = cli::mcp_target_list();
+    let results: Vec<Value> = req
+        .targets
+        .iter()
+        .map(|name| match all.iter().find(|t| t.name == name) {
+            Some(t) => match (t.run)(&bin) {
+                Ok(msg) => json!({ "name": name, "ok": true, "msg": msg }),
+                Err(e) => json!({ "name": name, "ok": false, "msg": e.to_string() }),
+            },
+            None => json!({ "name": name, "ok": false, "msg": "unknown target" }),
+        })
+        .collect();
+    Json(json!({ "results": results })).into_response()
+}
+
+/// The dashboard's Update button: self-update in place, then tell the user to restart.
+/// Brew-managed installs can't self-replace — the response says to `brew upgrade` instead.
+async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    match crate::update::perform(&st.home).await {
+        Ok(crate::update::Outcome::Brew) => Json(json!({
+            "ok": false,
+            "msg": "installed via Homebrew — run `brew upgrade fetchira` in a terminal",
+        }))
+        .into_response(),
+        Ok(crate::update::Outcome::UpToDate) => {
+            Json(json!({ "ok": true, "msg": "already up to date" })).into_response()
+        }
+        Ok(crate::update::Outcome::Updated(v)) => Json(json!({
+            "ok": true,
+            "msg": format!("updated to {v} — restart fetchira (and your MCP servers) to use it"),
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 
@@ -1228,9 +1355,33 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
+    // Static per-provider metadata (auth type, blurb, key signup URL, capabilities) so the
+    // add-account and onboarding screens don't hardcode the provider list.
+    let catalog: Vec<Value> = ProviderKind::all()
+        .iter()
+        .map(|&k| {
+            use Capability::*;
+            let caps: Vec<&str> = [Search, Read, DeepResearch, Browser, Image]
+                .iter()
+                .filter(|&&c| k.supports(c))
+                .map(|c| c.as_str())
+                .collect();
+            json!({
+                "id": k.as_str(),
+                "web": k.is_web(),
+                "blurb": k.blurb(),
+                "signup": k.signup(),
+                "caps": caps,
+                "free": k.free_tier(),
+                "group": group_of(k.as_str()).0,
+            })
+        })
+        .collect();
+
     Ok(json!({
         "groups": groups,
         "accounts": accounts,
+        "catalog": catalog,
         "health": health,
         "log": log,
         "stream": [],

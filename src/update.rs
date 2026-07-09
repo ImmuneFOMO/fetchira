@@ -155,38 +155,45 @@ pub async fn ui_banner(home: &Path) -> Option<serde_json::Value> {
     }))
 }
 
-/// `fetchira update` — download the latest release for this platform and replace the binary.
-pub async fn run(home: &Path) -> anyhow::Result<()> {
-    let cur = current();
-    println!("fetchira {cur}");
+pub enum Outcome {
+    Brew,
+    UpToDate,
+    Updated(String),
+}
 
+/// Download the latest release for this platform and replace the binary in place.
+/// Shared by `fetchira update` and the dashboard's Update button.
+pub async fn perform(home: &Path) -> anyhow::Result<Outcome> {
     if is_brew_managed() {
-        println!("installed via Homebrew — run `brew upgrade fetchira`");
-        return Ok(());
+        return Ok(Outcome::Brew);
     }
-
     let client = client(Duration::from_secs(60)).context("could not build http client")?;
     let (tag, latest) = fetch_latest(&client)
         .await
         .context("could not check the latest release")?;
     write_cache(home, &latest.to_string());
-    if latest <= cur {
-        println!("already up to date");
-        return Ok(());
+    if latest <= current() {
+        return Ok(Outcome::UpToDate);
     }
-
     let triple = target_triple().context(
         "no prebuilt binary for this platform — reinstall via install.sh or `cargo install`",
     )?;
-    println!("updating {cur} -> {latest} ({triple})…");
-
     let dir = std::env::temp_dir().join(format!("fetchira-update-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let res = download_and_swap(&client, &tag, triple, &dir).await;
     let _ = std::fs::remove_dir_all(&dir); // clean up on success and failure alike
-
     res?;
-    println!("updated fetchira to {latest} — restart any running instances");
+    Ok(Outcome::Updated(latest.to_string()))
+}
+
+/// `fetchira update` — the CLI face of `perform`.
+pub async fn run(home: &Path) -> anyhow::Result<()> {
+    println!("fetchira {}", current());
+    match perform(home).await? {
+        Outcome::Brew => println!("installed via Homebrew — run `brew upgrade fetchira`"),
+        Outcome::UpToDate => println!("already up to date"),
+        Outcome::Updated(v) => println!("updated fetchira to {v} — restart any running instances"),
+    }
     Ok(())
 }
 

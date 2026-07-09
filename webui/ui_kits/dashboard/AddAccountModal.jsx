@@ -36,8 +36,15 @@ function Field({ label, children }) {
   );
 }
 
-function AddAccountModal({ onClose }) {
-  const [providerId, setProviderId] = React.useState('serper');
+// Live catalog from /api/state when served; the hardcoded list keeps the standalone preview working.
+function catalogNow() {
+  const live = window.FX && window.FX.catalog;
+  if (!live || !live.length) return PROVIDER_CATALOG;
+  return live.map((c) => ({ id: c.id, kind: c.web ? 'web' : 'key', note: c.blurb, signup: c.signup }));
+}
+
+function AddAccountModal({ onClose, initialProvider }) {
+  const [providerId, setProviderId] = React.useState(initialProvider || 'serper');
   const [label, setLabel] = React.useState('');
   const [apiKey, setApiKey] = React.useState('');
   const [proxy, setProxy] = React.useState('');
@@ -49,13 +56,14 @@ function AddAccountModal({ onClose }) {
   const [error, setError] = React.useState(null);
   const [addedLabel, setAddedLabel] = React.useState('');
 
-  const provider = PROVIDER_CATALOG.find((p) => p.id === providerId);
+  const catalog = catalogNow();
+  const provider = catalog.find((p) => p.id === providerId) || catalog[0];
   const isWeb = provider.kind === 'web';
   const keyMissing = !isWeb && apiKey.trim().length < 8;
 
   const submitKey = async () => {
     setTouched(true);
-    if (keyMissing || !label.trim() || busy) return;
+    if (keyMissing || busy) return;
     setError(null); setBusy(true);
     try {
       const res = await window.apiPost('/api/account/add', { provider: providerId, label: label.trim(), key: apiKey, proxy: proxy.trim() });
@@ -141,17 +149,19 @@ function AddAccountModal({ onClose }) {
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Field label="Provider">
             <Select value={providerId} onChange={(e) => { setProviderId(e.target.value); setTouched(false); setError(null); }}>
-              {PROVIDER_CATALOG.map((p) => <option key={p.id} value={p.id}>{p.id}</option>)}
+              {catalog.map((p) => <option key={p.id} value={p.id}>{p.id}</option>)}
             </Select>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Badge tone={isWeb ? 'cyan' : 'accent'} variant="outline">{isWeb ? 'browser login' : 'API key'}</Badge>
               <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{provider.note}</span>
+              {!isWeb && provider.signup && (
+                <a href={provider.signup} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--lime-500)', textDecoration: 'none', whiteSpace: 'nowrap' }}>get a free key ↗</a>
+              )}
             </div>
           </Field>
 
-          <Input label="Label" placeholder={`${provider.id}-1`} value={label} mono
-            onChange={(e) => setLabel(e.target.value)}
-            invalid={touched && !label.trim()} hint={touched && !label.trim() ? 'Give this account a label' : null} />
+          <Input label="Label · optional" placeholder={`${provider.id.replace(/_web$/, '')}-1 (auto)`} value={label} mono
+            onChange={(e) => setLabel(e.target.value)} hint="Leave blank to auto-name" />
 
           {!isWeb ? (
             <Input label="API key" placeholder="paste secret key" value={apiKey} mono

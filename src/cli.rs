@@ -33,7 +33,7 @@ fn cfg_path(home: &Path) -> PathBuf {
     home.join("fetchira.toml")
 }
 
-fn load_or_empty(home: &Path) -> Config {
+pub(crate) fn load_or_empty(home: &Path) -> Config {
     config::load(cfg_path(home).to_str().unwrap_or_default()).unwrap_or_default()
 }
 
@@ -87,7 +87,7 @@ pub fn providers() {
 pub async fn list(home: &Path) -> anyhow::Result<()> {
     let cfg = load_or_empty(home);
     if cfg.accounts.is_empty() {
-        println!("No accounts yet. Run `fetchira setup`.");
+        println!("No accounts yet. Run `fetchira` to set up in the dashboard.");
         return Ok(());
     }
     let store = open_store(home, &cfg).await?;
@@ -961,10 +961,7 @@ async fn remove_flow(home: &Path) -> anyhow::Result<()> {
 /// `fetchira install` — pick coding tools and write fetchira's MCP-server registration into each.
 pub fn install_tools() -> anyhow::Result<()> {
     let bin = std::env::current_exe()?.to_string_lossy().into_owned();
-    let h = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let appsup = h.join("Library/Application Support");
-
-    let targets = mcp_targets(&h, &appsup);
+    let targets = mcp_target_list();
     let opts: Vec<String> = targets
         .iter()
         .map(|t| format!("{}{}", t.name, if t.present { "  (detected)" } else { "" }))
@@ -999,12 +996,26 @@ pub fn install_tools() -> anyhow::Result<()> {
     Ok(())
 }
 
-type RunFn = Box<dyn Fn(&str) -> anyhow::Result<String>>;
+type RunFn = Box<dyn Fn(&str) -> anyhow::Result<String> + Send>;
 
-struct McpTarget {
-    name: &'static str,
-    present: bool,
-    run: RunFn,
+pub(crate) struct McpTarget {
+    pub(crate) name: &'static str,
+    pub(crate) present: bool,
+    /// This tool's config already registers a "fetchira" server (checklist done-state in the UI).
+    pub(crate) installed: bool,
+    pub(crate) run: RunFn,
+}
+
+/// Detected coding tools + registration actions. Shared by `fetchira install` and the web UI.
+pub(crate) fn mcp_target_list() -> Vec<McpTarget> {
+    let h = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let appsup = h.join("Library/Application Support");
+    mcp_targets(&h, &appsup)
+}
+
+fn has_fetchira(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|s| s.contains("\"fetchira\"") || s.contains("[mcp_servers.fetchira]"))
 }
 
 fn mcp_targets(h: &Path, appsup: &Path) -> Vec<McpTarget> {
@@ -1013,36 +1024,43 @@ fn mcp_targets(h: &Path, appsup: &Path) -> Vec<McpTarget> {
         McpTarget {
             name: "Claude Code",
             present: which("claude"),
+            installed: has_fetchira(&p(".claude.json")),
             run: Box::new(reg_claude_code),
         },
         McpTarget {
             name: "Codex CLI",
             present: p(".codex").exists() || which("codex"),
+            installed: has_fetchira(&p(".codex/config.toml")),
             run: boxed(p(".codex/config.toml"), reg_codex),
         },
         McpTarget {
             name: "OpenCode",
             present: p(".config/opencode").exists() || which("opencode"),
+            installed: has_fetchira(&p(".config/opencode/opencode.json")),
             run: boxed(p(".config/opencode/opencode.json"), reg_opencode),
         },
         McpTarget {
             name: "Gemini CLI",
             present: p(".gemini").exists() || which("gemini"),
+            installed: has_fetchira(&p(".gemini/settings.json")),
             run: boxed(p(".gemini/settings.json"), reg_mcp_servers),
         },
         McpTarget {
             name: "Cursor",
             present: p(".cursor").exists(),
+            installed: has_fetchira(&p(".cursor/mcp.json")),
             run: boxed(p(".cursor/mcp.json"), reg_mcp_servers),
         },
         McpTarget {
             name: "Windsurf",
             present: p(".codeium/windsurf").exists(),
+            installed: has_fetchira(&p(".codeium/windsurf/mcp_config.json")),
             run: boxed(p(".codeium/windsurf/mcp_config.json"), reg_mcp_servers),
         },
         McpTarget {
             name: "Claude Desktop",
             present: appsup.join("Claude").exists(),
+            installed: has_fetchira(&appsup.join("Claude/claude_desktop_config.json")),
             run: boxed(
                 appsup.join("Claude/claude_desktop_config.json"),
                 reg_mcp_servers,
@@ -1051,6 +1069,7 @@ fn mcp_targets(h: &Path, appsup: &Path) -> Vec<McpTarget> {
         McpTarget {
             name: "VS Code",
             present: appsup.join("Code").exists(),
+            installed: has_fetchira(&appsup.join("Code/User/mcp.json")),
             run: boxed(appsup.join("Code/User/mcp.json"), reg_vscode),
         },
     ]
