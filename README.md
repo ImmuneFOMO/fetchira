@@ -1,24 +1,25 @@
 # fetchira
 
-One small binary that sits between your coding agent and every web-search and
-scrape tier, and spends them so you don't have to think about it.
+Free web search, page reading, deep research and image generation for your coding
+agent — one binary, zero monthly bill.
 
 ![fetchira architecture](docs/architecture.png)
 
----
+## The problem
 
-## What it is
+Your agent needs the web constantly, and paid search APIs bill by the call. Meanwhile a
+real amount of **free** search goes unused every month: Serper, Tavily, Exa and Parallel
+give away search credits, Firecrawl reads pages, Steel drives a headless browser — and
+your logged-in Gemini, Grok and ChatGPT accounts add search, multi-step deep research,
+image generation and file Q&A on top. Together they cover most of an agent's research,
+for free.
 
-A handful of services give away a real amount of free web search every month — Serper,
-Tavily, Exa, Parallel for search, Firecrawl for reading pages, Steel for headless
-browsing. Your logged-in Gemini, Grok and ChatGPT web sessions add even more —
-search, multi-step deep research, image generation and file Q&A. Used together they cover a
-lot of an agent's research, for free.
-
-The catch is the bookkeeping. Each provider has its own API, its own key, its own quota and
-its own reset window. To actually lean on the free tiers you have to remember which key goes
+The catch is the bookkeeping. Each provider has its own API, its own key, its own quota
+and its own reset window. To live on the free tiers you have to remember which key goes
 where, track who is exhausted this month, and switch to another provider the moment one
 starts returning `429`. Nobody wants to do that by hand, and an agent certainly can't.
+
+## The solution
 
 fetchira is that bookkeeping, turned into a program. It is a single Rust binary that speaks
 **MCP** (the Model Context Protocol) to your coding agent. The agent asks for a generic
@@ -43,6 +44,37 @@ Restart your coding tool and ask it to search the web — fetchira takes it from
 The details: [picking providers](#picking-providers),
 [registering tools](#register-with-your-coding-tools), [web sessions](#web-sessions),
 [configuration](#configuration).
+
+### Or let your agent set it up
+
+Don't want to touch a terminal? Paste this into Claude Code (or any coding agent with
+shell access) and it will install fetchira, walk you through providers, and register
+itself:
+
+```text
+Install and set up fetchira (https://github.com/ImmuneFOMO/fetchira) for me:
+
+1. Install: `brew install ImmuneFOMO/tap/fetchira`, or without Homebrew:
+   `curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh`
+2. Run `fetchira providers`, then help me pick 1-3 to start (serper + firecrawl for
+   search + reading on API keys, or gemini_web for everything with just a Google login).
+3. For API-key providers: give me the signup link, wait for me to paste the key, then run
+   `fetchira add <provider> --key <KEY>`. Never run `add` without `--key` — it prompts
+   interactively and will hang on you.
+4. For gemini_web / grok_web / chatgpt_web: run `fetchira add <provider>` and tell me a
+   browser window will open — I log in there myself; it waits up to 5 minutes.
+5. Register the MCP server with the tool you are running in. For Claude Code:
+   `claude mcp add fetchira -s user -- $(which fetchira)`. For other tools add
+   `{"mcpServers": {"fetchira": {"command": "<path from which fetchira>"}}}` to their
+   mcp config. Do not use `fetchira install` or `fetchira setup` — they are interactive
+   TUIs and do nothing when you run them.
+6. Verify with `fetchira list`: every account should show `key` or `session`, not
+   `NO KEY` / `NEEDS LOGIN`.
+7. Tell me to restart my coding tool, then test by asking it to search for something
+   current.
+
+Never run bare `fetchira` yourself — piped, it becomes the MCP server and hangs.
+```
 
 ## What you get
 
