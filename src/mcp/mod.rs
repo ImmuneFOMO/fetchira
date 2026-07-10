@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::handler::server::ServerHandler;
@@ -77,6 +79,9 @@ pub struct ImageArgs {
     /// Force a specific provider (gemini_web / grok_web generate in-process over HTTP; chatgpt_web
     /// drives the browser). Otherwise the priority order applies, with failover.
     pub provider: Option<ProviderKind>,
+    /// Absolute path to save the image to. When set, only the path is returned (no inline
+    /// bytes); otherwise it is saved under the fetchira home dir and also returned inline.
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -108,9 +113,7 @@ impl Fetchira {
         Ok(match self.router.call(cap, &input, forced).await {
             Ok(reply) => {
                 if let Some(img) = reply.image {
-                    return Ok(CallToolResult::success(vec![Content::image(
-                        img.b64, img.mime,
-                    )]));
+                    return Ok(image_result(img, None));
                 }
                 let mut text = reply.text;
                 if let Some(s) = reply.session {
@@ -242,7 +245,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate an image from a text prompt via a logged-in web session (gemini_web / grok_web / chatgpt_web). Returns the image itself as bytes (base64), not a link. Force one with `provider`; otherwise the router chooses and fails over."
+        description = "Generate an image from a text prompt via a logged-in web session (gemini_web / grok_web / chatgpt_web). Saves the image to disk and returns its path — pass `path` to pick where (then no inline bytes). Force one with `provider`; otherwise the router chooses and fails over."
     )]
     pub async fn create_image(
         &self,
@@ -252,7 +255,62 @@ impl Fetchira {
             query: Some(args.prompt),
             ..Default::default()
         };
-        self.run(Capability::Image, input, args.provider).await
+        Ok(
+            match self
+                .router
+                .call(Capability::Image, &input, args.provider)
+                .await
+            {
+                Ok(reply) => match reply.image {
+                    Some(img) => image_result(img, args.path),
+                    None => CallToolResult::success(vec![Content::text(reply.text)]),
+                },
+                Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
+            },
+        )
+    }
+}
+
+/// Agents can't reach inline MCP bytes, so every image also lands on disk and the
+/// result names the file. An explicit `path` means "file only" — skip the inline copy.
+fn image_result(img: crate::providers::OutImage, path: Option<String>) -> CallToolResult {
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(&img.b64) {
+        Ok(b) => b,
+        Err(e) => return CallToolResult::error(vec![Content::text(format!("bad image: {e}"))]),
+    };
+    let explicit = path.is_some();
+    let dest = path.map(PathBuf::from).unwrap_or_else(|| {
+        let ext = match img.mime.as_str() {
+            "image/jpeg" => "jpg",
+            m => m.rsplit('/').next().unwrap_or("png"),
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        crate::cli::home()
+            .join("images")
+            .join(format!("img-{ts}.{ext}"))
+    });
+    if let Some(dir) = dest.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&dest, &bytes) {
+        return CallToolResult::error(vec![Content::text(format!(
+            "write {} failed: {e}",
+            dest.display()
+        ))]);
+    }
+    let note = Content::text(format!(
+        "saved: {} ({}, {} bytes)",
+        dest.display(),
+        img.mime,
+        bytes.len()
+    ));
+    if explicit {
+        CallToolResult::success(vec![note])
+    } else {
+        CallToolResult::success(vec![Content::image(img.b64, img.mime), note])
     }
 }
 
@@ -267,5 +325,34 @@ impl ServerHandler for Fetchira {
                  to force a specific backend (it is used even if its quota looks spent); otherwise \
                  providers are tried in the user's priority order with automatic failover.",
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::OutImage;
+
+    #[test]
+    fn image_result_writes_explicit_path() {
+        let dest = std::env::temp_dir().join("fetchira-test-img.png");
+        let _ = std::fs::remove_file(&dest);
+        let img = OutImage {
+            mime: "image/png".into(),
+            b64: base64::engine::general_purpose::STANDARD.encode(b"fakepng"),
+        };
+        let out = image_result(img, Some(dest.to_string_lossy().into_owned()));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fakepng");
+        assert_eq!(out.content.len(), 1);
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn image_result_bad_b64_is_error() {
+        let img = OutImage {
+            mime: "image/png".into(),
+            b64: "%%%".into(),
+        };
+        assert_eq!(image_result(img, None).is_error, Some(true));
     }
 }

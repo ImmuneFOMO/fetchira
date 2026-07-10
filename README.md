@@ -332,7 +332,8 @@ hands back a `session` you call again to fetch the finished report. Grok runs de
 on its heavy tier (no plan step), and exa / parallel do true multi-round research over the API.
 
 **Images and file Q&A.** `create_image` generates from a text prompt — grok and gemini render
-in-process over HTTP, chatgpt drives the browser; it returns the image bytes, not a link. To ask
+in-process over HTTP, chatgpt drives the browser. The image is written to disk and the result
+names the file (pass `path` to pick where; default `~/.config/fetchira/images/`). To ask
 about local files or images, pass their paths as `file` (an array) on `search` or `deep_research`
 (defaults to grok). Both take an optional `provider` and fail over like everything else.
 

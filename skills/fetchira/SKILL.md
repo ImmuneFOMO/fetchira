@@ -17,8 +17,9 @@ first (see the project README); these tools then appear as `search`, `read`, `de
 - **`read`** — fetch ONE known URL as clean markdown (article, doc, README).
 - **`deep_research`** — a thorough, multi-source report with citations. Slower (seconds to minutes).
 - **`browser`** — load a JS-heavy page in a headless browser and get its content.
-- **`create_image`** — generate an image from a prompt via a logged-in web account (chatgpt_web).
-  Returns markdown `![](url)`; the URL is session-scoped (auth-gated), not a public CDN link.
+- **`create_image`** — generate an image from a prompt via a logged-in web account
+  (gemini_web / grok_web / chatgpt_web). The image is saved to disk and the result names the
+  file — pass `path` (absolute) to save it where you need it, e.g. into the repo.
 - **`usage`** — show remaining free quota per account (and, for chatgpt_web, live per-tool limits).
 
 Prefer `search` for quick facts and `read` when you already have the URL. Reach for `deep_research`
