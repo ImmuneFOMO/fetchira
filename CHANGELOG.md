@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.10...v0.1.11) - 2026-07-13
+
+### Added
+
+- *(update)* schema-aware gate with instance registry + idle waiter
+- *(ui)* self-restart after update + periodic update check
+
+### Fixed
+
+- *(ui)* auto-dismiss getting started once all steps are done
+
 ## [0.1.10](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.9...v0.1.10) - 2026-07-13
 
 ### Fixed
