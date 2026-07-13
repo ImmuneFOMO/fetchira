@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         Some("proxy") => return cli::proxy(&home, args).await,
         Some("priority") => return cli::priority(&home, args),
         Some("ui") => return fetchira::ui::run(&home).await,
-        Some("update") => return fetchira::update::run(&home).await,
+        Some("update") => return fetchira::update::run(&home, args).await,
         Some("--version") | Some("-V") | Some("version") => {
             println!("fetchira {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -81,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
     let store = Store::open(&cfg.db_path).await?;
     let router = Router::build(cfg, store).await?;
     let server = Fetchira::new(Arc::new(router));
+    // Registry entry for the schema-aware updater ("which tools still run an old fetchira").
+    let _run = fetchira::instances::register(&home, "mcp");
 
     tracing::info!(
         "fetchira ready; serving MCP over stdio (home: {})",

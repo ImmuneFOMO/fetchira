@@ -169,11 +169,29 @@ pub enum Outcome {
     Brew,
     UpToDate,
     Updated(String),
+    /// The release changes the DB schema and old-version fetchira processes are still
+    /// running — swapping now would break them on their next DB open.
+    Blocked {
+        latest: String,
+        instances: Vec<crate::instances::Instance>,
+    },
+}
+
+/// The `schema-version` release asset, or None when the release predates it (= no break).
+async fn fetch_schema(client: &reqwest::Client, tag: &str) -> Option<i64> {
+    // Test hook: lets the blocked flow be exercised before a real schema bump exists.
+    if let Ok(v) = std::env::var("FETCHIRA_REMOTE_SCHEMA") {
+        return v.parse().ok();
+    }
+    let url = format!("https://github.com/{REPO}/releases/download/{tag}/schema-version");
+    let resp = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    resp.text().await.ok()?.trim().parse().ok()
 }
 
 /// Download the latest release for this platform and replace the binary in place.
-/// Shared by `fetchira update` and the dashboard's Update button.
-pub async fn perform(home: &Path) -> anyhow::Result<Outcome> {
+/// Shared by `fetchira update`, the dashboard's Update button, and the idle waiter
+/// (`force` skips the schema gate — the waiter only runs once every process has exited).
+pub async fn perform(home: &Path, force: bool) -> anyhow::Result<Outcome> {
     if is_brew_managed() {
         return Ok(Outcome::Brew);
     }
@@ -184,6 +202,19 @@ pub async fn perform(home: &Path) -> anyhow::Result<Outcome> {
     write_cache(home, &latest.to_string());
     if latest <= current() {
         return Ok(Outcome::UpToDate);
+    }
+    if !force {
+        if let Some(remote) = fetch_schema(&client, &tag).await {
+            if remote > crate::usage::SCHEMA {
+                let instances = crate::instances::running(home, &[std::process::id()]);
+                if !instances.is_empty() {
+                    return Ok(Outcome::Blocked {
+                        latest: latest.to_string(),
+                        instances,
+                    });
+                }
+            }
+        }
     }
     let triple = target_triple().context(
         "no prebuilt binary for this platform — reinstall via install.sh or `cargo install`",
@@ -196,13 +227,95 @@ pub async fn perform(home: &Path) -> anyhow::Result<Outcome> {
     Ok(Outcome::Updated(latest.to_string()))
 }
 
-/// `fetchira update` — the CLI face of `perform`.
-pub async fn run(home: &Path) -> anyhow::Result<()> {
+fn marker_path(home: &Path) -> PathBuf {
+    home.join("update-pending.json")
+}
+
+/// The live idle-wait marker for the dashboard, or None (a dead waiter or an already-applied
+/// target drops the marker).
+pub fn pending(home: &Path) -> Option<serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(marker_path(home)).ok()?).ok()?;
+    let pid = v.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+    let target = Version::parse(v.get("target").and_then(|t| t.as_str()).unwrap_or("")).ok();
+    if !crate::instances::alive(pid) || target.is_some_and(|t| t <= current()) {
+        let _ = std::fs::remove_file(marker_path(home));
+        return None;
+    }
+    Some(v)
+}
+
+/// `fetchira update --when-idle`: wait until every other fetchira process has exited, then
+/// update. Spawned detached by the dashboard; runs in the foreground from a terminal.
+pub async fn wait_idle(home: &Path) -> anyhow::Result<()> {
+    if pending(home).is_some() {
+        println!("an idle update is already pending");
+        return Ok(());
+    }
+    let client = client(Duration::from_secs(10)).context("could not build http client")?;
+    let (_, latest) = fetch_latest(&client)
+        .await
+        .context("could not check the latest release")?;
+    if latest <= current() {
+        println!("already up to date");
+        return Ok(());
+    }
+    let me = std::process::id();
+    std::fs::write(
+        marker_path(home),
+        serde_json::json!({ "pid": me, "target": latest.to_string() }).to_string(),
+    )?;
+    println!("waiting to update to {latest} until all fetchira processes exit…");
+    let mut last = usize::MAX;
+    let res = loop {
+        let alive = crate::instances::running(home, &[me]);
+        if alive.is_empty() {
+            break perform(home, true).await;
+        }
+        if alive.len() != last {
+            last = alive.len();
+            println!("  {} process(es) still running", alive.len());
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    };
+    let _ = std::fs::remove_file(marker_path(home));
+    match res? {
+        Outcome::Updated(v) => println!("updated fetchira to {v}"),
+        Outcome::UpToDate => println!("already up to date"),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `fetchira update [--when-idle]` — the CLI face of `perform`.
+pub async fn run(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    if args.next().as_deref() == Some("--when-idle") {
+        return wait_idle(home).await;
+    }
     println!("fetchira {}", current());
-    match perform(home).await? {
+    match perform(home, false).await? {
         Outcome::Brew => println!("installed via Homebrew — run `brew upgrade fetchira`"),
         Outcome::UpToDate => println!("already up to date"),
         Outcome::Updated(v) => println!("updated fetchira to {v} — restart any running instances"),
+        Outcome::Blocked { latest, instances } => {
+            println!(
+                "fetchira {latest} changes the database format; {} fetchira process(es) are still running:",
+                instances.len()
+            );
+            for i in &instances {
+                println!(
+                    "  {:>7}  {:<4} {:<9} {}",
+                    i.pid,
+                    i.mode,
+                    i.version.as_deref().unwrap_or("?"),
+                    i.hint
+                        .as_deref()
+                        .unwrap_or("restart the tool — MCP servers respawn on launch"),
+                );
+            }
+            println!("restart them and re-run `fetchira update`,");
+            println!("or run `fetchira update --when-idle` to update once they all exit.");
+        }
     }
     Ok(())
 }

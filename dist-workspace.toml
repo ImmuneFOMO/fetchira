@@ -19,3 +19,9 @@ install-updater = false
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
+
+# Ship the checked-in schema-version file as a release asset so the updater can detect a
+# DB-schema-breaking release before swapping the binary (see src/update.rs::fetch_schema).
+[[dist.extra-artifacts]]
+artifacts = ["schema-version"]
+build = ["true"]

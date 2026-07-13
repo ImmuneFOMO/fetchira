@@ -79,6 +79,9 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         inner: RwLock::new(inner),
     });
 
+    // Registry entry for the schema-aware updater (the dashboard holds the DB open too).
+    let _run = crate::instances::register(home, "ui");
+
     // Best-effort: fill in account emails for already-logged-in accounts (otherwise missing until
     // their next login) so the dashboard shows them. Background — doesn't delay the first paint.
     tokio::spawn(backfill_identities(home.to_path_buf(), state.store.clone()));
@@ -126,6 +129,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/install/targets", get(api_install_targets))
         .route("/api/install", post(api_install))
         .route("/api/update", post(api_update))
+        .route("/api/update/idle", post(api_update_idle))
         .fallback(static_handler)
         .with_state(state);
 
@@ -270,6 +274,10 @@ async fn api_state(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
             if let Some(u) = crate::update::ui_banner(&st.home).await {
                 v["update"] = u;
             }
+            if let Some(p) = crate::update::pending(&st.home) {
+                v["update_pending"] = p;
+            }
+            v["instances"] = json!(crate::instances::running(&st.home, &[std::process::id()]));
             Json(v).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -701,6 +709,36 @@ async fn api_install(
 
 /// The dashboard's Update button: self-update in place, then tell the user to restart.
 /// Brew-managed installs can't self-replace — the response says to `brew upgrade` instead.
+/// Spawn a detached `fetchira update --when-idle` that outlives this dashboard, logging to
+/// `<home>/update.log`. The waiter updates once every fetchira process (this one too) exits.
+async fn api_update_idle(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(r) = guard_mut(&st, &headers) {
+        return r;
+    }
+    if crate::update::pending(&st.home).is_some() {
+        return Json(json!({ "ok": true, "msg": "an idle update is already pending" }))
+            .into_response();
+    }
+    let spawned = std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|exe| {
+            let log = std::fs::File::create(st.home.join("update.log"))?;
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(["update", "--when-idle"])
+                .stdin(std::process::Stdio::null())
+                .stdout(log.try_clone()?)
+                .stderr(log);
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+            cmd.spawn()?;
+            Ok(())
+        });
+    match spawned {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(unix)]
 fn restart_self(token: &str, port: u16) {
     use std::os::unix::process::CommandExt;
@@ -723,7 +761,7 @@ async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
     }
-    match crate::update::perform(&st.home).await {
+    match crate::update::perform(&st.home, false).await {
         Ok(crate::update::Outcome::Brew) => Json(json!({
             "ok": false,
             "msg": "installed via Homebrew — run `brew upgrade fetchira` in a terminal",
@@ -732,6 +770,13 @@ async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         Ok(crate::update::Outcome::UpToDate) => {
             Json(json!({ "ok": true, "msg": "already up to date" })).into_response()
         }
+        Ok(crate::update::Outcome::Blocked { latest, instances }) => Json(json!({
+            "ok": false,
+            "blocked": true,
+            "latest": latest,
+            "instances": instances,
+        }))
+        .into_response(),
         Ok(crate::update::Outcome::Updated(v)) => {
             // Flush the response, then re-exec the new binary. Running MCP servers keep the
             // old inode (in-flight work is safe) and pick the update on their next spawn.

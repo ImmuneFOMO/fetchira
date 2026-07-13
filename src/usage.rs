@@ -3,7 +3,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSy
 use sqlx::Row;
 
 use crate::config::Reset;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 #[derive(Clone)]
 pub struct Store {
@@ -79,6 +79,11 @@ pub struct DebugLog<'a> {
 const DEBUG_BODY_CAP: usize = 128 * 1024;
 const DEBUG_MAX_ROWS: i64 = 4000;
 
+/// Bump ONLY on a breaking schema change (additive `IF NOT EXISTS`/`ADD COLUMN` stays free).
+/// Must match the repo-root `schema-version` file, which ships as a release asset so the
+/// updater can refuse a breaking swap while old-version MCP servers are still running.
+pub const SCHEMA: i64 = 1;
+
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
@@ -88,6 +93,33 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal);
         let pool = SqlitePool::connect_with(opts).await?;
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?;
+        if v > SCHEMA {
+            return Err(Error::Schema(format!(
+                "database schema v{v} is newer than this fetchira (schema v{SCHEMA}) — \
+                 restart this MCP server (or update this tool's fetchira) to pick up the new binary"
+            )));
+        }
+        if v < SCHEMA && v > 0 {
+            // Structural migration (dormant while SCHEMA == 1): refuse while old-version
+            // processes hold the DB — migrating under them breaks their queries mid-flight.
+            let alive = crate::instances::running(&crate::cli::home(), &[std::process::id()]);
+            if !alive.is_empty() {
+                return Err(Error::Schema(format!(
+                    "cannot migrate the database from schema v{v} to v{SCHEMA} while {} other \
+                     fetchira process(es) run — restart them first (pids: {})",
+                    alive.len(),
+                    alive
+                        .iter()
+                        .map(|i| i.pid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            // per-version migration steps go here when SCHEMA grows past 1
+        }
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS usage (
                 provider  TEXT    NOT NULL,
@@ -174,6 +206,13 @@ impl Store {
             .execute(&pool)
             .await
             .ok();
+        if v < SCHEMA {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "PRAGMA user_version = {SCHEMA}"
+            )))
+            .execute(&pool)
+            .await?;
+        }
         Ok(Self { pool })
     }
 
@@ -614,6 +653,32 @@ pub fn period_key(reset: Reset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_version_asset_matches_const() {
+        let file: i64 = include_str!("../schema-version").trim().parse().unwrap();
+        assert_eq!(file, SCHEMA);
+    }
+
+    #[tokio::test]
+    async fn too_new_schema_is_refused() {
+        let path = std::env::temp_dir().join(format!("fetchira_schema_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {}",
+            SCHEMA + 1
+        )))
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        drop(store);
+        let Err(err) = Store::open(path.to_str().unwrap()).await else {
+            panic!("too-new schema must be refused");
+        };
+        assert!(err.to_string().contains("newer than this fetchira"));
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[tokio::test]
     async fn route_log_roundtrips() {

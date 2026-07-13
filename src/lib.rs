@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod httptrace;
+pub mod instances;
 pub mod mcp;
 pub mod providers;
 pub mod proxy;

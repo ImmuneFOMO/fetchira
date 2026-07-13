@@ -56,6 +56,9 @@ pub enum Error {
 
     #[error("{0} timed out")]
     Timeout(&'static str),
+
+    #[error("{0}")]
+    Schema(String),
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for Error {

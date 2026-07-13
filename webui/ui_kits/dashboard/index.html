@@ -70,9 +70,11 @@ function OfflineToast({ stale }) {
   );
 }
 
-function UpdateBanner({ u }) {
+function UpdateBanner({ u, pending }) {
   const [busy, setBusy] = React.useState(false);
   const [done, setDone] = React.useState(null); // { ok, msg } after the update ran
+  const [blocked, setBlocked] = React.useState(null); // { latest, instances } from a schema-gated update
+  const [idle, setIdle] = React.useState(!!pending); // an idle waiter is armed
   const brew = u.command !== 'fetchira update';
 
   const update = async () => {
@@ -80,17 +82,58 @@ function UpdateBanner({ u }) {
     setBusy(true);
     try {
       const r = await window.apiPost('/api/update');
-      setDone(r);
-      // 2.5s for the re-exec'd server to bind before the tab reloads
-      if (r.restarted) setTimeout(() => location.reload(), 2500);
+      if (r.blocked) setBlocked(r);
+      else {
+        setDone(r);
+        // 2.5s for the re-exec'd server to bind before the tab reloads
+        if (r.restarted) setTimeout(() => location.reload(), 2500);
+      }
     }
     catch (e) { setDone({ ok: false, msg: String(e.message || e) }); }
     setBusy(false);
   };
 
+  const updateWhenIdle = async () => {
+    try { await window.apiPost('/api/update/idle'); setIdle(true); }
+    catch (e) { setDone({ ok: false, msg: String(e.message || e) }); }
+  };
+
+  const box = { margin: '0 auto 16px', padding: '10px 16px', background: 'var(--lime-dim, rgba(170,230,90,0.12))', border: '1px solid rgba(170,230,90,0.35)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-ui)', fontSize: 13, color: 'var(--text-hi)' };
+  const dot = <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--lime-500)', flexShrink: 0 }} />;
+
+  if (idle) {
+    return (
+      <div style={{ ...box, display: 'flex', alignItems: 'center', gap: 10 }}>
+        {dot}
+        <span>update to <b>{(pending && pending.target) || (blocked && blocked.latest) || u.latest}</b> pending — installs once every fetchira process (this dashboard too) exits</span>
+      </div>
+    );
+  }
+
+  if (blocked) {
+    return (
+      <div style={{ ...box, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {dot}
+          <span style={{ flex: 1 }}>fetchira <b>{blocked.latest}</b> changes the data format — restart the fetchira MCP servers below first, then retry</span>
+          <Button variant="ghost" size="sm" onClick={updateWhenIdle}>Update when idle</Button>
+          <Button variant="primary" size="sm" onClick={update} disabled={busy}>{busy ? 'Checking…' : 'Retry'}</Button>
+        </div>
+        {blocked.instances.map((i) => (
+          <div key={i.pid} style={{ display: 'flex', gap: 10, alignItems: 'baseline', fontFamily: 'var(--font-mono)', fontSize: 12, paddingLeft: 17 }}>
+            <span style={{ color: 'var(--text-faint)' }}>{i.pid}</span>
+            <span style={{ color: 'var(--text-hi)', width: 40 }}>{i.mode}</span>
+            <span style={{ color: 'var(--text-faint)', width: 56 }}>{i.version || '?'}</span>
+            <span style={{ color: 'var(--text-lo)' }}>{i.hint || 'restart the tool — MCP servers respawn on launch'}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 auto 16px', padding: '10px 16px', background: 'var(--lime-dim, rgba(170,230,90,0.12))', border: '1px solid rgba(170,230,90,0.35)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-ui)', fontSize: 13, color: 'var(--text-hi)' }}>
-      <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--lime-500)', flexShrink: 0 }} />
+    <div style={{ ...box, display: 'flex', alignItems: 'center', gap: 10 }}>
+      {dot}
       {done ? (
         <span>{done.msg}</span>
       ) : (
@@ -180,7 +223,7 @@ function App() {
       </div>
 
       <main style={{ maxWidth: 'var(--container-max)', margin: '0 auto', padding: '20px' }}>
-        {window.FX.update && <UpdateBanner u={window.FX.update} />}
+        {window.FX.update && <UpdateBanner u={window.FX.update} pending={window.FX.update_pending} />}
         {phase === 'loading' ? <Loading />
           : tab === 'overview' ? <window.OverviewTab />
           : tab === 'accounts' ? <window.AccountsTab onAdd={() => setModal(true)} />
