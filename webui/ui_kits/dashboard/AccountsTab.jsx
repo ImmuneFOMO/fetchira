@@ -144,6 +144,7 @@ function ProxyModal({ label, current, onClose }) {
 // Everything beyond Test/Login lives here so the action column stays one width for every row.
 function RowMenu({ r, onLogin, onError }) {
   const [open, setOpen] = React.useState(false);
+  const [pos, setPos] = React.useState({ top: 0, right: 0 });
   const [confirmRm, setConfirmRm] = React.useState(false);
   const [paste, setPaste] = React.useState(false);
   const [edit, setEdit] = React.useState(false);
@@ -164,11 +165,16 @@ function RowMenu({ r, onLogin, onError }) {
 
   return (
     <span style={{ position: 'relative', display: 'inline-block' }}>
-      <Button size="sm" variant="ghost" onClick={() => setOpen((o) => !o)} title="more actions">⋯</Button>
+      <Button size="sm" variant="ghost" onClick={(e) => {
+        const b = e.currentTarget.getBoundingClientRect();
+        setPos({ top: b.bottom + 4, right: window.innerWidth - b.right });
+        setOpen((o) => !o);
+      }} title="more actions">⋯</Button>
       {open && (
         <React.Fragment>
           <div onClick={close} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
-          <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 41, minWidth: 170, padding: '4px 0', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
+          {/* fixed, not absolute — the table card's overflow clips absolutely-positioned children */}
+          <div style={{ position: 'fixed', right: pos.right, top: pos.top, zIndex: 41, minWidth: 170, padding: '4px 0', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}>
             {item('Rename…', () => { close(); setEdit(true); })}
             {item('Proxy…', () => { close(); setProxyEdit(true); })}
             {r.web && item('Paste session…', () => { close(); setPaste(true); })}
