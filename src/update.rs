@@ -155,6 +155,16 @@ pub async fn ui_banner(home: &Path) -> Option<serde_json::Value> {
     }))
 }
 
+/// Force a fresh check (UI startup) so a same-day release shows without waiting out the throttle.
+pub async fn refresh(home: &Path) {
+    let Some(c) = client(Duration::from_secs(5)) else {
+        return;
+    };
+    if let Ok((_, v)) = fetch_latest(&c).await {
+        write_cache(home, &v.to_string());
+    }
+}
+
 pub enum Outcome {
     Brew,
     UpToDate,

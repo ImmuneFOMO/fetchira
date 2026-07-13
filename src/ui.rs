@@ -52,6 +52,7 @@ struct Inner {
 struct AppState {
     home: PathBuf,
     token: String,
+    port: u16,
     store: Store,
     inner: RwLock<Inner>,
 }
@@ -62,10 +63,18 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     let cfg = cli::load_or_empty(home);
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let inner = build_inner(home, &store).await?;
-    let token = gen_token();
+    // A post-update re-exec passes the old token and port through so the open tab keeps working.
+    let token = std::env::var("FETCHIRA_UI_TOKEN").unwrap_or_else(|_| gen_token());
+    let port = std::env::var("FETCHIRA_UI_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(7878);
+    let listener = bind_local(port).await?;
+    let addr = listener.local_addr()?;
     let state = Arc::new(AppState {
         home: home.to_path_buf(),
         token: token.clone(),
+        port: addr.port(),
         store,
         inner: RwLock::new(inner),
     });
@@ -73,6 +82,18 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     // Best-effort: fill in account emails for already-logged-in accounts (otherwise missing until
     // their next login) so the dashboard shows them. Background — doesn't delay the first paint.
     tokio::spawn(backfill_identities(home.to_path_buf(), state.store.clone()));
+
+    // Fresh update check at launch, then every 15 min while the UI runs — the daily throttle
+    // would otherwise hide a release published after the last passive check.
+    {
+        let h = home.to_path_buf();
+        tokio::spawn(async move {
+            loop {
+                crate::update::refresh(&h).await;
+                tokio::time::sleep(Duration::from_secs(15 * 60)).await;
+            }
+        });
+    }
 
     // Keep the live-limit/balance caches warm in the background so the dashboard's cached snapshot
     // paints instantly and fills in per provider as each fetch lands — never blocking on a cold
@@ -108,8 +129,6 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .fallback(static_handler)
         .with_state(state);
 
-    let listener = bind_local(7878).await?;
-    let addr = listener.local_addr()?;
     let url = format!("http://{addr}/ui_kits/dashboard/index.html?token={token}");
     eprintln!("fetchira ui — open {url}");
     // Over SSH there's no local browser to open, and the loopback bind isn't reachable
@@ -682,6 +701,24 @@ async fn api_install(
 
 /// The dashboard's Update button: self-update in place, then tell the user to restart.
 /// Brew-managed installs can't self-replace — the response says to `brew upgrade` instead.
+#[cfg(unix)]
+fn restart_self(token: &str, port: u16) {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("FETCHIRA_UI_TOKEN", token)
+        .env("FETCHIRA_UI_PORT", port.to_string())
+        .env("FETCHIRA_NO_OPEN", "1")
+        .exec();
+    eprintln!("restart after update failed: {err}");
+}
+
+#[cfg(not(unix))]
+fn restart_self(_token: &str, _port: u16) {}
+
 async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
@@ -695,11 +732,21 @@ async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         Ok(crate::update::Outcome::UpToDate) => {
             Json(json!({ "ok": true, "msg": "already up to date" })).into_response()
         }
-        Ok(crate::update::Outcome::Updated(v)) => Json(json!({
-            "ok": true,
-            "msg": format!("updated to {v} — restart fetchira (and your MCP servers) to use it"),
-        }))
-        .into_response(),
+        Ok(crate::update::Outcome::Updated(v)) => {
+            // Flush the response, then re-exec the new binary. Running MCP servers keep the
+            // old inode (in-flight work is safe) and pick the update on their next spawn.
+            let (token, port) = (st.token.clone(), st.port);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                restart_self(&token, port);
+            });
+            Json(json!({
+                "ok": true,
+                "restarted": true,
+                "msg": format!("updated to {v} — restarting the dashboard…"),
+            }))
+            .into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }

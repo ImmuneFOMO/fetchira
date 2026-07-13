@@ -78,7 +78,12 @@ function UpdateBanner({ u }) {
   const update = async () => {
     if (busy) return;
     setBusy(true);
-    try { setDone(await window.apiPost('/api/update')); }
+    try {
+      const r = await window.apiPost('/api/update');
+      setDone(r);
+      // 2.5s for the re-exec'd server to bind before the tab reloads
+      if (r.restarted) setTimeout(() => location.reload(), 2500);
+    }
     catch (e) { setDone({ ok: false, msg: String(e.message || e) }); }
     setBusy(false);
   };
