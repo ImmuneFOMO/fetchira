@@ -138,6 +138,11 @@ function GettingStarted() {
   ];
   const doneCount = items.filter((i) => i.done).length;
   const dismiss = () => { localStorage.setItem('fx-gs-dismissed', '1'); setHidden(true); };
+  // All steps done -> self-dismiss for good (wait for the targets probe so we don't misjudge step 3).
+  if (registered !== null && doneCount === items.length && !installOpen && !modalProv) {
+    localStorage.setItem('fx-gs-dismissed', '1');
+    return null;
+  }
 
   return (
     <Card pad={0} style={{ overflow: 'hidden' }}>
