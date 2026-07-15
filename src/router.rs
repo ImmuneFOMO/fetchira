@@ -139,7 +139,12 @@ impl Router {
         } else {
             Vec::new()
         };
-        let direct = reqwest::Client::new();
+        // 300s like the web client — above any legit call (exa research is one long POST), so
+        // only a truly stalled endpoint trips it.
+        let direct = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let mut assigned = store.assignment_count().await? as usize;
         let mut buckets = Vec::with_capacity(cfg.accounts.len());
 
@@ -547,7 +552,7 @@ impl Router {
             Some((false, lq)) if !fetch => lq,
             None if !fetch => return,
             _ => {
-                let Some(lq) = b.provider.live_quota(c, deep).await else {
+                let Some(lq) = bounded(b.provider.live_quota(c, deep)).await else {
                     return;
                 };
                 if let Ok(mut m) = self.live.lock() {
@@ -580,16 +585,19 @@ impl Router {
                 // exa/parallel read their $ balance through the dashboard cookie session; the rest
                 // (serper/tavily/firecrawl/steel) through the api-key. The dashboard re-issues a
                 // rolling NextAuth token on every fetch, so re-save it to keep the session alive.
-                let fresh = match &b.balance_conn {
-                    Some(wc) => match b.provider.live_balance_web(wc).await {
-                        Some((bal, updates)) => {
-                            self.refresh_session(b, &updates).await;
-                            Some(bal)
-                        }
-                        None => None,
-                    },
-                    None => b.provider.live_balance(&b.key, c).await,
-                };
+                let fresh = bounded(async {
+                    match &b.balance_conn {
+                        Some(wc) => match b.provider.live_balance_web(wc).await {
+                            Some((bal, updates)) => {
+                                self.refresh_session(b, &updates).await;
+                                Some(bal)
+                            }
+                            None => None,
+                        },
+                        None => b.provider.live_balance(&b.key, c).await,
+                    }
+                })
+                .await;
                 if let Ok(mut m) = self.balance.lock() {
                     m.insert(b.label.clone(), (Instant::now(), fresh));
                 }
@@ -652,7 +660,7 @@ impl Router {
             None if !fetch => return None,          // nothing cached and we mustn't block
             _ => {}
         }
-        let fresh = b.provider.live_limits(c).await;
+        let fresh = bounded(b.provider.live_limits(c)).await;
         if let Ok(mut m) = self.live_limits.lock() {
             m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
         }
@@ -701,6 +709,14 @@ impl Router {
             pending: false,
         })
     }
+}
+
+/// Bound on a live limit/balance read: one stalled endpoint must never hang the usage fan-out.
+async fn bounded<T>(fut: impl std::future::Future<Output = Option<T>>) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(10), fut)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Display label for the route log: drop the `#dr` budget suffix back to the account label.

@@ -239,6 +239,32 @@ async fn forced_unsupported_errors() {
     );
 }
 
+// (h) a balance endpoint that accepts the connection and never responds must not hang usage.
+#[tokio::test]
+async fn usage_snapshot_survives_stalled_provider() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        loop {
+            if let Ok((sock, _)) = listener.accept().await {
+                open.push(sock); // hold the socket open, never respond
+            }
+        }
+    });
+
+    let store = fresh_store("h").await;
+    let buckets = vec![bucket(ProviderKind::Serper, &base, "serper-1")];
+    let router = Router::from_parts(buckets, store);
+    let views = tokio::time::timeout(std::time::Duration::from_secs(15), router.usage_snapshot())
+        .await
+        .expect("usage_snapshot hung on a stalled provider")
+        .unwrap();
+    // The live fetch timed out, so the soft counter stands in.
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].remaining, 100);
+}
+
 // (d) forced provider that is exhausted -> error, no silent switch.
 #[tokio::test]
 async fn forced_exhausted_errors() {
