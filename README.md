@@ -35,7 +35,11 @@ manage accounts without touching a config file.
 ## Quickstart
 
 ```sh
-brew install ImmuneFOMO/tap/fetchira    # or: curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
+# macOS, or Linux with Homebrew:
+brew install ImmuneFOMO/tap/fetchira
+# Linux (or macOS without Homebrew) — grabs the prebuilt binary into ~/.local/bin:
+curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
+
 fetchira                                # opens the dashboard: connect a provider, try a search, register your coding tools
 ```
 
@@ -191,7 +195,20 @@ brew install ImmuneFOMO/tap/fetchira
 curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
 ```
 
-**From source** (in a checkout — builds with cargo):
+Prebuilt Linux binaries are **x86_64** (macOS ships both Intel and Apple Silicon). On arm64
+Linux, use **Cargo** (below) to build from source.
+
+**With Cargo** — builds from source, works on any platform Rust targets (incl. arm64 Linux):
+
+```sh
+cargo install --git https://github.com/ImmuneFOMO/fetchira            # tip of main
+cargo install --git https://github.com/ImmuneFOMO/fetchira --tag v0.1.12   # pin a release
+```
+
+Needs a C toolchain + `cmake` on the build host (the TLS-impersonation dep bundles BoringSSL).
+The binary lands in `~/.cargo/bin`; update later with the same command or `fetchira update`.
+
+**From a checkout** (builds with cargo, also seeds config):
 
 ```sh
 ./install.sh          # builds, installs the binary to ~/.local/bin
