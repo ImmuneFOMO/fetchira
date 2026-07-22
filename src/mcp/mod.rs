@@ -18,29 +18,48 @@ pub struct SearchArgs {
     /// The search query (or a follow-up message when `session` is set). Optional only when polling a
     /// running deep-research `session` for its report.
     #[serde(default)]
+    #[schemars(with = "String")]
     pub query: Option<String>,
     /// Force a specific provider instead of the priority order.
+    #[serde(default)]
+    #[schemars(with = "ProviderKind")]
     pub provider: Option<ProviderKind>,
     /// Maximum number of results (default 5, capped at 20).
+    #[serde(default)]
+    #[schemars(with = "u32")]
     pub max_results: Option<u32>,
     /// Resume token from a previous web-provider result; continues that conversation
     /// on the same provider. Web providers only.
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub session: Option<String>,
     /// Web-provider model and/or thinking level (gemini "3.1 pro"/"flash", grok "grok-4",
     /// chatgpt "gpt-5.4 high"/"o3"/"high" — levels vary per model; an unknown name returns
     /// the actual options). Ignored by the API providers.
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub model: Option<String>,
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
     /// deep_research to heavy then expert).
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub mode: Option<String>,
     /// Research niche: "web" (default), "news", or "academic" — steers to a fitting backend.
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub topic: Option<String>,
     /// Recency filter: "day"/"week"/"month"/"year" or an ISO date (e.g. "2024-01-01").
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub recency: Option<String>,
     /// Restrict to these domains; prefix one with "-" to exclude it (e.g. ["nature.com","-reddit.com"]).
+    #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub domains: Option<Vec<String>>,
     /// Absolute paths of local files/images to attach and ask about. Web providers only;
     /// defaults to grok_web when no `provider` is forced.
+    #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub file: Option<Vec<String>>,
 }
 
@@ -50,6 +69,8 @@ pub struct ResearchArgs {
     pub base: SearchArgs,
     /// Depth: "standard" (default) or "deep" — deep is slower and may spend a paid balance
     /// (exa deep-reasoning, parallel pro tier, grok heavy).
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub depth: Option<String>,
 }
 
@@ -58,9 +79,13 @@ pub struct ReadArgs {
     /// The URL to read and return as clean markdown.
     pub url: String,
     /// Force a specific provider instead of the priority order.
+    #[serde(default)]
+    #[schemars(with = "ProviderKind")]
     pub provider: Option<ProviderKind>,
     /// Provider-specific escape hatch: firecrawl "crawl"/"extract"/"screenshot", tavily "extract",
     /// serper "scrape", steel "screenshot"/"pdf". Call usage(provider=…) for the exact set.
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub mode: Option<String>,
 }
 
@@ -69,6 +94,8 @@ pub struct BrowserArgs {
     /// The URL to load in a headless browser.
     pub url: String,
     /// Reserved for multi-step automation; ignored in v1.
+    #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub actions: Option<Vec<String>>,
 }
 
@@ -78,9 +105,13 @@ pub struct ImageArgs {
     pub prompt: String,
     /// Force a specific provider (gemini_web / grok_web generate in-process over HTTP; chatgpt_web
     /// drives the browser). Otherwise the priority order applies, with failover.
+    #[serde(default)]
+    #[schemars(with = "ProviderKind")]
     pub provider: Option<ProviderKind>,
     /// Absolute path to save the image to. When set, only the path is returned (no inline
     /// bytes); otherwise it is saved under the fetchira home dir and also returned inline.
+    #[serde(default)]
+    #[schemars(with = "String")]
     pub path: Option<String>,
 }
 
@@ -88,6 +119,8 @@ pub struct ImageArgs {
 pub struct UsageArgs {
     /// A provider to get the full capability sheet for (niches, modes, example calls + live limits).
     /// Omit for the compact all-provider quota snapshot.
+    #[serde(default)]
+    #[schemars(with = "ProviderKind")]
     pub provider: Option<ProviderKind>,
 }
 
@@ -354,5 +387,74 @@ mod tests {
             b64: "%%%".into(),
         };
         assert_eq!(image_result(img, None).is_error, Some(true));
+    }
+
+    #[test]
+    fn tool_input_schemas_omit_nullable_optional_fields() {
+        fn assert_schema_is_non_nullable(value: &serde_json::Value, path: &str) {
+            if let Some(nullable) = value.get("nullable") {
+                panic!("{path}.nullable must be absent, got {nullable}");
+            }
+            if value.get("type") == Some(&serde_json::Value::String("null".into())) {
+                panic!("{path}.type must not be null");
+            }
+            if value
+                .get("type")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|types| types.iter().any(|item| item == "null"))
+            {
+                panic!("{path}.type must not contain null");
+            }
+
+            match value {
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        assert_schema_is_non_nullable(item, &format!("{path}[{index}]"));
+                    }
+                }
+                serde_json::Value::Object(fields) => {
+                    for (key, item) in fields {
+                        assert_schema_is_non_nullable(item, &format!("{path}.{key}"));
+                    }
+                }
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
+            }
+        }
+
+        let tools = Fetchira::tool_router().list_all();
+        assert_eq!(tools.len(), 6);
+
+        let expected_required = [
+            ("search", &[][..]),
+            ("deep_research", &[][..]),
+            ("read", &["url"][..]),
+            ("browser", &["url"][..]),
+            ("create_image", &["prompt"][..]),
+            ("usage", &[][..]),
+        ];
+
+        for tool in tools {
+            let schema = serde_json::to_value(tool.input_schema).expect("schema must serialize");
+            assert_schema_is_non_nullable(&schema, &tool.name);
+            let required = schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| item.as_str().expect("required names are strings"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let expected = expected_required
+                .iter()
+                .find(|(name, _)| *name == tool.name)
+                .map(|(_, fields)| fields.to_vec())
+                .expect("unexpected tool");
+            assert_eq!(required, expected, "required fields for {}", tool.name);
+        }
     }
 }
