@@ -296,22 +296,33 @@ impl Router {
                         }
                         res
                     }
-                    // chatgpt.com gates generation behind an anti-bot defense pure HTTP can't pass, so
-                    // it drives a real browser with the captured cookies. A deep-research poll is a
-                    // plain GET (not gated), so resume it over HTTP instead of relaunching a browser.
-                    Conn::Web(c, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
-                        if input
-                            .session
-                            .as_deref()
-                            .is_some_and(|s| s.starts_with("dr|poll|"))
-                        {
-                            b.provider.call_web(c, cap, input).await
-                        } else {
-                            providers::chatgpt_browser::run(cookies, cap, input).await
-                        }
+                    Conn::Web(_, cookies)
+                        if b.provider.kind == ProviderKind::ChatgptWeb
+                            && input.session.as_deref().is_some_and(|s| {
+                                s.strip_prefix("chatgpt_web:")
+                                    .unwrap_or(s)
+                                    .starts_with("dr|poll|")
+                            }) =>
+                    {
+                        providers::chatgpt_browser::run(cookies, cap, input).await
                     }
-                    Conn::Web(c, _) => b.provider.call_web(c, cap, input).await,
+                    // ChatGPT drives a real browser for chat / deep-research / image. The pure-HTTP
+                    // turn (chatgpt_web) is blocked by OpenAI's "unusual activity" anti-bot gate
+                    // (429/403) that the cookie client can't pass even with a freshly-minted sentinel
+                    // token, so the turn always goes through the browser. chatgpt_web is still used
+                    // for cookie-only reads (limits / tier / identity), which aren't anti-bot gated.
+                    Conn::Web(_, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
+                        providers::chatgpt_browser::run(cookies, cap, input).await
+                    }
+                    Conn::Web(c, _) => b.provider.call_web(c, cap, input, &b.label).await,
                 };
+                // Persist rotated session cookies a web turn captured on a bearer cache-miss, so the
+                // next process starts from the freshest token (keeps the session alive across procs).
+                if let Ok(out) = &res {
+                    if !out.cookie_updates.is_empty() {
+                        self.refresh_session(b, &out.cookie_updates).await;
+                    }
+                }
                 let latency = t0.elapsed().as_millis() as i64;
                 let acct = strip_dr(&blabel);
                 // Firehose: every attempt (success or failure, incl. a 403 body) lands here.
@@ -660,7 +671,14 @@ impl Router {
             None if !fetch => return None,          // nothing cached and we mustn't block
             _ => {}
         }
-        let fresh = bounded(b.provider.live_limits(c)).await;
+        let fresh = bounded(b.provider.live_limits(c, &b.label)).await;
+        // Persist any rotated session cookies captured on a bearer cache-miss, so the next process
+        // starts from the freshest token instead of rotating from a stale one.
+        if let Some(ll) = &fresh {
+            if !ll.cookie_updates.is_empty() {
+                self.refresh_session(b, &ll.cookie_updates).await;
+            }
+        }
         if let Ok(mut m) = self.live_limits.lock() {
             m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
         }

@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use regex::Regex;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 use super::chatgpt_sentinel::Ctx;
 use super::{
@@ -33,15 +35,16 @@ pub async fn call(
     client: &wreq::Client,
     cap: Capability,
     input: &Input,
+    acct: &str,
 ) -> Result<Outcome> {
     match cap {
-        Capability::Search => chat(base, client, input).await,
-        Capability::DeepResearch => deep_research(base, client, input).await,
+        Capability::Search => chat(base, client, input, acct).await,
+        Capability::DeepResearch => deep_research(base, client, input, acct).await,
         _ => Err(Error::Unsupported("chatgpt_web")),
     }
 }
 
-async fn chat(base: &str, client: &wreq::Client, input: &Input) -> Result<Outcome> {
+async fn chat(base: &str, client: &wreq::Client, input: &Input, acct: &str) -> Result<Outcome> {
     let query = input.need_query()?;
     let model = model_slug(input.model.as_deref());
     let hints: &[&str] = if web_search_on(input) {
@@ -51,41 +54,50 @@ async fn chat(base: &str, client: &wreq::Client, input: &Input) -> Result<Outcom
     };
     let resume = parse_session(input.session.as_deref());
     let parent = resume.as_ref().map(|(_, p)| p.as_str());
+    let convo = resume.as_ref().map(|(c, _)| c.as_str());
 
-    let mut ctx = build_ctx(base, client).await?;
-    ctx.conduit = conduit_prepare(base, client, &ctx, &model, hints, parent).await?;
+    let (mut ctx, updates) = build_ctx(base, client, acct).await?;
+    ctx.conduit = conduit_prepare(base, client, &ctx, &model, hints, parent, convo).await?;
     let token = chatgpt_sentinel::token(base, client, &ctx).await?;
 
     let msg = message_node(query, hints, false);
-    let body = conv_body(json!([msg]), &model, hints, parent);
+    let body = conv_body(json!([msg]), &model, hints, parent, convo);
     let cid = run_turn(base, client, &ctx, &token, &body, true).await?;
     let conv = get_conversation(base, client, &ctx, &cid).await?;
     let mut out = extract_answer(&conv)?;
     out.session = Some(session_token(&conv, &cid));
+    out.cookie_updates = updates;
     Ok(out)
 }
 
-async fn deep_research(base: &str, client: &wreq::Client, input: &Input) -> Result<Outcome> {
+async fn deep_research(
+    base: &str,
+    client: &wreq::Client,
+    input: &Input,
+    acct: &str,
+) -> Result<Outcome> {
     // Poll an in-flight run (cheap, no PoW/conduit, charges nothing).
     if let Some(cid) = input
         .session
         .as_deref()
         .and_then(|s| s.strip_prefix("dr|poll|"))
     {
-        let ctx = build_ctx(base, client).await?;
-        return wait_for_dr(base, client, &ctx, cid, POLL_WAIT, 0).await;
+        let (ctx, updates) = build_ctx(base, client, acct).await?;
+        let mut out = wait_for_dr(base, client, &ctx, cid, POLL_WAIT, 0).await?;
+        out.cookie_updates = updates;
+        return Ok(out);
     }
 
     let query = input.need_query()?;
     let model = model_slug(input.model.as_deref());
     let hints: &[&str] = &[DR_HINT];
 
-    let mut ctx = build_ctx(base, client).await?;
-    ctx.conduit = conduit_prepare(base, client, &ctx, &model, hints, None).await?;
+    let (mut ctx, updates) = build_ctx(base, client, acct).await?;
+    ctx.conduit = conduit_prepare(base, client, &ctx, &model, hints, None, None).await?;
     let token = chatgpt_sentinel::token(base, client, &ctx).await?;
 
     let msg = message_node(query, hints, true);
-    let body = conv_body(json!([msg]), &model, hints, None);
+    let body = conv_body(json!([msg]), &model, hints, None, None);
     let cid = run_turn(base, client, &ctx, &token, &body, false).await?;
 
     if is_background(input) {
@@ -96,9 +108,12 @@ async fn deep_research(base: &str, client: &wreq::Client, input: &Input) -> Resu
             1,
         );
         out.session = Some(format!("dr|poll|{cid}"));
+        out.cookie_updates = updates;
         return Ok(out);
     }
-    wait_for_dr(base, client, &ctx, &cid, KICKOFF_WAIT, 1).await
+    let mut out = wait_for_dr(base, client, &ctx, &cid, KICKOFF_WAIT, 1).await?;
+    out.cookie_updates = updates;
+    Ok(out)
 }
 
 /// Poll the conversation until the deep-research widget reports `completed`, the deadline passes, or
@@ -141,9 +156,10 @@ async fn conduit_prepare(
     model: &str,
     hints: &[&str],
     parent: Option<&str>,
+    convo: Option<&str>,
 ) -> Result<String> {
     let path = "/backend-api/f/conversation/prepare";
-    let body = conv_body(json!([]), model, hints, parent);
+    let body = conv_body(json!([]), model, hints, parent, convo);
     let resp = ctx
         .apply(client.post(format!("{base}{path}")), path)
         .body(body.to_string())
@@ -152,6 +168,9 @@ async fn conduit_prepare(
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     if status >= 400 {
+        if status == 401 || status == 403 {
+            invalidate_ctx().await;
+        }
         return Err(Error::Provider {
             provider: "chatgpt_web",
             status,
@@ -195,6 +214,7 @@ async fn run_turn(
                 ));
             }
             chatgpt_sentinel::invalidate().await;
+            invalidate_ctx().await;
             return Err(session_err());
         }
         429 => return Err(Error::RateLimit("chatgpt_web: rate limited".into())),
@@ -251,15 +271,41 @@ async fn get_conversation(
     Ok(serde_json::from_str(&resp.text().await?)?)
 }
 
-/// Bearer + account id (from `/api/auth/session` and the JWT) + the stable client identifiers.
-async fn build_ctx(base: &str, client: &wreq::Client) -> Result<Ctx> {
-    let text = client
+// `/api/auth/session` rotates the chunked NextAuth session-token (`__Secure-next-auth.session-token.0/.1`)
+// on every hit; the cookie jar can't keep both chunks in sync across rapid rotations, and after a few
+// the reassembled token decodes to a stale (expired) accessToken — the session dies. The accessToken is
+// good for ~34h, so we mint it once per account and reuse it until it nears expiry instead of re-fetching.
+static CTX: LazyLock<Mutex<HashMap<String, (String, String)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const BEARER_MARGIN: i64 = 300;
+
+pub(crate) async fn invalidate_ctx() {
+    CTX.lock().await.clear();
+}
+
+/// Bearer + account id for an account, minted from `/api/auth/session` once and cached until near
+/// expiry. Re-hitting that endpoint rotates the chunked NextAuth session cookie, and rapid
+/// rotations desync the two chunks → a stale accessToken → the session dies; caching stops the
+/// churn. On a cache miss we also hand back the response's `Set-Cookie` updates so the caller can
+/// persist the freshly-rotated token (keeps the refresh chain alive across processes).
+async fn ensure_bearer(
+    base: &str,
+    client: &wreq::Client,
+    acct: &str,
+) -> Result<(String, String, Vec<(String, String)>)> {
+    let mut cache = CTX.lock().await;
+    if let Some((bearer, account_id)) = cache.get(acct) {
+        if jwt_exp_in(bearer) > BEARER_MARGIN {
+            return Ok((bearer.clone(), account_id.clone(), Vec::new()));
+        }
+    }
+    let resp = client
         .get(format!("{base}/api/auth/session"))
         .send()
-        .await?
-        .text()
-        .await
-        .unwrap_or_default();
+        .await?;
+    let updates = crate::web::set_cookie_updates(resp.headers());
+    let text = resp.text().await.unwrap_or_default();
     let sess: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let bearer = sess
         .get("accessToken")
@@ -270,16 +316,36 @@ async fn build_ctx(base: &str, client: &wreq::Client) -> Result<Ctx> {
             body: "no session token; run `fetchira login chatgpt_web`".into(),
         })?
         .to_string();
+    // A dead refresh chain makes `/api/auth/session` keep handing back an already-expired
+    // accessToken — caching it would loop forever, so bail loudly and let the caller re-login.
+    if jwt_exp_in(&bearer) <= BEARER_MARGIN {
+        return Err(session_err());
+    }
     let account_id = account_from_jwt(&bearer).unwrap_or_default();
+    cache.insert(acct.to_string(), (bearer.clone(), account_id.clone()));
+    Ok((bearer, account_id, updates))
+}
+
+/// Client identity for a turn (cached bearer + account id + the stable device/session ids). Returns
+/// the `Set-Cookie` updates captured on a bearer cache-miss, for the caller to persist.
+async fn build_ctx(
+    base: &str,
+    client: &wreq::Client,
+    acct: &str,
+) -> Result<(Ctx, Vec<(String, String)>)> {
+    let (bearer, account_id, updates) = ensure_bearer(base, client, acct).await?;
     let build = chatgpt_sentinel::build_id(base, client).await?;
-    Ok(Ctx {
-        bearer,
-        account_id,
-        device_id: device_id().to_string(),
-        session_id: session_id().to_string(),
-        build,
-        conduit: "no-token".into(),
-    })
+    Ok((
+        Ctx {
+            bearer,
+            account_id,
+            device_id: device_id().to_string(),
+            session_id: session_id().to_string(),
+            build,
+            conduit: "no-token".into(),
+        },
+        updates,
+    ))
 }
 
 fn account_from_jwt(bearer: &str) -> Option<String> {
@@ -292,6 +358,24 @@ fn account_from_jwt(bearer: &str) -> Option<String> {
         .and_then(|a| a.get("chatgpt_account_id"))
         .and_then(|x| x.as_str())
         .map(str::to_string)
+}
+
+fn jwt_exp_in(bearer: &str) -> i64 {
+    let Some(payload) = bearer.split('.').nth(1) else {
+        return -1;
+    };
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return -1;
+    };
+    let exp = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("exp").and_then(Value::as_i64))
+        .unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    exp - now
 }
 
 fn email_from_jwt(bearer: &str) -> Option<String> {
@@ -322,8 +406,14 @@ fn message_node(query: &str, hints: &[&str], dr: bool) -> Value {
 
 /// A full conversation-shaped body (the wire shape the server validates). `messages` is `[]` for the
 /// conduit prepare and `[msg]` for the actual turn.
-fn conv_body(messages: Value, model: &str, hints: &[&str], parent: Option<&str>) -> Value {
-    json!({
+fn conv_body(
+    messages: Value,
+    model: &str,
+    hints: &[&str],
+    parent: Option<&str>,
+    convo: Option<&str>,
+) -> Value {
+    let mut body = json!({
         "action": "next",
         "messages": messages,
         "parent_message_id": parent.unwrap_or("client-created-root"),
@@ -350,7 +440,11 @@ fn conv_body(messages: Value, model: &str, hints: &[&str], parent: Option<&str>)
         },
         "paragen_cot_summary_display_override": "allow",
         "force_parallel_switch": "auto",
-    })
+    });
+    if let Some(cid) = convo {
+        body["conversation_id"] = json!(cid);
+    }
+    body
 }
 
 /// Latest visible assistant answer in the conversation (chat / web-search turns).
@@ -363,9 +457,12 @@ pub(crate) fn extract_answer(conv: &Value) -> Result<Outcome> {
 pub(crate) fn extract_answer_after(conv: &Value, after: f64) -> Result<Outcome> {
     let mut best: Option<(f64, &Value)> = None;
     for m in nodes(conv) {
-        if role(m) != "assistant" || recipient(m) != "all" || hidden(m) {
+        if role(m) != "assistant" || hidden(m) {
             continue;
         }
+        // Current ChatGPT responses may omit `recipient` (or use a tool-specific recipient)
+        // even though they are visible assistant messages. Keep the legacy `all` path while
+        // accepting any non-empty visible assistant response.
         let t = create_time(m);
         if t <= after || text_parts(m).trim().is_empty() {
             continue;
@@ -384,12 +481,7 @@ pub(crate) fn extract_answer_after(conv: &Value, after: f64) -> Result<Outcome> 
 pub(crate) fn last_assistant_time(conv: &Value) -> f64 {
     nodes(conv)
         .iter()
-        .filter(|m| {
-            role(m) == "assistant"
-                && recipient(m) == "all"
-                && !hidden(m)
-                && !text_parts(m).trim().is_empty()
-        })
+        .filter(|m| role(m) == "assistant" && !hidden(m) && !text_parts(m).trim().is_empty())
         .map(|m| create_time(m))
         .fold(f64::NEG_INFINITY, f64::max)
 }
@@ -435,10 +527,6 @@ fn role(m: &Value) -> &str {
     m.pointer("/author/role")
         .and_then(|x| x.as_str())
         .unwrap_or("")
-}
-
-fn recipient(m: &Value) -> &str {
-    m.get("recipient").and_then(|x| x.as_str()).unwrap_or("")
 }
 
 fn hidden(m: &Value) -> bool {
@@ -499,7 +587,7 @@ fn collect_refs(meta: Option<&Value>, out: &mut Vec<String>) {
 }
 
 /// `<conversation_id>|<latest assistant message id>` — passed back as `session` to continue the thread.
-fn session_token(conv: &Value, cid: &str) -> String {
+pub(crate) fn session_token(conv: &Value, cid: &str) -> String {
     let mut best: Option<(f64, &str)> = None;
     for m in nodes(conv) {
         if role(m) != "assistant" {
@@ -528,22 +616,11 @@ fn parse_session(s: Option<&str>) -> Option<(String, String)> {
 /// Live per-tier limits: the tool allowances from `conversation/init` plus the subscription plan.
 /// All three calls are plain authenticated reads (not behind the generation anti-bot gate), so the
 /// lightweight cookie client handles them — no browser needed.
-pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimits> {
-    let sess = client
-        .get(format!("{base}/api/auth/session"))
-        .send()
-        .await?
-        .text()
-        .await
-        .unwrap_or_default();
-    let bearer = serde_json::from_str::<Value>(&sess)
-        .ok()
-        .and_then(|s| s["accessToken"].as_str().map(str::to_string))
-        .ok_or(Error::Provider {
-            provider: "chatgpt_web",
-            status: 401,
-            body: "no session; run `fetchira login chatgpt_web`".into(),
-        })?;
+pub(crate) async fn limits(base: &str, client: &wreq::Client, acct: &str) -> Result<LiveLimits> {
+    // Shares the bearer cache with the turn path, so polling limits doesn't re-hit
+    // `/api/auth/session` (which rotates the session cookie); the captured `Set-Cookie` updates are
+    // handed back for the router to persist.
+    let (bearer, _account_id, updates) = ensure_bearer(base, client, acct).await?;
     let auth = format!("Bearer {bearer}");
 
     let init: Value = {
@@ -580,12 +657,13 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
         }));
     }
 
-    let tier = account_tier(base, client, &auth).await;
+    let tier = friendly_plan(account_tier(base, client, &auth).await);
     let models = model_catalog(base, client, &auth).await;
     Ok(LiveLimits {
         tier,
         features,
         models,
+        cookie_updates: updates,
     })
 }
 
@@ -716,10 +794,48 @@ async fn account_tier(base: &str, client: &wreq::Client, auth: &str) -> Option<S
         .ok()?;
     let v: Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
     v["accounts"].as_object()?.values().find_map(|a| {
-        a.pointer("/entitlement/subscription_plan")
+        // `account.plan_type` is the real current tier ("free"/"plus"/"pro"/"max"/"team").
+        // `entitlement.subscription_plan` is the upsell OFFER — it reads "chatgptplusplan" even on a
+        // free account — so it's only a fallback for shapes that lack `plan_type`.
+        a.pointer("/account/plan_type")
             .and_then(|x| x.as_str())
+            .or_else(|| {
+                a.pointer("/entitlement/subscription_plan")
+                    .and_then(|x| x.as_str())
+            })
             .map(str::to_string)
     })
+}
+
+/// OpenAI's `subscription_plan` (`chatgptplusplan`, `chatgptmax20plan`, …) → a short badge
+/// (`Plus`, `Max 20×`, …) for the account listings. A logged-in account with no paid plan reads
+/// `free` (mirrors grok's `friendly_tier`), so free accounts still get a badge.
+fn friendly_plan(raw: Option<String>) -> Option<String> {
+    let Some(raw) = raw else {
+        return Some("free".into());
+    };
+    let lower = raw.to_ascii_lowercase();
+    let stripped = lower.strip_prefix("chatgpt").unwrap_or(&lower);
+    let key = stripped.strip_suffix("plan").unwrap_or(stripped);
+    Some(match key {
+        "" | "free" => "free".to_string(),
+        "plus" => "Plus".into(),
+        "pro" => "Pro".into(),
+        "team" => "Team".into(),
+        "enterprise" => "Enterprise".into(),
+        "max" => "Max".into(),
+        "max5" => "Max 5×".into(),
+        "max20" => "Max 20×".into(),
+        _ => capitalize(key),
+    })
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
 }
 
 /// Web search is on by default for the search capability; `mode` of chat/off/none turns it off.
@@ -831,6 +947,16 @@ data: {"v":{"conversation_id":"6a43081a-099c-83eb-b23b-092573129b5e","message":{
     }
 
     #[test]
+    fn extracts_assistant_without_recipient() {
+        let conv = json!({"mapping": {
+            "x": {"message": {"author": {"role": "assistant"}, "create_time": 4.0,
+                "content": {"content_type": "text", "parts": ["current"]}}}
+        }});
+        let out = extract_answer(&conv).unwrap();
+        assert_eq!(out.text, "current");
+    }
+
+    #[test]
     fn dr_report_from_widget_state() {
         let ws = json!({
             "status": "completed",
@@ -854,5 +980,44 @@ data: {"v":{"conversation_id":"6a43081a-099c-83eb-b23b-092573129b5e","message":{
             "x": {"message": {"metadata": {"chatgpt_sdk": {"widget_state": ws}}}}
         }});
         assert!(dr_report(&conv).is_none());
+    }
+
+    #[test]
+    fn friendly_plan_badges() {
+        assert_eq!(friendly_plan(None).as_deref(), Some("free"));
+        assert_eq!(
+            friendly_plan(Some("chatgptfreeplan".into())).as_deref(),
+            Some("free")
+        );
+        assert_eq!(
+            friendly_plan(Some("chatgptplusplan".into())).as_deref(),
+            Some("Plus")
+        );
+        assert_eq!(
+            friendly_plan(Some("chatgptproplan".into())).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            friendly_plan(Some("chatgptmaxplan".into())).as_deref(),
+            Some("Max")
+        );
+        assert_eq!(
+            friendly_plan(Some("chatgptmax5plan".into())).as_deref(),
+            Some("Max 5×")
+        );
+        assert_eq!(
+            friendly_plan(Some("chatgptmax20plan".into())).as_deref(),
+            Some("Max 20×")
+        );
+        assert_eq!(
+            friendly_plan(Some("chatgptteamplan".into())).as_deref(),
+            Some("Team")
+        );
+        // `account.plan_type` hands back bare lower-case tiers (the real current plan).
+        assert_eq!(friendly_plan(Some("free".into())).as_deref(), Some("free"));
+        assert_eq!(friendly_plan(Some("plus".into())).as_deref(), Some("Plus"));
+        assert_eq!(friendly_plan(Some("pro".into())).as_deref(), Some("Pro"));
+        assert_eq!(friendly_plan(Some("max".into())).as_deref(), Some("Max"));
+        assert_eq!(friendly_plan(Some("team".into())).as_deref(), Some("Team"));
     }
 }

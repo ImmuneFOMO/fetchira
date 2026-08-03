@@ -256,7 +256,11 @@ fn profile_dir(home: &Path, tag: &str, label: &str) -> PathBuf {
 /// purpose. With no pick, `FETCHIRA_BROWSER=chrome|firefox` pins one, else Chrome then Firefox.
 fn browser_candidates(pick: Option<&str>) -> Vec<Browser> {
     let chromium = || {
-        find_bin(CHROMIUM_BINS).map(|bin| Browser {
+        let bin = std::env::var_os("FETCHIRA_CHROMIUM_BIN")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| find_bin(CHROMIUM_BINS));
+        bin.map(|bin| Browser {
             kind: BrowserKind::Chromium,
             bin,
         })
@@ -359,33 +363,111 @@ async fn capture_chromium(
         .kill_on_drop(true)
         .spawn()?;
 
-    let ws_url = wait_for_page(port).await?;
-    let (ws, _) = tokio_tungstenite::connect_async(ws_url.as_str()).await?;
-    let mut src = Cdp { ws, id: 1 };
-    send_cmd(&mut src.ws, 1, "Network.enable", Value::Null).await?;
-    // The auth cookie alone can be present while signed out (Google), so wait for a real login.
-    if let Some(check) = login_check {
-        wait_logged_in(&mut src, check).await?;
-    }
-    // Capture first (on the stable signed-in page), then swap the page for our confirmation so the
-    // user isn't left staring at the provider UI while the window closes.
-    let session = capture(&mut src, domain, auth).await;
-    show_done(&mut src).await;
-    // Capture done → close the window ourselves so the user isn't left with a stray browser (and
-    // tempted to close it mid-capture). Browser.close quits cleanly; kill is the backstop.
-    let _ = timeout(
-        Duration::from_secs(3),
-        send_cmd(&mut src.ws, src.id + 1, "Browser.close", Value::Null),
-    )
-    .await;
+    let session = capture_login(port, domain, auth, login_check).await;
     let _ = child.kill().await;
     session
 }
 
-/// Replace the current page with a fetchira "login done" confirmation (best-effort). Overwriting the
-/// document leaves cookies untouched, so the capture that follows still sees the session.
+/// Connect to Chrome's page target and capture the signed-in session. Login pages redirect (e.g.
+/// chatgpt.com → auth.openai.com → back), which resets the CDP connection bound to the old page
+/// target; Chrome itself stays up, so on a connection reset we reconnect to the current page target
+/// and keep waiting instead of failing the whole login (and orphaning the window). The caller's
+/// timeout bounds the wait.
+async fn capture_login(
+    port: u16,
+    domain: &str,
+    auth: &str,
+    login_check: Option<&str>,
+) -> Result<Session> {
+    loop {
+        let ws_url = wait_for_page(port).await?;
+        let Ok((ws, _)) = tokio_tungstenite::connect_async(ws_url.as_str()).await else {
+            // The page target we resolved is already gone (mid-redirect); re-resolve.
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        let mut src = Cdp { ws, id: 1, port };
+        if login_debug() {
+            eprintln!("LOGIN_DEBUG: connected to page target {ws_url}");
+        }
+        if send_cmd(&mut src.ws, 1, "Network.enable", Value::Null)
+            .await
+            .is_err()
+        {
+            if login_debug() {
+                eprintln!("LOGIN_DEBUG: Network.enable failed; reconnecting");
+            }
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        // The auth cookie alone can be present while signed out (Google), so wait for a real login.
+        if let Some(check) = login_check {
+            match wait_logged_in(&mut src, check).await {
+                Ok(()) => {}
+                Err(e) if is_cdp_disconnect(&e) => {
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Capture first (on the stable signed-in page), then swap the page for our confirmation so
+        // the user isn't left staring at the provider UI while the window closes.
+        match capture(&mut src, domain, auth).await {
+            Ok(session) => {
+                show_done(&mut src).await;
+                // Let the success state register before Chrome closes; short enough to still feel
+                // immediate, long enough that the user sees the verification completed.
+                sleep(Duration::from_millis(450)).await;
+                // Capture done → close the window ourselves so the user isn't left with a stray
+                // browser (and tempted to close it mid-capture). Browser.close quits cleanly; the
+                // caller's kill is the backstop.
+                let _ = timeout(
+                    Duration::from_secs(3),
+                    send_cmd(&mut src.ws, src.id + 1, "Browser.close", Value::Null),
+                )
+                .await;
+                return Ok(session);
+            }
+            Err(e) if is_cdp_disconnect(&e) => {
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A CDP connection reset (the page target navigated away mid-login) — retryable by reconnecting.
+fn is_cdp_disconnect(e: &Error) -> bool {
+    match e {
+        Error::Ws(_) => true,
+        Error::BadResponse(msg) => *msg == "cdp connection closed",
+        _ => false,
+    }
+}
+
+fn login_debug() -> bool {
+    std::env::var("FETCHIRA_LOGIN_DEBUG").is_ok()
+}
+
+/// Show login progress over the provider page without replacing it, so late network responses can
+/// still finish setting companion cookies while the user gets immediate feedback.
+async fn show_verifying(src: &mut Cdp) {
+    let js = r#"(()=>{let x=document.getElementById('fetchira-login-state');if(!x){x=document.createElement('div');x.id='fetchira-login-state';x.style='position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#090b0f;color:#f2f5e9;font-family:ui-monospace,SFMono-Regular,Menlo,monospace';document.documentElement.appendChild(x)}x.innerHTML='<style>@keyframes fxspin{to{transform:rotate(360deg)}}</style><div style="width:min(420px,calc(100vw - 40px));padding:32px;border:1px solid #29301f;border-radius:12px;background:#0e1117;box-shadow:0 24px 70px #0009"><div style="display:flex;align-items:center;gap:13px"><span style="width:20px;height:20px;border:2px solid #3b432c;border-top-color:#c6f94a;border-radius:50%;animation:fxspin .75s linear infinite"></span><strong style="font-size:16px">Authorization received</strong></div><p style="margin:14px 0 0;color:#92998a;font-size:13px;line-height:1.5">Checking the session and saving cookies&hellip;</p></div>'})()"#;
+    src.id += 1;
+    let _ = send_cmd(
+        &mut src.ws,
+        src.id,
+        "Runtime.evaluate",
+        json!({ "expression": js }),
+    )
+    .await;
+}
+
+/// Turn the progress overlay into a success confirmation (best-effort).
 async fn show_done(src: &mut Cdp) {
-    let js = r#"document.open();document.write('<meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0b0d;color:#e8e8ea;font-family:system-ui,-apple-system,sans-serif"><div style="text-align:center"><div style="font-size:64px;line-height:1;color:#3ddc84">&#10003;</div><h2 style="margin:16px 0 6px;font-weight:600">fetchira &mdash; login captured</h2><p style="margin:0;opacity:.6">You can close this window.</p></div></body>');document.close();"#;
+    let js = r#"(()=>{let x=document.getElementById('fetchira-login-state');if(!x)return;x.innerHTML='<div style="width:min(420px,calc(100vw - 40px));padding:32px;border:1px solid #30451f;border-radius:12px;background:#0e1117;box-shadow:0 24px 70px #0009"><div style="display:flex;align-items:center;gap:13px"><span style="display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#c6f94a;color:#10130b;font:700 15px system-ui">&#10003;</span><strong style="font-size:16px">Session verified</strong></div><p style="margin:14px 0 0;color:#92998a;font-size:13px;line-height:1.5">Login saved. This window will close now.</p></div>'})()"#;
     src.id += 1;
     let _ = send_cmd(
         &mut src.ws,
@@ -404,8 +486,9 @@ async fn wait_logged_in(src: &mut Cdp, check: &str) -> Result<()> {
     loop {
         src.id += 1;
         // Tolerate transient eval errors: the page reloads several times during sign-in and the JS
-        // context is briefly gone. The caller's timeout bounds the overall wait.
-        if let Ok(res) = send_cmd(
+        // context is briefly gone (that comes back as Ok without a bool). A dead CDP connection
+        // (page target navigated away mid-redirect) is handed back so the caller can reconnect.
+        match send_cmd(
             &mut src.ws,
             src.id,
             "Runtime.evaluate",
@@ -413,9 +496,13 @@ async fn wait_logged_in(src: &mut Cdp, check: &str) -> Result<()> {
         )
         .await
         {
-            if res["result"]["value"].as_bool() == Some(true) {
-                return Ok(());
+            Ok(res) => {
+                if res["result"]["value"].as_bool() == Some(true) {
+                    return Ok(());
+                }
             }
+            Err(e) if is_cdp_disconnect(&e) => return Err(e),
+            Err(_) => {}
         }
         sleep(Duration::from_secs(1)).await;
     }
@@ -452,6 +539,10 @@ async fn capture_firefox(
 /// SQLite reader tails Firefox's profile.
 trait CookieSource {
     async fn fetch(&mut self, domain: &str) -> Result<Vec<Cookie>>;
+
+    /// Best-effort visual feedback after the auth cookie appears. Only CDP-backed Chrome can
+    /// render it; Firefox uses the default no-op while its cookie database is sampled.
+    async fn auth_detected(&mut self) {}
 }
 
 /// Two-phase capture shared by both backends: wait for the provider's auth cookie, then hold the
@@ -462,6 +553,21 @@ async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Resu
     let chunk = format!("{auth}.0");
     let mut best = loop {
         let scoped = src.fetch(domain).await?;
+        if login_debug() {
+            for c in scoped.iter().filter(|c| c.name.contains("session-token")) {
+                eprintln!(
+                    "LOGIN_DEBUG: {} | v_len={} | session={} | expires={}",
+                    c.name,
+                    c.value.len(),
+                    c.session,
+                    c.expires
+                );
+            }
+            eprintln!(
+                "LOGIN_DEBUG: {} scoped cookies; waiting for '{auth}' or '{chunk}'",
+                scoped.len()
+            );
+        }
         if scoped
             .iter()
             .any(|c| is_auth(c, auth) || is_auth(c, &chunk))
@@ -471,19 +577,14 @@ async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Resu
         sleep(Duration::from_secs(1)).await;
     };
     tracing::debug!(%domain, %auth, count = best.len(), "auth cookie present; capturing");
-    let mut stable = 0;
-    for _ in 0..8 {
-        sleep(Duration::from_secs(1)).await;
-        let scoped = src.fetch(domain).await?;
-        if scoped.len() > best.len() {
-            best = scoped;
-            stable = 0;
-        } else {
-            stable += 1;
-            if stable >= 2 {
-                break;
-            }
-        }
+    src.auth_detected().await;
+    // Give companion cookies one final beat to land, then close promptly. Waiting for two
+    // consecutive stable polls made a successful login look stuck for 2–3 seconds. Keep the
+    // latest snapshot when it is at least as complete, since cookie values may rotate in place.
+    sleep(Duration::from_secs(1)).await;
+    let scoped = src.fetch(domain).await?;
+    if scoped.len() >= best.len() {
+        best = scoped;
     }
     Ok(Session {
         cookies: best,
@@ -494,10 +595,25 @@ async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Resu
 struct Cdp {
     ws: Ws,
     id: u64,
+    port: u16,
 }
 
 impl CookieSource for Cdp {
     async fn fetch(&mut self, domain: &str) -> Result<Vec<Cookie>> {
+        // Closing Chrome's app window does not always tear down the page websocket immediately.
+        // Check the DevTools target first so a cancelled login returns to the dashboard promptly
+        // instead of waiting for the five-minute outer login timeout.
+        let targets: Option<Vec<Value>> =
+            match reqwest::get(format!("http://127.0.0.1:{}/json", self.port)).await {
+                Ok(r) => r.json().await.ok(),
+                Err(_) => None,
+            };
+        if !targets
+            .as_ref()
+            .is_some_and(|ts| ts.iter().any(|t| t["type"] == "page"))
+        {
+            return Err(Error::Timeout("chrome login window closed"));
+        }
         self.id += 1;
         let res = send_cmd(&mut self.ws, self.id, "Network.getAllCookies", Value::Null).await?;
         let all: Vec<Cookie> = serde_json::from_value(res["cookies"].clone()).unwrap_or_default();
@@ -505,6 +621,10 @@ impl CookieSource for Cdp {
             .into_iter()
             .filter(|c| dom_match(&c.domain, domain))
             .collect())
+    }
+
+    async fn auth_detected(&mut self) {
+        show_verifying(self).await;
     }
 }
 
@@ -613,7 +733,9 @@ fn is_auth(c: &Cookie, auth: &str) -> bool {
 /// Poll the DevTools HTTP endpoint for a page target and return its WebSocket URL.
 async fn wait_for_page(port: u16) -> Result<String> {
     let http = reqwest::Client::new();
-    for _ in 0..60 {
+    // A closed login window should release the dashboard request promptly; waiting 10s leaves the
+    // row stuck on "finish in browser…" and looks like a hang.
+    for _ in 0..20 {
         if let Ok(resp) = http
             .get(format!("http://127.0.0.1:{port}/json"))
             .send()
@@ -677,6 +799,18 @@ mod tests {
         // Absolute candidates are checked as-is; missing ones are skipped.
         assert!(find_bin(&["/no/such/path", "/bin/sh"]).is_some());
         assert!(find_bin(&["/no/such/path"]).is_none());
+    }
+
+    #[test]
+    fn classifies_only_dead_cdp_connections_as_retryable() {
+        assert!(is_cdp_disconnect(&Error::Ws(Box::new(
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+        ))));
+        assert!(is_cdp_disconnect(&Error::BadResponse(
+            "cdp connection closed"
+        )));
+        assert!(!is_cdp_disconnect(&Error::BadResponse("chatgpt_web")));
+        assert!(!is_cdp_disconnect(&Error::Timeout("chrome devtools")));
     }
 
     #[tokio::test]

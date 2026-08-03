@@ -182,6 +182,12 @@ fn fnv1a(seed: &str, b64: &str) -> String {
 }
 
 fn config(build: &str) -> Vec<Value> {
+    // The navigator/document/window probes ([10..12]) must read like real chatgpt.com DOM property
+    // names — OpenAI's sentinel rejects placeholder values as "unusual activity". Modelled on the
+    // openai-sentinel SDK fingerprint (U+2212 minus in the navigator probe, a `__reactContainer$`
+    // document probe keyed off the session id, an `__oai_*` window global).
+    let session = uuid4().replace('-', "").to_ascii_lowercase();
+    let react_suffix = &session[..session.len().min(11)];
     json!([
         4000,
         chrono::Utc::now()
@@ -195,11 +201,11 @@ fn config(build: &str) -> Vec<Value> {
         "en-US",
         "en-US,en",
         0,
-        "language−function",
-        "0",
-        "0",
+        "hardwareConcurrency\u{2212}8",
+        format!("__reactContainer${react_suffix}"),
+        "__oai_so_bm",
         1000,
-        uuid4(),
+        session,
         "",
         8,
         1_700_000_000_000u64,

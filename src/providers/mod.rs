@@ -109,6 +109,10 @@ pub struct Outcome {
     pub session: Option<String>,
     /// A generated image returned as bytes instead of `text` (create_image only).
     pub image: Option<OutImage>,
+    /// Rotated session cookies (`Set-Cookie` name=value) captured during the call; the router
+    /// re-saves them so a web session's rolling token stays fresh across processes. Empty for
+    /// API-key providers and for web calls that served from a cached bearer.
+    pub cookie_updates: Vec<(String, String)>,
 }
 
 /// A base64-encoded image plus its MIME type, carried out-of-band from `text`.
@@ -125,6 +129,7 @@ impl Outcome {
             cost,
             session: None,
             image: None,
+            cookie_updates: Vec::new(),
         }
     }
 }
@@ -583,6 +588,10 @@ pub struct LiveLimits {
     pub features: Vec<FeatureLimit>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelInfo>,
+    /// Rotated session cookies captured while reading limits; the router re-saves them. Internal —
+    /// not part of the serialized view.
+    #[serde(skip)]
+    pub cookie_updates: Vec<(String, String)>,
 }
 
 impl LiveLimits {
@@ -643,12 +652,13 @@ impl Provider {
         client: &wreq::Client,
         cap: Capability,
         input: &Input,
+        acct: &str,
     ) -> Result<Outcome> {
         let b = &self.base;
         match self.kind {
             ProviderKind::GeminiWeb => gemini_web::call(b, client, cap, input).await,
             ProviderKind::GrokWeb => grok_web::call(b, client, cap, input).await,
-            ProviderKind::ChatgptWeb => chatgpt_web::call(b, client, cap, input).await,
+            ProviderKind::ChatgptWeb => chatgpt_web::call(b, client, cap, input, acct).await,
             _ => Err(Error::Unsupported(self.kind.as_str())),
         }
     }
@@ -673,9 +683,10 @@ impl Provider {
 
     /// Live per-tier tool/model limits + the selectable model catalog, when the provider exposes
     /// them. Best-effort: `None` if unsupported or the fetch fails.
-    pub async fn live_limits(&self, client: &wreq::Client) -> Option<LiveLimits> {
+    pub async fn live_limits(&self, client: &wreq::Client, acct: &str) -> Option<LiveLimits> {
         match self.kind {
-            ProviderKind::ChatgptWeb => chatgpt_web::limits(&self.base, client).await.ok(),
+            // chatgpt keys its bearer cache (and the rotated-cookie capture) by account label.
+            ProviderKind::ChatgptWeb => chatgpt_web::limits(&self.base, client, acct).await.ok(),
             ProviderKind::GrokWeb => grok_web::limits(&self.base, client).await.ok(),
             ProviderKind::GeminiWeb => gemini_web::limits(&self.base, client).await.ok(),
             _ => None,

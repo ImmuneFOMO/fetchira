@@ -510,6 +510,7 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
         tier: friendly_tier(tier_raw, active),
         features: vec![dr],
         models,
+        ..Default::default()
     })
 }
 

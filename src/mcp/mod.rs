@@ -74,7 +74,7 @@ pub struct BrowserArgs {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ImageArgs {
-    /// What to draw.
+    /// What to draw, or how to edit the attached image.
     pub prompt: String,
     /// Force a specific provider (gemini_web / grok_web generate in-process over HTTP; chatgpt_web
     /// drives the browser). Otherwise the priority order applies, with failover.
@@ -82,6 +82,10 @@ pub struct ImageArgs {
     /// Absolute path to save the image to. When set, only the path is returned (no inline
     /// bytes); otherwise it is saved under the fetchira home dir and also returned inline.
     pub path: Option<String>,
+    /// Resume a ChatGPT image conversation to edit its previous image.
+    pub session: Option<String>,
+    /// Absolute paths of images/files to attach. Use this to edit an existing/generated image.
+    pub file: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -113,7 +117,7 @@ impl Fetchira {
         Ok(match self.router.call(cap, &input, forced).await {
             Ok(reply) => {
                 if let Some(img) = reply.image {
-                    return Ok(image_result(img, None));
+                    return Ok(image_result(img, None, None));
                 }
                 let mut text = reply.text;
                 if let Some(s) = reply.session {
@@ -245,24 +249,28 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate an image from a text prompt via a logged-in web session (gemini_web / grok_web / chatgpt_web). Saves the image to disk and returns its path — pass `path` to pick where (then no inline bytes). Force one with `provider`; otherwise the router chooses and fails over."
+        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; to edit an existing/generated image pass its absolute path in `file` and describe the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Saves the result to disk and returns its path; pass `path` to choose it."
     )]
     pub async fn create_image(
         &self,
         Parameters(args): Parameters<ImageArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let (forced, session) = route(args.provider, args.session);
         let input = Input {
             query: Some(args.prompt),
+            session,
+            file: args
+                .file
+                .unwrap_or_default()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
             ..Default::default()
         };
         Ok(
-            match self
-                .router
-                .call(Capability::Image, &input, args.provider)
-                .await
-            {
+            match self.router.call(Capability::Image, &input, forced).await {
                 Ok(reply) => match reply.image {
-                    Some(img) => image_result(img, args.path),
+                    Some(img) => image_result(img, args.path, reply.session),
                     None => CallToolResult::success(vec![Content::text(reply.text)]),
                 },
                 Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
@@ -273,7 +281,11 @@ impl Fetchira {
 
 /// Agents can't reach inline MCP bytes, so every image also lands on disk and the
 /// result names the file. An explicit `path` means "file only" — skip the inline copy.
-fn image_result(img: crate::providers::OutImage, path: Option<String>) -> CallToolResult {
+fn image_result(
+    img: crate::providers::OutImage,
+    path: Option<String>,
+    session: Option<String>,
+) -> CallToolResult {
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&img.b64) {
         Ok(b) => b,
         Err(e) => return CallToolResult::error(vec![Content::text(format!("bad image: {e}"))]),
@@ -301,12 +313,18 @@ fn image_result(img: crate::providers::OutImage, path: Option<String>) -> CallTo
             dest.display()
         ))]);
     }
-    let note = Content::text(format!(
+    let mut note = format!(
         "saved: {} ({}, {} bytes)",
         dest.display(),
         img.mime,
         bytes.len()
-    ));
+    );
+    if let Some(s) = session {
+        note.push_str(&format!(
+            "\n\n⟦session: {s} — pass as `session` to create_image to edit this image in the same chat⟧"
+        ));
+    }
+    let note = Content::text(note);
     if explicit {
         CallToolResult::success(vec![note])
     } else {
@@ -341,7 +359,7 @@ mod tests {
             mime: "image/png".into(),
             b64: base64::engine::general_purpose::STANDARD.encode(b"fakepng"),
         };
-        let out = image_result(img, Some(dest.to_string_lossy().into_owned()));
+        let out = image_result(img, Some(dest.to_string_lossy().into_owned()), None);
         assert_eq!(std::fs::read(&dest).unwrap(), b"fakepng");
         assert_eq!(out.content.len(), 1);
         let _ = std::fs::remove_file(&dest);
@@ -353,6 +371,6 @@ mod tests {
             mime: "image/png".into(),
             b64: "%%%".into(),
         };
-        assert_eq!(image_result(img, None).is_error, Some(true));
+        assert_eq!(image_result(img, None, None).is_error, Some(true));
     }
 }

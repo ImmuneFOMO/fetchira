@@ -7,6 +7,13 @@ function statusBadge(s) {
   return <Badge tone="ok" dot>healthy</Badge>;
 }
 
+// Subscription badge for a connected account: paid plans pop (cyan), free stays quiet (neutral).
+// Only web providers that report a tier have one; it streams in with the live limits.
+function planBadge(tier) {
+  if (!tier) return null;
+  return <Badge tone={tier === 'free' ? 'neutral' : 'cyan'} variant="outline">{tier}</Badge>;
+}
+
 // "anton.bavirov@gmail.com" -> "an****@gm****om"
 function maskEmail(e) {
   const at = String(e).indexOf('@');
@@ -142,7 +149,7 @@ function ProxyModal({ label, current, onClose }) {
 }
 
 // Everything beyond Test/Login lives here so the action column stays one width for every row.
-function RowMenu({ r, onLogin, onError }) {
+function RowMenu({ r, onLogin, onError, disabled }) {
   const [open, setOpen] = React.useState(false);
   const [pos, setPos] = React.useState({ top: 0, right: 0 });
   const [confirmRm, setConfirmRm] = React.useState(false);
@@ -158,14 +165,14 @@ function RowMenu({ r, onLogin, onError }) {
     catch (e) { onError(String(e.message || e)); }
   };
   const item = (label, onClick, danger) => (
-    <button onClick={onClick} style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', padding: '7px 12px', fontFamily: 'var(--font-mono)', fontSize: 12, color: danger ? 'var(--red-500)' : 'var(--text-mid)', whiteSpace: 'nowrap' }}
+    <button onClick={onClick} disabled={disabled} style={{ display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.45 : 1, padding: '7px 12px', fontFamily: 'var(--font-mono)', fontSize: 12, color: danger ? 'var(--red-500)' : 'var(--text-mid)', whiteSpace: 'nowrap' }}
       onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-2)'}
       onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>{label}</button>
   );
 
   return (
     <span style={{ position: 'relative', display: 'inline-block' }}>
-      <Button size="sm" variant="ghost" onClick={(e) => {
+      <Button size="sm" variant="ghost" disabled={disabled} onClick={(e) => {
         const b = e.currentTarget.getBoundingClientRect();
         setPos({ top: b.bottom + 4, right: window.innerWidth - b.right });
         setOpen((o) => !o);
@@ -192,36 +199,42 @@ function RowMenu({ r, onLogin, onError }) {
 }
 
 function RowActions({ r }) {
-  const [busy, setBusy] = React.useState(false);
+  const [busy, setBusy] = React.useState(null);
+  const busyRef = React.useRef(false);
   const [test, setTest] = React.useState(null);
   const needsLogin = r.status === 'needs-login';
+  const spinner = <span className="fx-spin" aria-hidden="true" style={{ width: 11, height: 11, flexShrink: 0, border: '1.5px solid currentColor', borderRightColor: 'transparent', borderRadius: '50%' }} />;
 
   const doTest = async () => {
-    if (busy) return;
-    setBusy(true); setTest(null);
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy('test'); setTest(null);
     try { setTest(await window.apiPost('/api/account/test', { label: r.label })); }
     catch (e) { setTest({ ok: false, error: String(e.message || e) }); }
-    setBusy(false);
+    busyRef.current = false;
+    setBusy(null);
   };
   const doLogin = async (browser) => {
-    if (busy) return;
-    setBusy(true); setTest(null);
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy('login'); setTest(null);
     try { await window.apiPost('/api/account/login', { label: r.label, browser }); if (window.fxRefresh) window.fxRefresh(); }
     catch (e) { setTest({ ok: false, error: String(e.message || e) }); }
-    setBusy(false);
+    busyRef.current = false;
+    setBusy(null);
   };
 
   return (
-    <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
-      {/* fixed-width slot so a result appearing never shifts the buttons */}
-      <span title={test ? (test.error || '') : ''} style={{ width: 74, textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: test ? (test.ok ? 'var(--green-500)' : 'var(--red-500)') : 'transparent', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {busy ? <span style={{ color: 'var(--text-faint)' }}>working…</span> : test ? (test.ok ? '✓ ' + test.latencyMs + 'ms' : '✕ failed') : '·'}
+    <div onClick={(e) => e.stopPropagation()} aria-busy={!!busy} style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+      {/* Fixed-width slot: login feedback stays visible without shifting the action buttons. */}
+      <span title={busy === 'login' ? 'Complete sign-in in the browser window' : test ? (test.error || '') : ''} style={{ width: 112, textAlign: 'right', fontFamily: 'var(--font-mono)', fontSize: 11, color: busy ? 'var(--lime-500)' : test ? (test.ok ? 'var(--green-500)' : 'var(--red-500)') : 'transparent', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {busy === 'login' ? 'finish in browser…' : busy === 'test' ? 'testing…' : test ? (test.ok ? '✓ ' + test.latencyMs + 'ms' : '✕ failed') : '·'}
       </span>
-      <Button size="sm" variant="ghost" onClick={doTest}>Test</Button>
+      <Button size="sm" variant="ghost" onClick={doTest} disabled={!!busy}>{busy === 'test' ? <React.Fragment>{spinner} Testing</React.Fragment> : 'Test'}</Button>
       {r.web
-        ? <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={() => doLogin('chrome')}>{needsLogin ? 'Login' : 'Re-login'}</Button>
+        ? <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={() => doLogin('chrome')} disabled={!!busy}>{busy === 'login' ? <React.Fragment>{spinner} Waiting…</React.Fragment> : needsLogin ? 'Login' : 'Re-login'}</Button>
         : <span style={{ width: 62 }} />}
-      <RowMenu r={r} onLogin={doLogin} onError={(e) => setTest({ ok: false, error: e })} />
+      <RowMenu r={r} onLogin={doLogin} onError={(e) => setTest({ ok: false, error: e })} disabled={!!busy} />
     </div>
   );
 }
@@ -274,11 +287,13 @@ function AccountRow({ r }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 10, flexShrink: 0, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>{hasDetail ? (open ? '▾' : '▸') : ''}</span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</span>
+                {planBadge(r.limits && r.limits.tier)}
+              </div>
               <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {r.provider}
                 {r.email ? <span> · <EmailChip email={r.email} /></span> : null}
-                {r.limits && r.limits.tier ? <span style={{ color: 'var(--cyan-500)' }}> · {r.limits.tier}</span> : null}
               </div>
             </div>
           </div>

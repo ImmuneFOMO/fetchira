@@ -647,6 +647,7 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
         tier: None,
         features: Vec::new(),
         models: parse_models(&raw),
+        ..Default::default()
     })
 }
 

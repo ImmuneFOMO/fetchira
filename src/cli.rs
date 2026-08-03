@@ -106,8 +106,8 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
     }
 
     println!(
-        "{:15} {:14} {:12} {:>10} {:>13}  PROXY",
-        "PROVIDER", "LABEL", "CRED", "REMAINING", "RESEARCH"
+        "{:15} {:14} {:12} {:10} {:>10} {:>13}  PROXY",
+        "PROVIDER", "LABEL", "CRED", "PLAN", "REMAINING", "RESEARCH"
     );
     for a in &accounts {
         let main = mains.get(a.label.as_str());
@@ -123,6 +123,12 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
         } else {
             "NO KEY"
         };
+        // Subscription badge for web providers that report it (chatgpt Plus/Max/free, grok pro/free);
+        // "-" until the live limits land or for providers without a plan concept.
+        let plan = main
+            .and_then(|v| v.limits.as_ref())
+            .and_then(|l| l.tier.as_deref())
+            .unwrap_or("-");
         let remaining = main
             .map(|v| v.remaining.to_string())
             .unwrap_or_else(|| "-".into());
@@ -131,10 +137,11 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             _ => "-".to_string(),
         };
         println!(
-            "{:15} {:14} {:12} {:>10} {:>13}  {}",
+            "{:15} {:14} {:12} {:10} {:>10} {:>13}  {}",
             a.provider.as_str(),
             a.label,
             cred,
+            plan,
             remaining,
             research,
             a.proxy.as_deref().unwrap_or("direct"),
