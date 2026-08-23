@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex">
+  <title>fetchira — route not found</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/assets/assets/logo-mark.svg">
+  <link rel="stylesheet" href="/admin/assets/styles.css">
+  <link rel="stylesheet" href="/admin/assets/hosted/hosted.css">
+  <link rel="stylesheet" href="/admin/assets/hosted/not-found.css">
+</head>
+<body class="fx-backplate">
+  <main class="not-found-shell" aria-labelledby="not-found-title">
+    <section class="not-found-panel">
+      <div class="brand"><img src="/admin/assets/assets/logo-mark.svg" alt=""><span>fetchira</span><code>hosted</code></div>
+      <div class="not-found-code mono">404 <span>·</span> route not found</div>
+      <h1 id="not-found-title">This route is not wired.</h1>
+      <p class="muted">The server is running, but this address does not map to a hosted control-plane route.</p>
+      <div class="not-found-actions">
+        <a class="primary button-link" href="/admin">Open admin</a>
+        <a class="secondary button-link" href="/healthz">Check health</a>
+      </div>
+      <p class="not-found-path mono" id="not-found-path" aria-live="polite"></p>
+    </section>
+  </main>
+  <script>document.getElementById('not-found-path').textContent = location.pathname;</script>
+</body>
+</html>

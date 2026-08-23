@@ -17,6 +17,8 @@ pub struct Config {
     pub priority: Priority,
     #[serde(default, rename = "account")]
     pub accounts: Vec<Account>,
+    #[serde(default, skip_serializing_if = "RemoteConfig::is_empty")]
+    pub remote: RemoteConfig,
 }
 
 impl Default for Config {
@@ -27,7 +29,31 @@ impl Default for Config {
             proxy_pool: ProxyPool::default(),
             priority: Priority::default(),
             accounts: Vec::new(),
+            remote: RemoteConfig::default(),
         }
+    }
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct RemoteConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+impl RemoteConfig {
+    fn is_empty(&self) -> bool {
+        self.endpoint.is_none() && self.api_key.is_none()
+    }
+}
+
+impl std::fmt::Debug for RemoteConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteConfig")
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
     }
 }
 
@@ -111,7 +137,7 @@ fn default_retention() -> i64 {
     24
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 pub struct ProxyPool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webshare_url: Option<String>,
@@ -125,7 +151,22 @@ impl ProxyPool {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl std::fmt::Debug for ProxyPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyPool")
+            .field(
+                "webshare_url",
+                &self.webshare_url.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "proxies",
+                &format_args!("<redacted:{}>", self.proxies.len()),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Account {
     pub provider: ProviderKind,
     pub label: String,
@@ -145,6 +186,21 @@ pub struct Account {
     pub dr_quota: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dr_reset: Option<Reset>,
+}
+
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("provider", &self.provider)
+            .field("label", &self.label)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("proxy", &self.proxy.as_ref().map(|_| "<redacted>"))
+            .field("quota", &self.quota)
+            .field("reset", &self.reset)
+            .field("dr_quota", &self.dr_quota)
+            .field("dr_reset", &self.dr_reset)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -174,6 +230,53 @@ pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Encrypt literal provider credentials before a config is used by the hosted runtime. Existing
+/// `env:` references remain references; encrypted values are idempotent. Local-only configs keep
+/// their existing 0600 behavior and do not require a master key.
+pub fn protect_hosted_secrets(cfg: &mut Config) -> Result<bool> {
+    crate::secrets::require_master_key().map_err(|e| Error::Config(e.to_string()))?;
+    protect_secrets_with(cfg, |value| {
+        crate::secrets::encrypt(value).map_err(|e| Error::Config(e.to_string()))
+    })
+}
+
+fn protect_secrets_with(
+    cfg: &mut Config,
+    encrypt: impl Fn(&str) -> Result<String>,
+) -> Result<bool> {
+    let mut changed = false;
+    for account in &mut cfg.accounts {
+        let Some(value) = account.api_key.as_mut() else {
+            continue;
+        };
+        if value.starts_with("env:") || value.starts_with("enc:") {
+            continue;
+        }
+        *value = encrypt(value)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Load a hosted config, require encryption to be configured, and migrate legacy plaintext API
+/// keys in place. This is the only config loader a hosted server should use.
+pub fn load_hosted(path: &Path) -> Result<Config> {
+    if !crate::secrets::configured() {
+        return Err(Error::Config(
+            "FETCHIRA_MASTER_KEY is required for hosted secrets".into(),
+        ));
+    }
+    let mut cfg = if path.exists() {
+        load(&path.to_string_lossy())?
+    } else {
+        Config::default()
+    };
+    if protect_hosted_secrets(&mut cfg)? {
+        save(&cfg, path)?;
+    }
+    Ok(cfg)
+}
+
 /// Resolve a possibly-relative `db_path` against the fetchira home dir.
 pub fn resolve_db(home: &Path, db_path: &str) -> String {
     if Path::new(db_path).is_relative() {
@@ -189,6 +292,58 @@ pub fn resolve_secret(s: &str) -> Result<String> {
         Some(var) => {
             std::env::var(var).map_err(|_| Error::Config(format!("missing env var {var}")))
         }
-        None => Ok(s.to_string()),
+        None => crate::secrets::resolve(s).map_err(|e| Error::Config(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_debug_is_redacted() {
+        let remote = RemoteConfig {
+            endpoint: Some("https://example.test/mcp".into()),
+            api_key: Some("fk_live_secret".into()),
+        };
+        let account = Account {
+            provider: ProviderKind::Tavily,
+            label: "primary".into(),
+            api_key: Some("tvly-secret".into()),
+            proxy: Some("http://user:password@proxy.test".into()),
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        };
+        assert!(!format!("{remote:?}").contains("fk_live_secret"));
+        assert!(!format!("{account:?}").contains("tvly-secret"));
+        assert!(!format!("{account:?}").contains("password"));
+    }
+
+    #[test]
+    fn hosted_protection_migrates_only_literal_keys() {
+        let account = |label: &str, key: &str| Account {
+            provider: ProviderKind::Tavily,
+            label: label.into(),
+            api_key: Some(key.into()),
+            proxy: None,
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        };
+        let mut cfg = Config {
+            accounts: vec![
+                account("plain", "secret"),
+                account("environment", "env:TAVILY_KEY"),
+                account("encrypted", "enc:already"),
+            ],
+            ..Config::default()
+        };
+        assert!(protect_secrets_with(&mut cfg, |value| Ok(format!("enc:{value}"))).unwrap());
+        assert_eq!(cfg.accounts[0].api_key.as_deref(), Some("enc:secret"));
+        assert_eq!(cfg.accounts[1].api_key.as_deref(), Some("env:TAVILY_KEY"));
+        assert_eq!(cfg.accounts[2].api_key.as_deref(), Some("enc:already"));
     }
 }

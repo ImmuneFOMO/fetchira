@@ -1,9 +1,21 @@
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use sqlx::Row;
 
+use crate::auth;
 use crate::config::Reset;
 use crate::error::{Error, Result};
+
+tokio::task_local! { pub static HOSTED_REQUEST_ID: String; }
+
+/// Keep provider recovery hints useful in both the local dashboard and hosted MCP responses.
+pub fn provider_login_hint(provider: &str) -> String {
+    if HOSTED_REQUEST_ID.try_with(|_| ()).is_ok() {
+        format!("re-authenticate {provider} in the hosted dashboard")
+    } else {
+        format!("run `fetchira login {provider}`")
+    }
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -13,6 +25,28 @@ pub struct Store {
 pub struct UsageRow {
     pub used: i64,
     pub exhausted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyRow {
+    pub id: String,
+    pub name: String,
+    pub secret_hash: String,
+    pub scopes: Vec<String>,
+    pub revoked: bool,
+    pub expires_at: Option<String>,
+    pub rpm: i64,
+    pub daily_limit: i64,
+    pub monthly_limit: i64,
+    pub concurrency_limit: i64,
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QuotaReservation {
+    pub limit: i64,
+    pub remaining: i64,
+    pub reset_at: i64,
 }
 
 /// One recorded router decision (for the dashboard's live route log + history).
@@ -82,7 +116,7 @@ const DEBUG_MAX_ROWS: i64 = 4000;
 /// Bump ONLY on a breaking schema change (additive `IF NOT EXISTS`/`ADD COLUMN` stays free).
 /// Must match the repo-root `schema-version` file, which ships as a release asset so the
 /// updater can refuse a breaking swap while old-version MCP servers are still running.
-pub const SCHEMA: i64 = 1;
+pub const SCHEMA: i64 = 2;
 
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
@@ -132,6 +166,8 @@ impl Store {
         )
         .execute(&pool)
         .await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS admin_session (token_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)")
+            .execute(&pool).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS proxy_assignment (
                 label TEXT PRIMARY KEY,
@@ -206,6 +242,70 @@ impl Store {
             .execute(&pool)
             .await
             .ok();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS api_key (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, secret_hash TEXT NOT NULL UNIQUE,
+            scopes TEXT NOT NULL DEFAULT 'mcp', rpm INTEGER NOT NULL DEFAULT 60,
+            daily_limit INTEGER NOT NULL DEFAULT 0, monthly_limit INTEGER NOT NULL DEFAULT 0,
+            revoked INTEGER NOT NULL DEFAULT 0, expires_at TEXT, created_at TEXT NOT NULL,
+            last_used_at TEXT
+        )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("ALTER TABLE api_key ADD COLUMN daily_limit INTEGER NOT NULL DEFAULT 0")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE api_key ADD COLUMN monthly_limit INTEGER NOT NULL DEFAULT 0")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE api_key ADD COLUMN concurrency_limit INTEGER NOT NULL DEFAULT 4")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS request_log (
+            id TEXT PRIMARY KEY, created_at TEXT NOT NULL, api_key_id TEXT,
+            capability TEXT NOT NULL, status INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+            provider TEXT, attempts INTEGER NOT NULL DEFAULT 0, error TEXT,
+            query_hash TEXT, query_preview TEXT
+        )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS request_log_key_time ON request_log(api_key_id, created_at)").execute(&pool).await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS request_attempt (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL,
+            provider TEXT NOT NULL, account_label TEXT NOT NULL, status INTEGER NOT NULL,
+            latency_ms INTEGER NOT NULL, failure TEXT, winner INTEGER NOT NULL DEFAULT 0
+        )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS request_attempt_request ON request_attempt(request_id)",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+            actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail TEXT
+        )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS login_challenge (
+            id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
+            api_key_id TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT
+        )",
+        )
+        .execute(&pool)
+        .await?;
         if v < SCHEMA {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "PRAGMA user_version = {SCHEMA}"
@@ -216,14 +316,449 @@ impl Store {
         Ok(Self { pool })
     }
 
+    pub async fn save_api_key(&self, key: &auth::ApiKey, name: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO api_key (id,name,secret_hash,scopes,created_at) VALUES (?,?,?,?,?)",
+        )
+        .bind(&key.id)
+        .bind(name)
+        .bind(&key.hash)
+        .bind(key.scopes.join(","))
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn save_api_key_with_limits(
+        &self,
+        key: &auth::ApiKey,
+        name: &str,
+        rpm: i64,
+        daily_limit: i64,
+        monthly_limit: i64,
+        concurrency_limit: i64,
+        expires_at: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO api_key (id,name,secret_hash,scopes,rpm,daily_limit,monthly_limit,concurrency_limit,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+            .bind(&key.id).bind(name).bind(&key.hash).bind(key.scopes.join(","))
+            .bind(rpm).bind(daily_limit).bind(monthly_limit).bind(concurrency_limit)
+            .bind(expires_at).bind(Utc::now().to_rfc3339()).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn save_admin_session(&self, token_hash: &str, expires_at: &str) -> Result<()> {
+        sqlx::query("INSERT INTO admin_session (token_hash,created_at,expires_at) VALUES (?,?,?)")
+            .bind(token_hash)
+            .bind(Utc::now().to_rfc3339())
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn valid_admin_session(&self, token_hash: &str) -> Result<bool> {
+        let row = sqlx::query("SELECT expires_at FROM admin_session WHERE token_hash = ?")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .and_then(|r| {
+                r.get::<String, _>("expires_at")
+                    .parse::<chrono::DateTime<Utc>>()
+                    .ok()
+            })
+            .is_some_and(|e| e > Utc::now()))
+    }
+
+    pub async fn api_key(&self, id: &str) -> Result<Option<ApiKeyRow>> {
+        let row = sqlx::query(
+            "SELECT id,name,secret_hash,scopes,revoked,expires_at,rpm,daily_limit,monthly_limit,concurrency_limit,last_used_at FROM api_key WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| ApiKeyRow {
+            id: r.get("id"),
+            name: r.get("name"),
+            secret_hash: r.get("secret_hash"),
+            scopes: r
+                .get::<String, _>("scopes")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            revoked: r.get::<i64, _>("revoked") != 0,
+            expires_at: r.get("expires_at"),
+            rpm: r.get("rpm"),
+            daily_limit: r.get("daily_limit"),
+            monthly_limit: r.get("monthly_limit"),
+            concurrency_limit: r.get("concurrency_limit"),
+            last_used_at: r.get("last_used_at"),
+        }))
+    }
+
+    pub async fn list_api_keys(&self) -> Result<Vec<ApiKeyRow>> {
+        let rows = sqlx::query("SELECT id,name,secret_hash,scopes,revoked,expires_at,rpm,daily_limit,monthly_limit,concurrency_limit,last_used_at FROM api_key ORDER BY created_at")
+            .fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ApiKeyRow {
+                id: r.get("id"),
+                name: r.get("name"),
+                secret_hash: r.get("secret_hash"),
+                scopes: r
+                    .get::<String, _>("scopes")
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                revoked: r.get::<i64, _>("revoked") != 0,
+                expires_at: r.get("expires_at"),
+                rpm: r.get("rpm"),
+                daily_limit: r.get("daily_limit"),
+                monthly_limit: r.get("monthly_limit"),
+                concurrency_limit: r.get("concurrency_limit"),
+                last_used_at: r.get("last_used_at"),
+            })
+            .collect())
+    }
+
+    pub async fn revoke_api_key(&self, id: &str) -> Result<bool> {
+        let n = sqlx::query("UPDATE api_key SET revoked = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(n != 0)
+    }
+
+    pub async fn touch_api_key(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE api_key SET last_used_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn count_key_since(&self, id: &str, cutoff: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM request_log WHERE api_key_id = ? AND created_at >= ?",
+        )
+        .bind(id)
+        .bind(cutoff)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn count_key_period(&self, id: &str, start: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM request_log WHERE api_key_id = ? AND created_at >= ?",
+        )
+        .bind(id)
+        .bind(start)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn log_request(
+        &self,
+        id: &str,
+        key_id: &str,
+        status: i64,
+        latency_ms: i64,
+    ) -> Result<()> {
+        sqlx::query("UPDATE request_log SET status = ?, latency_ms = ?, attempts = 1 WHERE id = ? AND api_key_id = ?")
+            .bind(status).bind(latency_ms).bind(id).bind(key_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn cancel_request(&self, id: &str, key_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM request_log WHERE id = ? AND api_key_id = ?")
+            .bind(id)
+            .bind(key_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Atomically reserve a user request before provider work starts. This closes the race where
+    /// concurrent requests could all pass a read-only quota check.
+    pub async fn reserve_request(
+        &self,
+        id: &str,
+        key_id: &str,
+        rpm: i64,
+        daily_limit: i64,
+        monthly_limit: i64,
+    ) -> Result<Option<QuotaReservation>> {
+        let mut tx = self
+            .pool
+            .begin_with(sqlx::AssertSqlSafe(String::from("BEGIN IMMEDIATE")))
+            .await?;
+        let now = Utc::now();
+        let minute = (now - chrono::Duration::minutes(1)).to_rfc3339();
+        let day = (now - chrono::Duration::days(1)).to_rfc3339();
+        let month = now
+            .with_day(1)
+            .unwrap_or(now)
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339();
+        let counts: (i64, i64, i64) = (
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM request_log WHERE api_key_id = ? AND created_at >= ?",
+            )
+            .bind(key_id)
+            .bind(&minute)
+            .fetch_one(&mut *tx)
+            .await?,
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM request_log WHERE api_key_id = ? AND created_at >= ?",
+            )
+            .bind(key_id)
+            .bind(&day)
+            .fetch_one(&mut *tx)
+            .await?,
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM request_log WHERE api_key_id = ? AND created_at >= ?",
+            )
+            .bind(key_id)
+            .bind(&month)
+            .fetch_one(&mut *tx)
+            .await?,
+        );
+        let allowed = (rpm <= 0 || counts.0 < rpm)
+            && (daily_limit <= 0 || counts.1 < daily_limit)
+            && (monthly_limit <= 0 || counts.2 < monthly_limit);
+        if allowed {
+            sqlx::query("INSERT INTO request_log (id,created_at,api_key_id,capability,status,latency_ms,attempts) VALUES (?,?,?,?,?,?,?)")
+                .bind(id).bind(now.to_rfc3339()).bind(key_id).bind("mcp").bind(0_i64).bind(0_i64).bind(1_i64).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        if !allowed {
+            return Ok(None);
+        }
+        let constrained = [(rpm, counts.0, 60_i64), (daily_limit, counts.1, 86_400)]
+            .into_iter()
+            .chain(std::iter::once((
+                monthly_limit,
+                counts.2,
+                (month.parse::<chrono::DateTime<Utc>>().unwrap_or(now) + chrono::Months::new(1)
+                    - now)
+                    .num_seconds()
+                    .max(1),
+            )))
+            .filter(|(limit, _, _)| *limit > 0)
+            .min_by_key(|(limit, used, _)| limit - used);
+        let (limit, used, reset) = constrained.unwrap_or((0, 0, 60));
+        Ok(Some(QuotaReservation {
+            limit,
+            remaining: if limit > 0 {
+                (limit - used - 1).max(0)
+            } else {
+                -1
+            },
+            reset_at: now.timestamp() + reset,
+        }))
+    }
+
+    pub async fn recent_requests(
+        &self,
+        key_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        let rows = if let Some(key) = key_id {
+            sqlx::query("SELECT id,created_at,api_key_id,capability,status,latency_ms,attempts,error FROM request_log WHERE api_key_id = ? ORDER BY created_at DESC LIMIT ?").bind(key).bind(limit).fetch_all(&self.pool).await?
+        } else {
+            sqlx::query("SELECT id,created_at,api_key_id,capability,status,latency_ms,attempts,error FROM request_log ORDER BY created_at DESC LIMIT ?").bind(limit).fetch_all(&self.pool).await?
+        };
+        Ok(rows.into_iter().map(|r| serde_json::json!({"id":r.get::<String,_>("id"),"createdAt":r.get::<String,_>("created_at"),"apiKeyId":r.get::<Option<String>,_>("api_key_id"),"capability":r.get::<String,_>("capability"),"status":r.get::<i64,_>("status"),"latencyMs":r.get::<i64,_>("latency_ms"),"attempts":r.get::<i64,_>("attempts"),"error":r.get::<Option<String>,_>("error")})).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn log_attempt(
+        &self,
+        request_id: &str,
+        provider: &str,
+        account: &str,
+        status: i64,
+        latency_ms: i64,
+        failure: Option<&str>,
+        winner: bool,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO request_attempt (request_id,provider,account_label,status,latency_ms,failure,winner) VALUES (?,?,?,?,?,?,?)")
+            .bind(request_id).bind(provider).bind(account).bind(status).bind(latency_ms).bind(failure).bind(winner as i64).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn log_audit(
+        &self,
+        actor: &str,
+        action: &str,
+        target: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO audit_log (created_at,actor,action,target,detail) VALUES (?,?,?,?,?)",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .bind(action)
+        .bind(target)
+        .bind(detail)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn attempts_for(&self, request_id: &str) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query("SELECT provider,account_label,status,latency_ms,failure,winner FROM request_attempt WHERE request_id = ? ORDER BY id")
+            .bind(request_id).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|r| serde_json::json!({"provider":r.get::<String,_>("provider"),"account":r.get::<String,_>("account_label"),"status":r.get::<i64,_>("status"),"latencyMs":r.get::<i64,_>("latency_ms"),"failure":r.get::<Option<String>,_>("failure"),"winner":r.get::<i64,_>("winner") != 0})).collect())
+    }
+
+    pub async fn recent_audit(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query("SELECT id,created_at,actor,action,target,detail FROM audit_log ORDER BY id DESC LIMIT ?")
+            .bind(limit.clamp(1, 1000)).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|r| serde_json::json!({"id":r.get::<i64,_>("id"),"createdAt":r.get::<String,_>("created_at"),"actor":r.get::<String,_>("actor"),"action":r.get::<String,_>("action"),"target":r.get::<Option<String>,_>("target"),"detail":r.get::<Option<String>,_>("detail")})).collect())
+    }
+
+    pub async fn last_audit_at(&self, actor: &str, action: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT created_at FROM audit_log WHERE actor = ? AND action = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(actor)
+        .bind(action)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn key_was_checked(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM audit_log WHERE actor = ? AND action = 'remote.check'",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?
+            > 0)
+    }
+
+    pub async fn save_login_challenge(
+        &self,
+        id: &str,
+        provider: &str,
+        label: &str,
+        key_id: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO login_challenge(id,provider,label,api_key_id,expires_at) VALUES(?,?,?,?,?)")
+            .bind(id).bind(provider).bind(label).bind(key_id).bind(expires_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn login_challenge(
+        &self,
+        id: &str,
+        key_id: &str,
+    ) -> Result<Option<(String, String, String, bool)>> {
+        let row = sqlx::query("SELECT provider,label,expires_at,consumed_at FROM login_challenge WHERE id = ? AND (api_key_id = ? OR api_key_id = '*')")
+            .bind(id).bind(key_id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|r| {
+            (
+                r.get("provider"),
+                r.get("label"),
+                r.get("expires_at"),
+                r.get::<Option<String>, _>("consumed_at").is_some(),
+            )
+        }))
+    }
+
+    pub async fn login_challenge_any(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, String, String, bool)>> {
+        let row = sqlx::query(
+            "SELECT provider,label,expires_at,consumed_at FROM login_challenge WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| {
+            (
+                r.get("provider"),
+                r.get("label"),
+                r.get("expires_at"),
+                r.get::<Option<String>, _>("consumed_at").is_some(),
+            )
+        }))
+    }
+
+    pub async fn consume_challenge_and_save_session(
+        &self,
+        id: &str,
+        key_id: &str,
+        provider: &str,
+        label: &str,
+        session: &str,
+    ) -> Result<bool> {
+        let encrypted =
+            crate::secrets::encrypt(session).map_err(|e| Error::Config(e.to_string()))?;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().to_rfc3339();
+        let changed = sqlx::query("UPDATE login_challenge SET consumed_at = ? WHERE id = ? AND (api_key_id = ? OR api_key_id = '*') AND consumed_at IS NULL AND expires_at > ?")
+            .bind(&now).bind(id).bind(key_id).bind(&now).execute(&mut *tx).await?.rows_affected() == 1;
+        if !changed {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO web_session(label,provider,cookies,updated) VALUES(?,?,?,?) ON CONFLICT(label) DO UPDATE SET provider=excluded.provider,cookies=excluded.cookies,updated=excluded.updated")
+            .bind(label).bind(provider).bind(encrypted).bind(&now).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn find_api_key_by_hash(&self, hash: &str) -> Result<Option<ApiKeyRow>> {
+        let row = sqlx::query("SELECT id,name,secret_hash,scopes,revoked,expires_at,rpm,daily_limit,monthly_limit,concurrency_limit,last_used_at FROM api_key WHERE secret_hash = ?")
+            .bind(hash).fetch_optional(&self.pool).await?;
+        Ok(row.map(|r| ApiKeyRow {
+            id: r.get("id"),
+            name: r.get("name"),
+            secret_hash: r.get("secret_hash"),
+            scopes: r
+                .get::<String, _>("scopes")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            revoked: r.get::<i64, _>("revoked") != 0,
+            expires_at: r.get("expires_at"),
+            rpm: r.get("rpm"),
+            daily_limit: r.get("daily_limit"),
+            monthly_limit: r.get("monthly_limit"),
+            concurrency_limit: r.get("concurrency_limit"),
+            last_used_at: r.get("last_used_at"),
+        }))
+    }
+
     pub async fn save_session(&self, label: &str, provider: &str, cookies: &str) -> Result<()> {
+        let stored = if crate::secrets::configured() {
+            crate::secrets::encrypt(cookies).map_err(|e| Error::Config(e.to_string()))?
+        } else {
+            cookies.to_string()
+        };
         sqlx::query(
             "INSERT INTO web_session (label, provider, cookies, updated) VALUES (?, ?, ?, ?)
              ON CONFLICT(label) DO UPDATE SET cookies = excluded.cookies, updated = excluded.updated",
         )
         .bind(label)
         .bind(provider)
-        .bind(cookies)
+        .bind(stored)
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -235,7 +770,26 @@ impl Store {
             .bind(label)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.map(|r| r.get("cookies")))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let stored: String = row.get("cookies");
+        if stored.starts_with("enc:") {
+            return crate::secrets::decrypt(&stored)
+                .map(Some)
+                .map_err(|e| Error::Config(e.to_string()));
+        }
+        if crate::secrets::configured() {
+            let encrypted =
+                crate::secrets::encrypt(&stored).map_err(|e| Error::Config(e.to_string()))?;
+            sqlx::query("UPDATE web_session SET cookies = ? WHERE label = ? AND cookies = ?")
+                .bind(encrypted)
+                .bind(label)
+                .bind(&stored)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(Some(stored))
     }
 
     /// Record the account identity (email) captured at login — for the dashboard + dup detection.
@@ -653,11 +1207,26 @@ pub fn period_key(reset: Reset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn schema_version_asset_matches_const() {
         let file: i64 = include_str!("../schema-version").trim().parse().unwrap();
         assert_eq!(file, SCHEMA);
+    }
+
+    #[tokio::test]
+    async fn hosted_provider_hint_changes_only_inside_hosted_request() {
+        assert!(provider_login_hint("grok_web").contains("fetchira login"));
+        let hint = HOSTED_REQUEST_ID
+            .scope("test".into(), async { provider_login_hint("grok_web") })
+            .await;
+        assert!(hint.contains("hosted dashboard"));
     }
 
     #[tokio::test]
@@ -825,6 +1394,55 @@ mod tests {
             .await
             .unwrap());
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn hosted_sessions_are_encrypted_and_legacy_rows_migrate() {
+        let _guard = env_lock();
+        let path =
+            std::env::temp_dir().join(format!("fetchira_session_crypto_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        std::env::set_var("FETCHIRA_MASTER_KEY", "session-test-master");
+        store
+            .save_session("encrypted", "grok_web", "super-secret-cookie")
+            .await
+            .unwrap();
+        let raw: String = sqlx::query_scalar("SELECT cookies FROM web_session WHERE label = ?")
+            .bind("encrypted")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert!(raw.starts_with("enc:"));
+        assert!(!raw.contains("super-secret-cookie"));
+        assert_eq!(
+            store.load_session("encrypted").await.unwrap().as_deref(),
+            Some("super-secret-cookie")
+        );
+
+        sqlx::query("INSERT INTO web_session(label,provider,cookies,updated) VALUES(?,?,?,?)")
+            .bind("legacy")
+            .bind("grok_web")
+            .bind("legacy-cookie")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_session("legacy").await.unwrap().as_deref(),
+            Some("legacy-cookie")
+        );
+        let migrated: String =
+            sqlx::query_scalar("SELECT cookies FROM web_session WHERE label = ?")
+                .bind("legacy")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert!(migrated.starts_with("enc:"));
+        std::env::remove_var("FETCHIRA_MASTER_KEY");
+        drop(store);
         let _ = std::fs::remove_file(&path);
     }
 }

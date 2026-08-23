@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde::Serialize;
 
 use crate::config::{resolve_secret, Config, Priority, Reset};
@@ -37,7 +38,7 @@ pub struct Bucket {
     pub balance_conn: Option<wreq::Client>,
 }
 
-/// A successful call's answer plus an optional resume token (`provider:opaque`) for web sessions.
+/// A successful call's answer plus an optional resume token (`provider:<base64-label>:opaque`).
 #[derive(Debug)]
 pub struct Reply {
     pub text: String,
@@ -77,13 +78,29 @@ pub struct Router {
     // Short-lived cache of provider-reported quota, keyed by "{label}|{deep}", so polling the
     // dashboard or `usage` doesn't hit grok's rate-limit endpoint on every call.
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
-    // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. `None` caches a miss.
+    // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. Browser misses are
+    // cached; HTTP-only misses are not, so a later browser-enabled snapshot can retry.
     live_limits: Mutex<HashMap<String, (Instant, Option<LiveLimits>)>>,
     // Live API-key balances (serper/tavily/firecrawl/steel), keyed by label. `None` caches a
     // miss so a provider without a usable balance endpoint isn't re-polled every snapshot.
     balance: Mutex<HashMap<String, (Instant, Option<LiveBalance>)>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
     debug: Option<i64>,
+    // ponytail: serialize hosted Chromium work; overlapping browser processes reset CDP on small VPSes.
+    browser_gate: Arc<tokio::sync::Mutex<()>>,
+    // Adaptive per-account backoff only after ChatGPT reports a temporary rate limit.
+    chatgpt_backoff: Mutex<HashMap<String, ChatgptBackoff>>,
+}
+
+const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(300);
+const CHATGPT_BACKOFF_INITIAL: Duration = Duration::from_secs(5);
+const CHATGPT_BACKOFF_MAX: Duration = Duration::from_secs(300);
+const CHATGPT_RETRY_ATTEMPTS: u8 = 5;
+
+#[derive(Clone, Copy)]
+struct ChatgptBackoff {
+    until: Instant,
+    delay: Duration,
 }
 
 impl Router {
@@ -96,6 +113,8 @@ impl Router {
             live_limits: Mutex::new(HashMap::new()),
             balance: Mutex::new(HashMap::new()),
             debug: None,
+            browser_gate: Arc::new(tokio::sync::Mutex::new(())),
+            chatgpt_backoff: Mutex::new(HashMap::new()),
         }
     }
 
@@ -158,7 +177,7 @@ impl Router {
                 let Some(raw) = store.load_session(&acc.label).await? else {
                     tracing::warn!(
                         label = %acc.label,
-                        "no web session; run `fetchira login {}`",
+                        "no web session for {}; authenticate this provider account",
                         acc.provider.as_str()
                     );
                     continue;
@@ -175,7 +194,7 @@ impl Router {
                 else {
                     tracing::warn!(
                         label = %acc.label,
-                        "no usable API key; set it or run `fetchira add {}`",
+                        "no usable API key for {}; add a provider account",
                         acc.provider.as_str()
                     );
                     continue;
@@ -219,7 +238,50 @@ impl Router {
             live_limits: Mutex::new(HashMap::new()),
             balance: Mutex::new(HashMap::new()),
             debug,
+            browser_gate: Arc::new(tokio::sync::Mutex::new(())),
+            chatgpt_backoff: Mutex::new(HashMap::new()),
         })
+    }
+
+    async fn wait_chatgpt_backoff(&self, account: &str) {
+        let wait = self
+            .chatgpt_backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(account)
+            .map(|state| state.until.saturating_duration_since(Instant::now()))
+            .unwrap_or_default();
+        if !wait.is_zero() {
+            tracing::info!(
+                account,
+                wait_secs = wait.as_secs(),
+                "waiting for ChatGPT rate limit"
+            );
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    fn backoff_chatgpt(&self, account: &str) {
+        let now = Instant::now();
+        let mut backoff = self
+            .chatgpt_backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delay = next_chatgpt_delay(backoff.get(account).map(|state| state.delay));
+        backoff.insert(
+            account.to_string(),
+            ChatgptBackoff {
+                until: now + delay,
+                delay,
+            },
+        );
+    }
+
+    fn reset_chatgpt_backoff(&self, account: &str) {
+        self.chatgpt_backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account);
     }
 
     /// Pick the most-preferred provider with a non-exhausted account (most-remaining
@@ -230,6 +292,48 @@ impl Router {
         cap: Capability,
         input: &Input,
         forced: Option<ProviderKind>,
+    ) -> Result<Reply> {
+        if let (Some(kind), Some(session)) = (forced, input.session.as_deref()) {
+            if let Some((label, opaque)) = decode_session_affinity(session) {
+                if self
+                    .buckets
+                    .iter()
+                    .any(|b| b.provider.kind == kind && b.label == label)
+                {
+                    let mut pinned = input.clone();
+                    pinned.session = Some(opaque);
+                    return self
+                        .call_with_account(cap, &pinned, forced, Some(&label))
+                        .await;
+                }
+                return Err(Error::ProviderForced(format!(
+                    "{} account '{}' from session is unavailable",
+                    kind.as_str(),
+                    label
+                )));
+            }
+        }
+        self.call_with_account(cap, input, forced, None).await
+    }
+
+    /// Call one configured account without changing the normal provider routing API.
+    pub async fn call_account(
+        &self,
+        cap: Capability,
+        input: &Input,
+        provider: ProviderKind,
+        label: &str,
+    ) -> Result<Reply> {
+        self.call_with_account(cap, input, Some(provider), Some(label))
+            .await
+    }
+
+    async fn call_with_account(
+        &self,
+        cap: Capability,
+        input: &Input,
+        forced: Option<ProviderKind>,
+        account_label: Option<&str>,
     ) -> Result<Reply> {
         let mut last_err: Option<Error> = None;
         // The most recent failed attempt in this call, so a later success records the failover hop.
@@ -248,6 +352,9 @@ impl Router {
                 if b.provider.kind != kind {
                     continue;
                 }
+                if account_label.is_some_and(|label| b.label != label) {
+                    continue;
+                }
                 let (blabel, bquota, breset) = budget(b, cap);
                 let period = period_key(breset);
                 let mut rem = self.store.remaining(&blabel, bquota, &period).await?;
@@ -258,7 +365,7 @@ impl Router {
                 if rem > 0 && forced.is_none() {
                     if let Some(feature) = live_feature(cap) {
                         if let Some(live) = self
-                            .live_limits_for(b, true)
+                            .live_limits_for(b, true, true)
                             .await
                             .and_then(|l| l.remaining(feature))
                         {
@@ -299,11 +406,14 @@ impl Router {
                     Conn::Web(_, cookies)
                         if b.provider.kind == ProviderKind::ChatgptWeb
                             && input.session.as_deref().is_some_and(|s| {
-                                s.strip_prefix("chatgpt_web:")
-                                    .unwrap_or(s)
-                                    .starts_with("dr|poll|")
+                                let s = s.strip_prefix("chatgpt_web:").unwrap_or(s);
+                                s.starts_with("dr|poll|") || s.starts_with("img|poll|")
                             }) =>
                     {
+                        // Image + deep-research polls stay in the browser: the HTTP chatgpt_web
+                        // path mints a fresh bearer per call and chokes on the rolling NextAuth
+                        // rotation that an already-authenticated Chromium tolerates.
+                        let _browser_gate = self.browser_gate.lock().await;
                         providers::chatgpt_browser::run(cookies, cap, input).await
                     }
                     // ChatGPT drives a real browser for chat / deep-research / image. The pure-HTTP
@@ -312,7 +422,34 @@ impl Router {
                     // token, so the turn always goes through the browser. chatgpt_web is still used
                     // for cookie-only reads (limits / tier / identity), which aren't anti-bot gated.
                     Conn::Web(_, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
-                        providers::chatgpt_browser::run(cookies, cap, input).await
+                        let mut attempts = 0;
+                        // Image kickoffs never retry in-request: a browser-side rate-limit can be
+                        // returned after the prompt was already submitted, so retrying (or failing
+                        // over to a second account) would duplicate the generation. The `img|poll`
+                        // follow-up resumes the submitted turn instead.
+                        let max_attempts = if matches!(cap, Capability::Image) {
+                            0
+                        } else {
+                            CHATGPT_RETRY_ATTEMPTS
+                        };
+                        loop {
+                            self.wait_chatgpt_backoff(&b.label).await;
+                            let result = {
+                                let _browser_gate = self.browser_gate.lock().await;
+                                providers::chatgpt_browser::run(cookies, cap, input).await
+                            };
+                            let retryable = matches!(
+                                &result,
+                                Err(Error::RateLimit(message))
+                                    if message.contains("wait before retrying")
+                            );
+                            if retryable && attempts < max_attempts {
+                                attempts += 1;
+                                self.backoff_chatgpt(&b.label);
+                                continue;
+                            }
+                            break result;
+                        }
                     }
                     Conn::Web(c, _) => b.provider.call_web(c, cap, input, &b.label).await,
                 };
@@ -325,6 +462,26 @@ impl Router {
                 }
                 let latency = t0.elapsed().as_millis() as i64;
                 let acct = strip_dr(&blabel);
+                let hosted_request = crate::usage::HOSTED_REQUEST_ID
+                    .try_with(|id| id.clone())
+                    .ok();
+                if let Some(request_id) = hosted_request.as_deref() {
+                    let _ = self
+                        .store
+                        .log_attempt(
+                            request_id,
+                            kind.as_str(),
+                            acct,
+                            match &res {
+                                Ok(_) => 200,
+                                Err(e) => err_code(e),
+                            },
+                            latency,
+                            res.as_ref().err().map(ToString::to_string).as_deref(),
+                            res.is_ok(),
+                        )
+                        .await;
+                }
                 // Firehose: every attempt (success or failure, incl. a 403 body) lands here.
                 let mut debug_id = None;
                 if let Some(retention) = self.debug {
@@ -354,6 +511,9 @@ impl Router {
                 }
                 match res {
                     Ok(o) => {
+                        if kind == ProviderKind::ChatgptWeb {
+                            self.reset_chatgpt_backoff(&b.label);
+                        }
                         // An empty read isn't a real answer — refund and fall through so failover
                         // (and the browser escalation below) get a shot instead of returning blank.
                         if cap == Capability::Read && o.text.trim().is_empty() {
@@ -400,7 +560,14 @@ impl Router {
                                 kind.as_str()
                             );
                         }
-                        let session = o.session.map(|s| format!("{}:{}", kind.as_str(), s));
+                        let session = o.session.map(|s| {
+                            format!(
+                                "{}:{}:{}",
+                                kind.as_str(),
+                                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&b.label),
+                                s
+                            )
+                        });
                         return Ok(Reply {
                             text,
                             session,
@@ -412,12 +579,23 @@ impl Router {
                         let _ = self.store.refund(&blabel, &period, 1).await;
                         match e {
                             Error::RateLimit(msg) => {
-                                let _ = self
-                                    .store
-                                    .mark_exhausted(kind.as_str(), &blabel, &period)
-                                    .await;
+                                let temporary_chatgpt_limit = kind == ProviderKind::ChatgptWeb
+                                    && msg.contains("wait before retrying");
+                                if kind == ProviderKind::ChatgptWeb {
+                                    self.backoff_chatgpt(&b.label);
+                                }
+                                if !temporary_chatgpt_limit {
+                                    let _ = self
+                                        .store
+                                        .mark_exhausted(kind.as_str(), &blabel, &period)
+                                        .await;
+                                }
                                 prev_fail = Some((acct.to_string(), 429));
-                                let hint = self.reset_hint(b, cap).await;
+                                let hint = if temporary_chatgpt_limit {
+                                    None
+                                } else {
+                                    self.reset_hint(b, cap).await
+                                };
                                 last_err = Some(Error::RateLimit(enrich_limit(msg, hint)));
                             }
                             Error::QuotaExceeded(msg) => {
@@ -437,6 +615,17 @@ impl Router {
                                 last_err = Some(e);
                             }
                             _ => return Err(e),
+                        }
+                        // Image may already have submitted the prompt. Fail over only when
+                        // this account never accepted the turn (login / composer).
+                        if matches!(cap, Capability::Image)
+                            && last_err
+                                .as_ref()
+                                .is_some_and(|err| !image_error_can_failover(err))
+                        {
+                            if let Some(err) = last_err {
+                                return Err(err);
+                            }
                         }
                     }
                 }
@@ -464,19 +653,22 @@ impl Router {
 
     /// One-shot snapshot that fetches missing live figures inline (CLI `list`/`usage`, MCP usage).
     pub async fn usage_snapshot(&self) -> Result<Vec<UsageView>> {
-        self.snapshot(true).await
+        self.snapshot(true, true).await
     }
 
     /// Cached-only snapshot: never blocks on a provider, so the dashboard paints instantly and the
     /// background `warm` loop fills each account's limits/balance in as its fetch lands.
     pub async fn usage_snapshot_cached(&self) -> Result<Vec<UsageView>> {
-        self.snapshot(false).await
+        self.snapshot(false, false).await
     }
 
-    async fn snapshot(&self, fetch: bool) -> Result<Vec<UsageView>> {
+    async fn snapshot(&self, fetch: bool, browser_fallback: bool) -> Result<Vec<UsageView>> {
         // Fan the buckets out concurrently: a fetching snapshot waits for the slowest single
         // provider (not the sum), a cached one returns immediately.
-        let per = self.buckets.iter().map(|b| self.bucket_views(b, fetch));
+        let per = self
+            .buckets
+            .iter()
+            .map(|b| self.bucket_views(b, fetch, browser_fallback));
         let mut out = Vec::with_capacity(self.buckets.len());
         for r in futures_util::future::join_all(per).await {
             out.extend(r?);
@@ -487,12 +679,17 @@ impl Router {
     /// Refresh every live cache (called on a timer by the dashboard) so cached snapshots stay fresh
     /// without any request blocking on a cold provider fan-out.
     pub async fn warm(&self) {
-        let _ = self.snapshot(true).await;
+        let _ = self.snapshot(true, false).await;
     }
 
-    async fn bucket_views(&self, b: &Bucket, fetch: bool) -> Result<Vec<UsageView>> {
+    async fn bucket_views(
+        &self,
+        b: &Bucket,
+        fetch: bool,
+        browser_fallback: bool,
+    ) -> Result<Vec<UsageView>> {
         let proxy = b.proxy.clone().unwrap_or_else(|| "direct".to_string());
-        let ll = self.live_limits_for(b, fetch).await;
+        let ll = self.live_limits_for(b, fetch, browser_fallback).await;
         let mut mv = self
             .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
             .await?;
@@ -655,15 +852,20 @@ impl Router {
         }
     }
 
-    /// Live per-tier limits for a web bucket, cached 20s (a miss is cached too, so a provider
-    /// without them isn't re-polled on every snapshot).
-    async fn live_limits_for(&self, b: &Bucket, fetch: bool) -> Option<LiveLimits> {
-        let Conn::Web(c, _) = &b.conn else {
+    /// Live per-tier limits for a web bucket, cached 5m. Browser misses are cached so an
+    /// unsupported provider isn't re-polled, but HTTP-only misses stay uncached for fallback.
+    async fn live_limits_for(
+        &self,
+        b: &Bucket,
+        fetch: bool,
+        browser_fallback: bool,
+    ) -> Option<LiveLimits> {
+        let Conn::Web(c, cookies) = &b.conn else {
             return None;
         };
         let cached = self.live_limits.lock().ok().and_then(|m| {
             m.get(&b.label)
-                .map(|(t, v)| (t.elapsed() < Duration::from_secs(20), v.clone()))
+                .map(|(t, v)| (t.elapsed() < LIVE_LIMITS_CACHE, v.clone()))
         });
         match cached {
             Some((true, v)) => return v,            // fresh
@@ -671,7 +873,27 @@ impl Router {
             None if !fetch => return None,          // nothing cached and we mustn't block
             _ => {}
         }
-        let fresh = bounded(b.provider.live_limits(c, &b.label)).await;
+        let _browser_gate = if browser_fallback {
+            Some(self.browser_gate.lock().await)
+        } else {
+            None
+        };
+        // Another request can fill the cache while this one waits for Chromium.
+        if let Some((t, value)) = self
+            .live_limits
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&b.label).cloned())
+        {
+            if t.elapsed() < LIVE_LIMITS_CACHE {
+                return value;
+            }
+        }
+        let fresh = bounded_browser(
+            b.provider
+                .live_limits(c, &b.label, cookies, browser_fallback),
+        )
+        .await;
         // Persist any rotated session cookies captured on a bearer cache-miss, so the next process
         // starts from the freshest token instead of rotating from a stale one.
         if let Some(ll) = &fresh {
@@ -679,8 +901,12 @@ impl Router {
                 self.refresh_session(b, &ll.cookie_updates).await;
             }
         }
-        if let Ok(mut m) = self.live_limits.lock() {
-            m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
+        // An HTTP-only miss must not hide the browser fallback from a later full snapshot or
+        // reset hint. Successful HTTP reads remain reusable; browser attempts may cache misses.
+        if fresh.is_some() || browser_fallback {
+            if let Ok(mut m) = self.live_limits.lock() {
+                m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
+            }
         }
         fresh
     }
@@ -689,7 +915,7 @@ impl Router {
     /// feature (an absolute reset for chatgpt, a rolling window for grok). `None` if unavailable.
     async fn reset_hint(&self, b: &Bucket, cap: Capability) -> Option<String> {
         let feature = live_feature(cap)?;
-        let ll = self.live_limits_for(b, true).await?;
+        let ll = self.live_limits_for(b, true, true).await?;
         let f = ll.feature(feature)?;
         if let Some(iso) = f.reset_after.as_deref() {
             return Some(format!("resets at {iso}"));
@@ -732,6 +958,14 @@ impl Router {
 /// Bound on a live limit/balance read: one stalled endpoint must never hang the usage fan-out.
 async fn bounded<T>(fut: impl std::future::Future<Output = Option<T>>) -> Option<T> {
     tokio::time::timeout(Duration::from_secs(10), fut)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Browser-backed ChatGPT limits need extra cold-start time on a small VPS.
+async fn bounded_browser<T>(fut: impl std::future::Future<Output = Option<T>>) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(30), fut)
         .await
         .ok()
         .flatten()
@@ -809,7 +1043,7 @@ pub fn compact_usage(views: &[UsageView]) -> String {
                 let parts: Vec<String> = ll.models.iter().map(fmt_model).collect();
                 web.push_str(&format!("    models: {}\n", parts.join(" · ")));
             }
-            None => web.push_str("    models: (none — check `fetchira login`)\n"),
+            None => web.push_str("    models: (none — authenticate this provider account)\n"),
         }
         if let Some(ll) = v.limits.as_ref().filter(|l| !l.features.is_empty()) {
             let feats: Vec<String> = ll
@@ -965,6 +1199,29 @@ fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
     }
 }
 
+fn next_chatgpt_delay(previous: Option<Duration>) -> Duration {
+    previous
+        .map(|delay| (delay * 2).min(CHATGPT_BACKOFF_MAX))
+        .unwrap_or(CHATGPT_BACKOFF_INITIAL)
+}
+
+fn image_error_can_failover(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Provider { status: 401, .. }
+            | Error::BadResponse("chatgpt_web: composer drive failed")
+    )
+}
+
+fn decode_session_affinity(session: &str) -> Option<(String, String)> {
+    let (encoded, opaque) = session.split_once(':')?;
+    let label = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    Some((label, opaque.to_string()))
+}
+
 async fn sticky_pool(
     store: &Store,
     label: &str,
@@ -1077,5 +1334,125 @@ mod tests {
         let idx = extras_index();
         assert!(idx.contains("serper("));
         assert!(idx.contains("usage(provider"));
+    }
+
+    #[test]
+    fn chatgpt_backoff_doubles_and_caps() {
+        assert_eq!(next_chatgpt_delay(None), Duration::from_secs(5));
+        assert_eq!(
+            next_chatgpt_delay(Some(Duration::from_secs(20))),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            next_chatgpt_delay(Some(Duration::from_secs(300))),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn session_affinity_round_trips_arbitrary_labels() {
+        let label = "friends: ChatGPT / main";
+        let token = format!(
+            "{}:conversation|message",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(label)
+        );
+        assert_eq!(
+            decode_session_affinity(&token),
+            Some((label.to_string(), "conversation|message".to_string()))
+        );
+        assert_eq!(decode_session_affinity("legacy-conversation|message"), None);
+    }
+
+    #[test]
+    fn image_errors_fail_over_only_before_submit() {
+        assert!(image_error_can_failover(&Error::Provider {
+            provider: "chatgpt_web",
+            status: 401,
+            body: "not logged in".into(),
+        }));
+        assert!(image_error_can_failover(&Error::BadResponse(
+            "chatgpt_web: composer drive failed"
+        )));
+        assert!(!image_error_can_failover(&Error::Timeout(
+            "chatgpt_web: browser drive"
+        )));
+        assert!(!image_error_can_failover(&Error::RateLimit(
+            "chatgpt_web: wait before retrying".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn missing_session_account_returns_affinity_error() {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_router_affinity_{}_{}.db",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let store = Store::open(path.to_str().expect("temp path"))
+            .await
+            .expect("open store");
+        let router = Router::from_parts(vec![], store);
+        let label = "missing-account";
+        let input = Input {
+            session: Some(format!(
+                "{}:opaque",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(label)
+            )),
+            ..Default::default()
+        };
+        let err = router
+            .call(Capability::Search, &input, Some(ProviderKind::ChatgptWeb))
+            .await
+            .expect_err("missing affinity account must fail");
+        assert!(matches!(
+            err,
+            Error::ProviderForced(message)
+                if message.contains("chatgpt_web") && message.contains(label)
+        ));
+    }
+
+    #[tokio::test]
+    async fn http_only_limit_miss_stays_uncached_for_browser_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_router_limits_{}_{}.db",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let store = Store::open(path.to_str().expect("temp path"))
+            .await
+            .expect("open store");
+        let bucket = Bucket {
+            // Tavily has no web-limit implementation, making this an immediate HTTP-only miss
+            // while exercising the same cache branch as ChatGPT's failed HTTP probe.
+            provider: Provider::new(ProviderKind::Tavily),
+            conn: Conn::Web(wreq::Client::new(), Vec::new()),
+            key: String::new(),
+            label: "limits-account".into(),
+            quota: 100,
+            reset: Reset::Monthly,
+            dr_quota: 100,
+            dr_reset: Reset::Monthly,
+            proxy: None,
+            balance_conn: None,
+        };
+        let router = Router::from_parts(vec![bucket], store);
+        assert!(router
+            .live_limits_for(&router.buckets[0], true, false)
+            .await
+            .is_none());
+        assert!(!router
+            .live_limits
+            .lock()
+            .expect("limits lock")
+            .contains_key("limits-account"));
+        assert!(router
+            .live_limits_for(&router.buckets[0], true, true)
+            .await
+            .is_none());
+        assert!(router
+            .live_limits
+            .lock()
+            .expect("limits lock")
+            .contains_key("limits-account"));
     }
 }

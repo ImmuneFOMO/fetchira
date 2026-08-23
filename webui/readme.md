@@ -200,7 +200,9 @@ Assets in `assets/`: `logo-mark.svg` (the gauge mark), `logo-wordmark.svg` (mark
 
 ## 8 · UI kit
 
-`ui_kits/dashboard/` — the full local dashboard, the primary deliverable.
+`ui_kits/dashboard/` — the full local dashboard, the primary deliverable. JSX source lives in
+the adjacent `.jsx` files; `tools/build_webui.js` compiles it to the checked-in `.js` assets
+used at runtime. Babel is a build-only tool and is never shipped or loaded by the browser.
 
 | File | Surface |
 |---|---|

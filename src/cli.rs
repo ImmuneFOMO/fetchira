@@ -1208,6 +1208,10 @@ pub fn help() {
            fetchira priority [cap]      show or set the provider order per capability (search/read/deep_research/image)\n  \
            fetchira login <provider>    (re)capture a web-session login (gemini_web/grok_web/chatgpt_web)\n  \
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
+           fetchira remote set URL      connect stdio to hosted Fetchira [--key fk_live_*]\n  \
+           fetchira remote check        verify endpoint, API key, and version compatibility\n  \
+           fetchira remote login ID     capture/upload a one-time hosted login [--browser chrome|firefox] [--file session.json]\n  \
+           fetchira remote disconnect   clear the saved hosted endpoint and API key\n  \
            fetchira update              download & install the latest release (--when-idle: after all instances exit)\n  \
            fetchira --version           print the installed version\n  \
            fetchira help                this message\n\n\

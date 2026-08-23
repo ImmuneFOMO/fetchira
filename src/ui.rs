@@ -30,6 +30,7 @@ use crate::usage::{DebugRow, RouteRow, Store};
 
 #[derive(RustEmbed)]
 #[folder = "webui/"]
+#[exclude = "*.jsx"]
 struct Assets;
 
 struct AcctMeta {
@@ -1645,7 +1646,7 @@ fn resets_in(period: &str) -> Option<String> {
 }
 
 /// Hide proxy credentials and the last IP octet before sending to the browser
-/// (`http://user:pass@45.38.78.247:6184` -> `45.38.78.x:6184`).
+/// (`http://user:pass@192.0.2.123:6184` -> `192.0.2.x:6184`).
 fn mask_proxy(proxy: &str) -> String {
     if proxy == "direct" || proxy == "pool" {
         return proxy.to_string();

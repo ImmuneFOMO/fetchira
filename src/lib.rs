@@ -1,12 +1,17 @@
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod hosted;
+pub mod hosted_update;
 pub mod httptrace;
 pub mod instances;
 pub mod mcp;
 pub mod providers;
 pub mod proxy;
+pub mod remote;
 pub mod router;
+pub mod secrets;
 pub mod ui;
 pub mod update;
 pub mod usage;

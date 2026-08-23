@@ -300,22 +300,28 @@ async fn ensure_bearer(
             return Ok((bearer.clone(), account_id.clone(), Vec::new()));
         }
     }
-    let resp = client
-        .get(format!("{base}/api/auth/session"))
-        .send()
-        .await?;
+    let resp = match client.get(format!("{base}/api/auth/session")).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(provider = "chatgpt_web", account = %acct, error = %e, "chatgpt auth session request failed");
+            return Err(e.into());
+        }
+    };
     let updates = crate::web::set_cookie_updates(resp.headers());
     let text = resp.text().await.unwrap_or_default();
     let sess: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let bearer = sess
-        .get("accessToken")
-        .and_then(|x| x.as_str())
-        .ok_or(Error::Provider {
+    let Some(bearer) = sess.get("accessToken").and_then(|x| x.as_str()) else {
+        tracing::warn!(provider = "chatgpt_web", account = %acct, body = %text.chars().take(240).collect::<String>(), "chatgpt auth session has no access token");
+        return Err(Error::Provider {
             provider: "chatgpt_web",
             status: 401,
-            body: "no session token; run `fetchira login chatgpt_web`".into(),
-        })?
-        .to_string();
+            body: format!(
+                "no session token; {}",
+                crate::usage::provider_login_hint("chatgpt_web")
+            ),
+        });
+    };
+    let bearer = bearer.to_string();
     // A dead refresh chain makes `/api/auth/session` keep handing back an already-expired
     // accessToken — caching it would loop forever, so bail loudly and let the caller re-login.
     if jwt_exp_in(&bearer) <= BEARER_MARGIN {
@@ -631,9 +637,32 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client, acct: &str) -> Res
             .body("{}")
             .send()
             .await?;
-        serde_json::from_str(&resp.text().await?).unwrap_or(Value::Null)
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            tracing::warn!(provider = "chatgpt_web", endpoint = "conversation/init", %status, body = %body.chars().take(240).collect::<String>(), "live limits request failed");
+        }
+        serde_json::from_str(&body).unwrap_or(Value::Null)
     };
 
+    let tier = friendly_plan(account_tier(base, client, &auth).await);
+    let models = model_catalog(base, client, &auth).await;
+    let mut payload = json!({"init": init, "models": Value::Null, "tier": tier});
+    payload["models"] = serde_json::to_value(&models).unwrap_or(Value::Null);
+    let mut out = parse_limits_json(&payload)?;
+    out.models = models;
+    out.cookie_updates = updates;
+    Ok(out)
+}
+
+pub(crate) fn parse_limits_json(payload: &Value) -> Result<LiveLimits> {
+    let parsed = |key: &str| match &payload[key] {
+        Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+        v => v.clone(),
+    };
+    let init = parsed("init");
+    let model_json = parsed("models");
+    let tier_json = parsed("tier");
     let feat = |v: &Value, name_key: &str| {
         FeatureLimit::simple(
             v[name_key].as_str().unwrap_or_default(),
@@ -657,13 +686,64 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client, acct: &str) -> Res
         }));
     }
 
-    let tier = friendly_plan(account_tier(base, client, &auth).await);
-    let models = model_catalog(base, client, &auth).await;
     Ok(LiveLimits {
-        tier,
+        tier: tier_json.as_str().map(str::to_string).or_else(|| {
+            account_tier_value(&tier_json)
+                .map(|v| friendly_plan(Some(v)).unwrap_or_else(|| "free".into()))
+        }),
         features,
-        models,
-        cookie_updates: updates,
+        models: model_catalog_value(&model_json),
+        cookie_updates: Vec::new(),
+    })
+}
+
+fn model_catalog_value(v: &Value) -> Vec<ModelInfo> {
+    let Some(cats) = v["categories"].as_array() else {
+        return Vec::new();
+    };
+    let mut order = Vec::new();
+    let mut levels = std::collections::HashMap::<String, Vec<&'static str>>::new();
+    for c in cats {
+        let Some((id, ls)) = c["category"].as_str().and_then(composer_model) else {
+            continue;
+        };
+        let entry = levels.entry(id.clone()).or_insert_with(|| {
+            order.push(id.clone());
+            Vec::new()
+        });
+        for l in ls {
+            if !entry.contains(&l) {
+                entry.push(l);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|id| {
+            let ls = levels.remove(&id).unwrap_or_default();
+            ModelInfo {
+                name: id.to_uppercase(),
+                id,
+                levels: ls.into_iter().map(String::from).collect(),
+                remaining: None,
+                total: None,
+                window_secs: None,
+                reset_after: None,
+                locked: false,
+            }
+        })
+        .collect()
+}
+
+fn account_tier_value(v: &Value) -> Option<String> {
+    v["accounts"].as_object()?.values().find_map(|a| {
+        a.pointer("/account/plan_type")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                a.pointer("/entitlement/subscription_plan")
+                    .and_then(Value::as_str)
+            })
+            .map(str::to_string)
     })
 }
 
@@ -694,21 +774,24 @@ pub(crate) async fn identity(base: &str, client: &wreq::Client) -> Result<Option
 /// non-composer lanes (deep-research/agent/mini) and `standard/extended` labels the browser
 /// `select_model` doesn't accept. Best-effort; empty on any failure.
 async fn model_catalog(base: &str, client: &wreq::Client, auth: &str) -> Vec<ModelInfo> {
-    let text = async {
-        client
+    let (status, text) = async {
+        let resp = client
             .get(format!(
                 "{base}/backend-api/models?history_and_training_disabled=false"
             ))
             .header("authorization", auth)
             .send()
             .await
-            .ok()?
-            .text()
-            .await
-            .ok()
+            .ok()?;
+        let status = resp.status();
+        let text = resp.text().await.ok()?;
+        Some((status, text))
     }
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|| (wreq::StatusCode::INTERNAL_SERVER_ERROR, String::new()));
+    if !status.is_success() {
+        tracing::warn!(provider = "chatgpt_web", endpoint = "models", %status, body = %text.chars().take(240).collect::<String>(), "live model catalog request failed");
+    }
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let Some(cats) = v["categories"].as_array() else {
         return Vec::new();
@@ -792,7 +875,12 @@ async fn account_tier(base: &str, client: &wreq::Client, auth: &str) -> Option<S
         .send()
         .await
         .ok()?;
-    let v: Value = serde_json::from_str(&resp.text().await.ok()?).ok()?;
+    let status = resp.status();
+    let body = resp.text().await.ok()?;
+    if !status.is_success() {
+        tracing::warn!(provider = "chatgpt_web", endpoint = "accounts/check", %status, body = %body.chars().take(240).collect::<String>(), "live account tier request failed");
+    }
+    let v: Value = serde_json::from_str(&body).ok()?;
     v["accounts"].as_object()?.values().find_map(|a| {
         // `account.plan_type` is the real current tier ("free"/"plus"/"pro"/"max"/"team").
         // `entitlement.subscription_plan` is the upsell OFFER — it reads "chatgptplusplan" even on a
@@ -910,7 +998,10 @@ fn session_err() -> Error {
     Error::Provider {
         provider: "chatgpt_web",
         status: 403,
-        body: "session/cloudflare; run `fetchira login chatgpt_web`".into(),
+        body: format!(
+            "session/cloudflare; {}",
+            crate::usage::provider_login_hint("chatgpt_web")
+        ),
     }
 }
 

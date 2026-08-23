@@ -107,7 +107,10 @@ pub async fn call(
             return Err(Error::Provider {
                 provider: "grok_web",
                 status,
-                body: "session expired; run `fetchira login grok_web`".into(),
+                body: format!(
+                    "session expired; {}",
+                    crate::usage::provider_login_hint("grok_web")
+                ),
             })
         }
         403 => {

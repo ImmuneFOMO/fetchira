@@ -10,9 +10,9 @@ function fmtCompact(n) {
 function Wordmark() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-      <img src="../../assets/logo-mark.svg" alt="" style={{ width: 26, height: 26 }} />
+      <img src={window.fxHosted ? '/admin/assets/assets/logo-mark.svg' : '../../assets/logo-mark.svg'} alt="" style={{ width: 26, height: 26 }} />
       <span style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600, letterSpacing: '-0.03em', color: 'var(--text-hi)' }}>fetchira</span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-xs)', padding: '1px 5px', marginLeft: 2 }}>127.0.0.1:7878</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-xs)', padding: '1px 5px', marginLeft: 2 }}>{window.fxHosted ? 'hosted' : '127.0.0.1:7878'}</span>
     </div>
   );
 }
@@ -29,8 +29,8 @@ function TopBar({ onAdd }) {
     }}>
       <Wordmark />
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)' }}>
+      <div className="fx-top-actions" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div className="fx-top-status" style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)' }}>
           <span style={{ color: 'var(--text-hi)', fontWeight: 600 }}>{s.accounts}</span>
           <span style={{ color: 'var(--text-faint)' }}>accounts</span>
           <span style={{ color: 'var(--border-strong)' }}>·</span>
@@ -46,7 +46,7 @@ function TopBar({ onAdd }) {
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>req remaining</span>
         </div>
 
-        <Button variant="primary" iconLeft={<span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>+</span>} onClick={onAdd}>Add account</Button>
+        <Button aria-label="Add account" variant="primary" iconLeft={<span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700 }}>+</span>} onClick={onAdd}>Add account</Button>
       </div>
     </header>
   );

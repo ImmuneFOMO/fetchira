@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -16,23 +16,108 @@ use crate::error::{Error, Result};
 use crate::web::{detect_browser, Cookie};
 
 // chatgpt.com generation is gated by an anti-bot defense pure HTTP can't pass (the real browser works,
-// a byte-identical replay 403s "unusual activity"). So we drive a headless Chrome over CDP: inject the
+// a byte-identical replay 403s "unusual activity"). So we drive a real Chrome over CDP: inject the
 // captured session cookies, type the prompt into the composer (the page's own send is what passes the
 // gate), then read the answer back via an in-page GET (reads are not gated) and reuse chatgpt_web's
 // conversation parsers. Deep research / web search are enabled by clicking the composer's tools menu.
+//
+// Headless vs headful is a launch flag, not a driver split: locally we run `--headless=new`;
+// the hosted container sets FETCHIRA_BROWSER_HEADFUL=1 and provides an X display (Xvfb) so the
+// browser matches the local, proven environment — headless new-mode renders differently enough
+// that image-heavy ChatGPT pages wedged its renderer on the hosted server.
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const CHAT_WAIT: u64 = 120;
 // Image generation runs longer than a chat turn (often 30-60s).
-const IMAGE_WAIT: u64 = 180;
+// Kickoff holds the request briefly so fast generations return inline; slower renders hand back
+// an `img|poll|` session instead of failing the call, and the follow-up resumes the wait.
+const IMAGE_KICKOFF_WAIT: u64 = 90;
 const DRIVE_WAIT: Duration = Duration::from_secs(240);
+const CDP_COMMAND_WAIT: Duration = Duration::from_secs(20);
 // A normal-Chrome UA: the default `--headless` UA contains "HeadlessChrome", an instant Cloudflare tell.
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                   (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
+fn headless_arg() -> Option<&'static str> {
+    (std::env::var("FETCHIRA_BROWSER_HEADFUL").as_deref() != Ok("1")).then_some("--headless=new")
+}
+
+fn normalize_conversation_cid(raw: &str) -> Result<String> {
+    let cid = raw.strip_prefix("WEB:").unwrap_or(raw);
+    let bytes = cid.as_bytes();
+    if bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, byte)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        Ok(cid.to_ascii_lowercase())
+    } else {
+        Err(Error::Provider {
+            provider: "chatgpt_web",
+            status: 400,
+            body: "invalid conversation session".into(),
+        })
+    }
+}
+
+/// The `img|poll|<cid>|<query>` session token carries the exact submitted prompt so the poll can
+/// match the right user turn in a conversation that already holds image generations. Queries are
+/// free text, so everything outside a safe set is percent-escaped; a bare `|` would split the
+/// token early.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `img|poll|<cid>|<query>` — `cid` is empty when ChatGPT accepted the prompt but the
+/// conversation list has not listed it yet. The follow-up then scans recent threads
+/// for that exact submitted query instead of opening `/c/`.
+fn parse_img_poll(session: Option<&str>) -> Result<Option<(String, String)>> {
+    let Some(rest) = session.and_then(|s| s.strip_prefix("img|poll|")) else {
+        return Ok(None);
+    };
+    let (raw_cid, raw_query) = rest.split_once('|').unwrap_or((rest, ""));
+    let cid = if raw_cid.is_empty() {
+        String::new()
+    } else {
+        normalize_conversation_cid(raw_cid)?
+    };
+    Ok(Some((cid, percent_decode(raw_query))))
+}
+
 /// Aborted callers can leave a headless profile behind after the parent process is killed.
-/// Requests finish within a few minutes, so profiles older than an hour are never active.
 fn cleanup_stale_profiles() {
     let now = SystemTime::now();
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
@@ -65,6 +150,7 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
     let browser = detect_browser()
         .ok_or_else(|| Error::Config("no Chrome/Chromium for chatgpt_web browser mode".into()))?;
     cleanup_stale_profiles();
+    clear_cdp_image_responses();
     let profile = std::env::temp_dir().join(format!("fetchira-cgpt-{}", &uuid4()[..8]));
     let port = free_port();
     let mut child = tokio::process::Command::new(&browser.bin)
@@ -75,11 +161,19 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
-        .arg("--headless=new")
-        .arg("--disable-gpu")
+        .arg("--disable-dev-shm-usage")
+        .args(headless_arg())
         .arg("--disable-blink-features=AutomationControlled")
         .arg(format!("--user-agent={UA}"))
         .arg("--window-size=1280,1000")
+        // The Debian sandbox cannot initialize inside the unprivileged hosted container.
+        // The container itself is the isolation boundary; keep the normal local-browser
+        // launch sandboxed.
+        .args(
+            (std::env::var("FETCHIRA_CONTAINER").as_deref() == Ok("1")
+                || Path::new("/.dockerenv").exists())
+            .then_some("--no-sandbox"),
+        )
         .arg("about:blank")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -117,6 +211,73 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
     out
 }
 
+/// Read the same authenticated account/model endpoints as the local UI, through the browser
+/// session. ChatGPT blocks these reads from the impersonating HTTP client on some VPS networks.
+pub async fn limits(cookies: &[Cookie]) -> Result<super::LiveLimits> {
+    let browser = detect_browser()
+        .ok_or_else(|| Error::Config("no Chrome/Chromium for chatgpt_web browser mode".into()))?;
+    cleanup_stale_profiles();
+    let profile = std::env::temp_dir().join(format!("fetchira-cgpt-limits-{}", &uuid4()[..8]));
+    let port = free_port();
+    let mut child = tokio::process::Command::new(&browser.bin)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--remote-debugging-port={port}"))
+        .arg("--remote-allow-origins=*")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-logging")
+        .arg("--log-level=3")
+        .arg("--disable-dev-shm-usage")
+        .args(headless_arg())
+        .arg("--disable-blink-features=AutomationControlled")
+        .arg(format!("--user-agent={UA}"))
+        .arg("--window-size=1280,1000")
+        .args(
+            (std::env::var("FETCHIRA_CONTAINER").as_deref() == Ok("1")
+                || Path::new("/.dockerenv").exists())
+            .then_some("--no-sandbox"),
+        )
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let result = timeout(Duration::from_secs(30), async {
+        let ws_url = wait_for_page(port).await?;
+        let (mut ws, _) = connect_async(ws_url.as_str()).await?;
+        cmd(&mut ws, "Network.enable", json!({})).await?;
+        cmd(&mut ws, "Page.enable", json!({})).await?;
+        cmd(&mut ws, "Page.navigate", json!({"url":"https://chatgpt.com/"})).await?;
+        sleep(Duration::from_millis(300)).await;
+        let result = cmd(&mut ws, "Network.setCookies", json!({"cookies": cdp_cookies(cookies)})).await?;
+        if result.get("success").is_some_and(|v| v == false) {
+            return Err(Error::BadResponse("chatgpt_web: browser rejected session cookies"));
+        }
+        cmd(&mut ws, "Page.navigate", json!({"url":"https://chatgpt.com/"})).await?;
+        sleep(Duration::from_secs(3)).await;
+        // The backend endpoints return a Guest view unless the browser also supplies the
+        // short-lived access token from `/api/auth/session`. The UI does this same exchange.
+        // Keep the token browser-side; it never leaves the page or appears in logs.
+        let js = r#"(async()=>{const s=async(r)=>({status:r.status,text:await r.text()});const sig=()=>AbortSignal.timeout(10000);let auth={};try{const a=await fetch('/api/auth/session',{credentials:'include',signal:sig()});const v=await a.json();if(v.accessToken)auth={'Authorization':'Bearer '+v.accessToken};}catch(_){}const get=(url,options={})=>fetch(url,{...options,credentials:'include',headers:{...auth,...(options.headers||{})},signal:sig()}).then(s).catch(e=>({status:0,text:String(e)}));const [i,m,t]=await Promise.all([get('/backend-api/conversation/init',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),get('/backend-api/models?history_and_training_disabled=false'),get('/backend-api/accounts/check/v4-2023-04-27')]);return JSON.stringify({init:i,models:m,tier:t});})()"#;
+        let body = eval(&mut ws, js).await?.as_str().unwrap_or_default().to_string();
+        let v: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|_| Error::BadResponse("chatgpt_web: limits browser response"))?;
+        if !v["init"]["status"].as_u64().is_some_and(|s| (200..300).contains(&s)) {
+            return Err(Error::BadResponse("chatgpt_web: limits endpoint rejected session"));
+        }
+        let payload = serde_json::json!({
+            "init": v["init"]["text"],
+            "models": v["models"]["text"],
+            "tier": v["tier"]["text"],
+        });
+        chatgpt_web::parse_limits_json(&payload)
+    }).await.map_err(|_| Error::Timeout("chatgpt_web: limits browser"));
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = std::fs::remove_dir_all(&profile);
+    result?
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive(
     port: u16,
@@ -129,31 +290,48 @@ async fn drive(
     query: &str,
 ) -> Result<Outcome> {
     // Deep research has a plan step: kickoff drafts a plan (parked), then `dr|plan|<cid>` + "start"
-    // approves it. A non-`dr|` session is a chat conversation to continue (dr polls go to HTTP).
-    let dr_plan_cid = session.and_then(|s| s.strip_prefix("dr|plan|"));
+    // approves it. A non-`dr|`/non-`img|` session is a chat conversation to continue
+    // (`dr|poll` and `img|poll` stay here; the HTTP chatgpt_web path cannot reuse this cookie jar).
+    let dr_plan_cid = session
+        .and_then(|s| s.strip_prefix("dr|plan|"))
+        .map(normalize_conversation_cid)
+        .transpose()?;
     let dr_poll_cid = session
         .and_then(|s| s.strip_prefix("dr|poll|"))
-        .map(|s| s.strip_prefix("WEB:").unwrap_or(s));
+        .map(normalize_conversation_cid)
+        .transpose()?;
+    // Image poll carries the exact submitted prompt (`img|poll|<cid>|<percent-escaped query>`):
+    // matching by `create_time` order alone can bind the response to the wrong turn in a chat
+    // that already holds image generations (a same-conversation edit shares the cid).
+    let img_poll = parse_img_poll(session)?;
     let approve =
         matches!(cap, Capability::DeepResearch) && dr_plan_cid.is_some() && is_start_word(query);
     let resume = session
-        .filter(|s| !s.starts_with("dr|"))
+        .filter(|s| !s.starts_with("dr|") && !s.starts_with("img|"))
         .map(|s| s.strip_prefix("chatgpt_web:").unwrap_or(s))
-        .map(|s| s.split('|').next().unwrap_or(s));
+        .map(|s| s.split('|').next().unwrap_or(s))
+        .map(normalize_conversation_cid)
+        .transpose()?;
 
     let ws_url = wait_for_page(port).await?;
     let (mut ws, _) = connect_async(ws_url.as_str()).await?;
     cmd(&mut ws, "Network.enable", json!({})).await?;
     cmd(&mut ws, "Page.enable", json!({})).await?;
+    cmd(&mut ws, "DOM.enable", json!({})).await?;
     let url = match (
-        approve.then_some(dr_plan_cid).flatten(),
-        dr_poll_cid,
-        resume,
+        approve.then_some(dr_plan_cid.as_deref()).flatten(),
+        dr_poll_cid.as_deref(),
+        img_poll
+            .as_ref()
+            .map(|(cid, _)| cid.as_str())
+            .filter(|cid| !cid.is_empty()),
+        resume.as_deref(),
     ) {
-        (Some(cid), _, _) => format!("https://chatgpt.com/c/{cid}"),
-        (None, Some(cid), _) => format!("https://chatgpt.com/c/{cid}"),
-        (None, None, Some(c)) => format!("https://chatgpt.com/c/{c}"),
-        (None, None, None) => "https://chatgpt.com/".to_string(),
+        (Some(cid), _, _, _) | (None, Some(cid), _, _) | (None, None, Some(cid), _) => {
+            format!("https://chatgpt.com/c/{cid}")
+        }
+        (None, None, None, Some(c)) => format!("https://chatgpt.com/c/{c}"),
+        (None, None, None, None) => "https://chatgpt.com/".to_string(),
     };
     // Establish the ChatGPT origin before injecting cookies. In particular, __Host-* cookies
     // are host-only and are rejected by Chromium when set against the initial about:blank page.
@@ -166,14 +344,23 @@ async fn drive(
     )
     .await?;
     sleep(Duration::from_millis(300)).await;
-    cmd(
+    let cookie_result = cmd(
         &mut ws,
         "Network.setCookies",
         json!({ "cookies": cdp_cookies(cookies) }),
     )
     .await?;
+    if cookie_result.get("success").is_some_and(|v| v == false) {
+        return Err(Error::BadResponse(
+            "chatgpt_web: browser rejected session cookies",
+        ));
+    }
     cmd(&mut ws, "Page.navigate", json!({ "url": url })).await?;
-    if resume.is_some() || approve || dr_poll_cid.is_some() {
+    if resume.is_some()
+        || approve
+        || dr_poll_cid.is_some()
+        || img_poll.as_ref().is_some_and(|(cid, _)| !cid.is_empty())
+    {
         let cid = url.rsplit('/').next().unwrap_or_default();
         let escaped = serde_json::to_string(cid).unwrap_or_else(|_| "\"\"".into());
         wait_until(
@@ -191,17 +378,9 @@ async fn drive(
     // Confirm the injected cookies actually authenticate before driving the composer.
     // ChatGPT has shipped both a textarea and a contenteditable composer. Prefer the visible
     // editor; the textarea can remain as a hidden compatibility node on current builds.
-    let composer = wait_until(&mut ws, "!!(()=>{const q=[...document.querySelectorAll('#prompt-textarea,[contenteditable=\"true\"][role=\"textbox\"]')];return q.find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&!e.disabled;})})()", 45).await?;
-    let logged_in = composer && is_logged_in(&mut ws).await?;
-    if std::env::var("CGPT_DEBUG").is_ok() {
-        let _ = screenshot(&mut ws, Path::new("/tmp/cgpt-debug.png")).await;
-        let url = eval(&mut ws, "location.href").await?;
-        let title = eval(&mut ws, "document.title").await?;
-        let cc = eval(&mut ws, "document.cookie.length").await?;
-        eprintln!(
-            "CGPT_DEBUG composer={composer} logged_in={logged_in} url={url} title={title} cookie_len={cc}"
-        );
-    }
+    // `/api/auth/session` is a cookie-backed fetch and can hang independently of CDP.
+    // Keep this check bounded so an expired/broken browser session returns a useful login error.
+    let logged_in = is_logged_in(&mut ws).await?;
     if !logged_in {
         return Err(login_err());
     }
@@ -220,13 +399,16 @@ async fn drive(
         )
         .await?;
         wait_until(&mut ws, "document.readyState === 'complete'", 15).await?;
-        wait_until(&mut ws, "!!(()=>{const q=[...document.querySelectorAll('#prompt-textarea,[contenteditable=\"true\"][role=\"textbox\"]')];return q.find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&!e.disabled;})})()", 45).await?;
+        // The next send performs the bounded composer lookup.
         dismiss_account_picker(&mut ws).await?;
     }
     if !app_shell_authenticated(&mut ws).await? {
         return Err(login_err());
     }
-    if let Some(cid) = dr_poll_cid {
+    // `dr|poll` belongs to whichever account ran the kickoff. The HTTP path in chatgpt_web.rs
+    // mints a fresh bearer on every poll and chokes on the rolling-NextAuth rotation that the
+    // browser session tolerates; stay in the browser for the whole deep-research lifecycle.
+    if let Some(cid) = dr_poll_cid.as_deref() {
         let conv = get_conversation(&mut ws, cid).await?;
         if let Some((report, sources)) = chatgpt_web::dr_report(&conv) {
             return Ok(Outcome::new(
@@ -241,26 +423,33 @@ async fn drive(
         out.session = Some(format!("dr|poll|{cid}"));
         return Ok(out);
     }
+    // Image generation resumed after the kickoff handed back its poll session: only fetch the
+    // result, never re-submit the prompt. The image source list lives in the already-connected
+    // main page; no second page is opened (headful Chrome's page socket can lack the Runtime
+    // domain on a freshly attached about:blank target, which wedged the hosted image polls).
+    if let Some((cid, poll_query)) = img_poll {
+        return fetch_polled_image(&mut ws, cid, &poll_query, 0, IMAGE_KICKOFF_WAIT).await;
+    }
     if resume.is_some() {
         // The first target navigation can still be redirected while ChatGPT establishes the
-        // authenticated app shell. Retry from the now-authenticated shell before sending a
-        // follow-up; otherwise it silently starts a fresh root conversation.
-        cmd(&mut ws, "Page.navigate", json!({ "url": url })).await?;
+        // authenticated app shell. Retry only after a redirect: reloading an already-hydrating
+        // image conversation can wedge Chromium's renderer on small hosted servers.
         let cid = url
             .rsplit('/')
             .next()
             .unwrap_or_default()
             .trim_start_matches("WEB:");
         let expected = serde_json::to_string(cid).unwrap_or_else(|_| "\"\"".into());
-        if !wait_until(
+        let on_target = eval(
             &mut ws,
             &format!("location.href.includes('/c/') && location.href.includes({expected})"),
-            45,
         )
         .await?
-        {
+        .as_bool()
+        .unwrap_or(false);
+        if !on_target {
+            cmd(&mut ws, "Page.navigate", json!({ "url": url })).await?;
             let web_url = format!("https://chatgpt.com/c/WEB:{cid}");
-            cmd(&mut ws, "Page.navigate", json!({ "url": web_url })).await?;
             if !wait_until(
                 &mut ws,
                 &format!("location.href.includes('/c/') && location.href.includes({expected})"),
@@ -268,35 +457,52 @@ async fn drive(
             )
             .await?
             {
-                return Err(Error::BadResponse(
-                    "chatgpt_web: conversation navigation redirected",
-                ));
+                cmd(&mut ws, "Page.navigate", json!({ "url": web_url })).await?;
+                if !wait_until(
+                    &mut ws,
+                    &format!("location.href.includes('/c/') && location.href.includes({expected})"),
+                    45,
+                )
+                .await?
+                {
+                    return Err(Error::BadResponse(
+                        "chatgpt_web: conversation navigation redirected",
+                    ));
+                }
             }
         }
-        wait_until(
-            &mut ws,
-            "document.querySelector('[data-message-author-role]') !== null",
-            15,
-        )
-        .await?;
     }
     install_cid_probe(&mut ws).await?;
-    let _ = eval(
-        &mut ws,
-        "document.querySelector('#prompt-textarea')?.focus()",
-    )
-    .await;
     sleep(Duration::from_millis(800)).await;
 
     // Approve a parked deep-research plan: click its Start button, then hand back a poll session.
-    if let Some(cid) = approve.then_some(dr_plan_cid).flatten() {
+    if let Some(cid) = approve.then_some(dr_plan_cid.as_deref()).flatten() {
         return start_dr_plan(&mut ws, cid).await;
     }
 
-    // Continuing a conversation: note the newest existing answer so we wait for the *new* reply.
-    let baseline = match resume {
-        Some(c) => chatgpt_web::last_assistant_time(&get_conversation(&mut ws, c).await?),
-        None => f64::NEG_INFINITY,
+    // Continuing a conversation: note the newest existing answer and image sources so we wait
+    // for the *new* reply/image instead of returning an older generated asset.
+    let (baseline, baseline_image_sources) = match resume.as_deref() {
+        Some(c) => {
+            let conv = get_conversation(&mut ws, c).await?;
+            (
+                chatgpt_web::last_assistant_time(&conv),
+                conversation_image_sources(&conv),
+            )
+        }
+        None => (f64::NEG_INFINITY, Vec::new()),
+    };
+
+    // Snapshot every CID source used after submission. Using only sidebar links here lets an old
+    // probe/performance CID appear "new" later and match a repeated prompt.
+    let known_cids = if resume.is_none() {
+        if matches!(cap, Capability::Image) {
+            recent_conversation_cids(&mut ws, &[]).await?
+        } else {
+            candidate_cids(&mut ws, &[]).await?
+        }
+    } else {
+        Vec::new()
     };
 
     // Image generation uses its own model regardless of the picker, so only chat/research honor it.
@@ -308,8 +514,7 @@ async fn drive(
     if matches!(cap, Capability::Image) {
         if resume.is_some() {
             edit_existing_image(&mut ws).await?;
-        } else {
-            enable_tool(&mut ws, "create image").await?;
+            tracing::debug!("chatgpt image edit target enabled");
         }
     } else if matches!(cap, Capability::DeepResearch) {
         enable_tool(&mut ws, "deep research").await?;
@@ -317,58 +522,48 @@ async fn drive(
         enable_tool(&mut ws, "web search").await?;
     }
 
-    if !files.is_empty() {
+    // The Edit image modal already carries the selected generated asset and its transformation
+    // metadata. Re-uploading the same file targets the background composer and stalls submission.
+    if !(files.is_empty() || matches!(cap, Capability::Image) && resume.is_some()) {
         attach_file(&mut ws, files).await?;
     }
-
-    let known_cids = conversation_ids(&mut ws).await?;
+    if matches!(cap, Capability::Image) {
+        clear_cdp_image_responses();
+    }
     // Keep the pre-send assistant count so a follow-up cannot be satisfied by the previous
     // turn's rendered node while the new response is still streaming.
-    let assistant_count = eval(
-        &mut ws,
-        "document.querySelectorAll('[data-message-author-role=\"assistant\"]').length",
-    )
-    .await?
-    .as_u64()
-    .unwrap_or(0);
-    let image_count = eval(
-        &mut ws,
-        "document.querySelectorAll('img[alt^=\\\"Generated image\\\"]').length",
-    )
-    .await?
-    .as_u64()
-    .unwrap_or(0);
-    let image_sources = eval(
-        &mut ws,
-        "JSON.stringify([...document.querySelectorAll('img[alt^=\\\"Generated image\\\"]')].map(i=>i.src).filter(Boolean))",
-    )
-    .await?
-    .as_str()
-    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-    .unwrap_or_default();
-    if std::env::var("CGPT_DEBUG").is_ok() {
-        let loc = eval(&mut ws, "location.href").await?;
-        let nodes = eval(
+    let assistant_count = if matches!(cap, Capability::Image) {
+        0
+    } else {
+        eval(
             &mut ws,
-            "document.querySelectorAll('[data-message-author-role=\\\"assistant\\\"]').length",
+            "document.querySelectorAll('[data-message-author-role=\"assistant\"]').length",
         )
-        .await?;
-        eprintln!(
-            "CGPT_DEBUG before_send location={loc} assistant_count={assistant_count} nodes={nodes}"
-        );
-    }
-    let sent = send_prompt(&mut ws, query).await?;
-    if std::env::var("CGPT_DEBUG").is_ok() {
-        eprintln!("CGPT_DEBUG send_result={sent}");
-    }
+        .await
+        .ok()
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+    };
+    let image_sources = baseline_image_sources;
+    let fresh_image_prompt = (matches!(cap, Capability::Image) && resume.is_none())
+        .then(|| format!("Generate an image from this request:\n{query}"));
+    let submitted_query = fresh_image_prompt.as_deref().unwrap_or(query);
+    let sent = send_prompt(&mut ws, submitted_query, matches!(cap, Capability::Image)).await?;
+    tracing::debug!(sent = %sent, "chatgpt browser prompt submitted");
     if sent != "sent" {
         return Err(Error::BadResponse("chatgpt_web: composer drive failed"));
     }
+    // Image submission can navigate immediately and then wedge its renderer. Its fresh verifier
+    // below is the acceptance signal; do not put a diagnostic Runtime call back on the hot path.
+    if !matches!(cap, Capability::Image) {
+        if let Some(message) = browser_rate_limit(&mut ws).await? {
+            return Err(Error::RateLimit(message));
+        }
+    }
 
-    // A fresh ChatGPT turn can render its answer before the SPA exposes the new conversation
-    // id (the sidebar/navigation is eventually consistent). Chat/image flows still need the id,
-    // but ordinary chat can safely read the rendered assistant node without blocking on it.
-    let cid = match resume {
+    // A fresh ChatGPT turn can render before the SPA exposes its conversation id. Image generation
+    // can keep the shell at `/`, so its CID and asset are resolved together below.
+    let cid = match resume.as_deref() {
         Some(c) => c.to_string(),
         None if matches!(cap, Capability::DeepResearch) => {
             wait_for_cid(&mut ws, 60, &known_cids).await?
@@ -403,44 +598,86 @@ async fn drive(
         return Ok(out);
     }
 
-    // Create image: wait for the rendered result, then read its bytes from inside the page — the CDN
-    // URL is session-gated, so an out-of-band GET 403s.
+    // Create image: poll for the generated image on the same page WS after submission. The
+    // inline flow already rides `ws`, and using a single socket dodges the fresh-target Runtime
+    // gap headful Chrome hits when a second about:blank page is created mid-stream.
     if matches!(cap, Capability::Image) {
-        let src = wait_for_image(&mut ws, IMAGE_WAIT, image_count, &image_sources).await?;
+        tracing::debug!("chatgpt waiting for generated image");
+        let (image_cid, src) = wait_for_image(
+            &mut ws,
+            IMAGE_KICKOFF_WAIT,
+            (!cid.is_empty()).then_some(cid.as_str()),
+            &known_cids,
+            submitted_query,
+            &image_sources,
+        )
+        .await?;
+        tracing::debug!("chatgpt generated image found");
+        if src.is_empty() {
+            // Submitted and accepted, but the render outlived this request: park the fetch on an
+            // `img|poll|` session instead of erroring so the router never re-submits the prompt
+            // (failover to a second account duplicated generations before this contract).
+            return fetch_polled_image(&mut ws, image_cid, submitted_query, 1, 0).await;
+        }
         let mut out = Outcome::new(String::new(), 1);
         out.image = Some(fetch_image(&mut ws, &src).await?);
-        out.session = if cid.is_empty() {
-            wait_for_cid(&mut ws, 5, &known_cids).await.ok()
-        } else {
-            Some(cid)
-        };
+        out.session = Some(image_cid);
         return Ok(out);
     }
 
     // Chat / web search: the turn finishes in seconds — wait, then read the clean message back.
     // The response can be read from the rendered assistant node even when the conversation GET is
     // briefly unavailable while ChatGPT is still persisting the turn.
+    // Current ChatGPT renders each turn as a `[data-message-author-role]` node. Keep the
+    // count baseline so a follow-up cannot return an older assistant node.
     let rendered = format!(
         r#"(()=>{{const a=[...document.querySelectorAll('[data-message-author-role="assistant"]')].slice({assistant_count}).pop();return a&&a.innerText?a.innerText:null;}})()"#
     );
     let deadline = Instant::now() + Duration::from_secs(CHAT_WAIT);
+    let mut last_rendered = String::new();
+    let mut rendered_stable = 0_u8;
+    let mut polls = 0_u8;
     loop {
+        if polls == 0 {
+            if let Some(message) = browser_rate_limit(&mut ws).await? {
+                return Err(Error::RateLimit(message));
+            }
+        }
+        polls = (polls + 1) % 5;
         // The rendered UI can finish before the persistence endpoint does. Read it first; this
         // also avoids waiting behind a stalled service-worker fetch.
+        // ChatGPT can keep a visible stop control mounted while no assistant node exists yet.
+        // Once a fresh assistant node has text, it is the authoritative completion signal.
         let streaming = eval(
             &mut ws,
-            "!!document.querySelector('[data-testid*=stop],button[aria-label*=Stop]')",
+            r#"(()=>[...document.querySelectorAll('[data-testid*=stop],button[aria-label*=Stop]')].some(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&!e.disabled&&getComputedStyle(e).visibility!=='hidden'&&getComputedStyle(e).display!=='none'}))()"#,
         )
-        .await?
-        .as_bool()
-        .unwrap_or(false);
-        if !streaming {
-            if let Some(text) = eval(&mut ws, &rendered).await?.as_str() {
-                if text.trim().is_empty() {
-                    sleep(Duration::from_secs(2)).await;
-                    continue;
+        .await
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+        // The renderer can ignore Runtime.evaluate briefly while the submitted turn starts.
+        // A missed poll is not a failed turn; the bounded outer deadline remains authoritative.
+        if let Some(text) = eval(&mut ws, &rendered)
+            .await
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+        {
+            let text = text.trim();
+            if !text.is_empty() {
+                if text == last_rendered {
+                    rendered_stable = rendered_stable.saturating_add(1);
+                } else {
+                    last_rendered.clear();
+                    last_rendered.push_str(text);
+                    rendered_stable = 0;
                 }
-                let mut out = Outcome::new(text.trim().to_string(), 1);
+            }
+            // New ChatGPT streams can hand off to an SSE/WebSocket while leaving a stale
+            // Stop button mounted. A fresh assistant node with stable text is authoritative;
+            // requiring two identical polls avoids returning a partial token stream.
+            if !text.is_empty() && (rendered_stable >= 2 || (!streaming && assistant_count > 0)) {
+                let mut out = Outcome::new(text.to_string(), 1);
                 let session = if cid.is_empty() {
                     wait_for_cid(&mut ws, 5, &known_cids).await.ok()
                 } else {
@@ -452,15 +689,35 @@ async fn drive(
                 return Ok(out);
             }
         }
-        if !cid.is_empty() {
-            if let Ok(conv) = get_conversation(&mut ws, &cid).await {
+        let page_cid = if cid.is_empty() {
+            eval(
+                &mut ws,
+                r#"location.href.match(/\/c\/(?:WEB:)?([0-9a-f-]{36})/i)?.[1] || null"#,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+        } else {
+            Some(cid.clone())
+        };
+        if let Some(page_cid) = page_cid {
+            if let Ok(conv) = get_conversation(&mut ws, &page_cid).await {
                 if let Ok(mut out) = chatgpt_web::extract_answer_after(&conv, baseline) {
-                    out.session = Some(cid.clone());
+                    out.session = Some(chatgpt_web::session_token(&conv, &page_cid));
                     return Ok(out);
                 }
             }
         }
         if Instant::now() >= deadline {
+            let diag = eval(
+                &mut ws,
+                r#"JSON.stringify({url:location.href,title:document.title,body:(document.body?.innerText||'').slice(-1200),assistantCount:document.querySelectorAll('[data-message-author-role="assistant"]').length,composerCount:document.querySelectorAll('#prompt-textarea,[contenteditable="true"][role="textbox"]').length})"#,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "{}".into());
+            tracing::warn!(diagnostics = %diag, "chatgpt browser response did not render before timeout");
             return Err(Error::Timeout("chatgpt_web: no answer"));
         }
         sleep(Duration::from_secs(2)).await;
@@ -468,31 +725,77 @@ async fn drive(
 }
 
 async fn edit_existing_image(ws: &mut Ws) -> Result<()> {
-    // Conversation pages virtualize old turns. Scroll the image into the viewport so its
-    // toolbar is mounted; otherwise headless Chrome can have a valid conversation with no
-    // rendered image/action controls at all.
-    let _ = eval(ws, "window.scrollTo(0, document.body.scrollHeight)").await;
-    let image = r#"[...document.querySelectorAll('img[alt^="Generated image"]')].find(i=>i.complete&&i.naturalWidth>200)"#;
-    if let Some((x, y)) = center_of(ws, image).await? {
-        hover_at(ws, x, y).await?;
-        sleep(Duration::from_millis(700)).await;
-    }
-    let selector = r#"[...document.querySelectorAll('button,[role=button]')].find(e=>/edit image/i.test((e.getAttribute('aria-label')||e.innerText||'').trim()))"#;
-    for _ in 0..60 {
-        if let Some((x, y)) = center_of(ws, selector).await? {
+    // Image turns are virtualized. A bounded hover/click through the AX tree keeps this
+    // responsive on a VPS; the old 60 x 30s Runtime.evaluate loop could hang for 30 minutes.
+    // Keep each DOM call short. If the renderer is busy, retry the browser-process AX query
+    // instead of stacking more Runtime.evaluate requests behind it.
+    for _ in 0..3 {
+        // Conversation pages are virtualized; scrolling is needed before the image toolbar can
+        // mount, but it must remain bounded while the page hydrates.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            eval(ws, "window.scrollTo(0, document.body.scrollHeight)"),
+        )
+        .await;
+        let image =
+            match tokio::time::timeout(Duration::from_secs(2), generated_image_point(ws)).await {
+                Ok(Ok(point)) => point,
+                Ok(Err(Error::Timeout(_))) | Err(_) => None,
+                Ok(Err(error)) => return Err(error),
+            };
+        tracing::debug!(found = image.is_some(), "chatgpt image edit target");
+        if let Some((x, y)) = image {
+            let _ = hover_at(ws, x, y).await;
+            sleep(Duration::from_millis(350)).await;
+        }
+        // Prefer a real coordinate click scoped to the newest generated-image turn. Full-page AX
+        // and text fallbacks can stall the renderer or select an older image in the conversation.
+        let edit = match tokio::time::timeout(
+            Duration::from_secs(2),
+            center_of(
+                ws,
+                r#"(()=>{const turns=[...document.querySelectorAll('[data-message-author-role="assistant"]')]
+                    .filter(t=>t.querySelector('img[alt^="Generated image"],button[aria-label^="Generated image"]'));
+                    return turns.at(-1)?.querySelector('button[aria-label="Edit image"]')||null})()"#,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(point)) => point,
+            Ok(Err(Error::Timeout(_))) | Err(_) => None,
+            Ok(Err(error)) => return Err(error),
+        };
+        if let Some((x, y)) = edit {
             click_at(ws, x, y).await?;
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(700)).await;
             return Ok(());
         }
-        if let Some((x, y)) = center_of(ws, image).await? {
-            click_at(ws, x, y).await?;
-            sleep(Duration::from_millis(500)).await;
+        // Some ChatGPT builds reveal the toolbar only after a real image click.
+        if let Some((x, y)) = image {
+            let _ = click_at(ws, x, y).await;
+            sleep(Duration::from_millis(400)).await;
         }
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_secs(1)).await;
     }
-    Err(Error::BadResponse(
-        "chatgpt_web: image edit control not found",
-    ))
+    // ChatGPT can virtualize every previous message while keeping the authenticated composer.
+    // In that shell the edit button does not exist; a same-conversation instruction still carries
+    // the generated image context and is preferable to failing before submission.
+    tracing::debug!("chatgpt image edit modal unavailable; using conversation follow-up");
+    Ok(())
+}
+
+/// Return the newest visible generated image, excluding user uploads in the same conversation.
+async fn generated_image_point(ws: &mut Ws) -> Result<Option<(f64, f64)>> {
+    center_of(
+        ws,
+        r#"(()=>{const turns=[...document.querySelectorAll('[data-message-author-role="assistant"]')]
+            .filter(t=>t.querySelector('img[alt^="Generated image"],button[aria-label^="Generated image"]'));
+            const nodes=[...(turns.at(-1)?.querySelectorAll('img[alt^="Generated image"],button[aria-label^="Generated image"]')||[])]
+                .filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0});
+            const image=nodes.at(-1);const target=image?.closest('button')||image;
+            target?.scrollIntoView({block:'center'});return target})()"#,
+    )
+    .await
 }
 
 async fn answer_session(ws: &mut Ws, cid: &str) -> String {
@@ -543,6 +846,7 @@ async fn attach_file(ws: &mut Ws, files: &[PathBuf]) -> Result<()> {
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
+    cmd(ws, "DOM.enable", json!({})).await?;
     let doc = cmd(ws, "DOM.getDocument", json!({"depth": -1, "pierce": true})).await?;
     let root = doc
         .pointer("/root/nodeId")
@@ -574,90 +878,235 @@ async fn attach_file(ws: &mut Ws, files: &[PathBuf]) -> Result<()> {
     }
 }
 
-async fn send_prompt(ws: &mut Ws, query: &str) -> Result<String> {
-    let editor = r#"(()=>{const q=[...document.querySelectorAll('#prompt-textarea,[contenteditable="true"][role="textbox"]')];return q.find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&!e.disabled;})})()"#;
-    if !eval(ws, &format!("!!({editor})"))
-        .await?
-        .as_bool()
-        .unwrap_or(false)
-    {
+async fn send_prompt(ws: &mut Ws, query: &str, image: bool) -> Result<String> {
+    if !focus_editor(ws).await? {
         return Ok("no-editor".into());
     }
-    eval(ws, &format!("({editor})?.focus()")).await?;
     cmd(ws, "Input.insertText", json!({"text": query})).await?;
-    sleep(Duration::from_millis(500)).await;
-    let selector = "[data-testid='send-button'],button[aria-label*='Send']";
-    let send_expr = format!("document.querySelector(\"{selector}\")");
-    if let Some((x, y)) = center_of(ws, &send_expr).await? {
-        let ready = eval(ws, &format!("(()=>{{const b=document.querySelector(\"{selector}\");return !!b&&!b.disabled;}})()"))
-            .await?.as_bool().unwrap_or(false);
-        if !ready {
-            return Ok("no-send".into());
+    sleep(Duration::from_millis(if image { 800 } else { 500 })).await;
+    for (kind, key) in [("rawKeyDown", "Enter"), ("keyUp", "Enter")] {
+        cmd(
+            ws,
+            "Input.dispatchKeyEvent",
+            json!({
+                "type": kind,
+                "key": key,
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+            }),
+        )
+        .await?;
+    }
+    Ok("sent".into())
+}
+
+fn composer_backend_node(tree: &Value) -> Option<i64> {
+    tree.get("nodes")?.as_array()?.iter().find_map(|node| {
+        let role = node
+            .get("role")
+            .and_then(|v| v.get("value"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = node
+            .get("name")
+            .and_then(|v| v.get("value"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        (role.eq_ignore_ascii_case("textbox")
+            && name.to_ascii_lowercase().contains("chat with chatgpt"))
+        .then(|| node.get("backendDOMNodeId").and_then(Value::as_i64))
+        .flatten()
+    })
+}
+
+async fn focus_editor(ws: &mut Ws) -> Result<bool> {
+    let selectors = [
+        "[role='dialog'] [contenteditable='true'][role='textbox']",
+        "#prompt-textarea",
+        "textarea[placeholder*='Chat with ChatGPT']",
+        "[contenteditable='true'][role='textbox']",
+    ];
+    for selector in selectors {
+        let selector =
+            serde_json::to_string(selector).unwrap_or_else(|_| "\"#prompt-textarea\"".into());
+        let expr = format!("(()=>{{const e=[...document.querySelectorAll({selector})].find(e=>{{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&!e.disabled}});if(!e)return false;e.focus();return true;}})()");
+        match tokio::time::timeout(Duration::from_secs(3), eval(ws, &expr)).await {
+            Ok(Ok(value)) if value.as_bool() == Some(true) => return Ok(true),
+            Ok(Err(Error::Timeout(_))) | Err(_) | Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error),
         }
-        click_at(ws, x, y).await?;
-        Ok("sent".into())
-    } else {
-        if std::env::var("CGPT_DEBUG").is_ok() {
-            let controls = eval(ws, "JSON.stringify([...document.querySelectorAll('button')].map(b=>({aria:b.getAttribute('aria-label'),test:b.getAttribute('data-testid'),disabled:b.disabled,text:(b.innerText||'').trim().slice(0,60)})).filter(x=>x.aria||x.test||x.text))").await?;
-            eprintln!("CGPT_DEBUG composer_controls={controls}");
-        }
-        Ok("no-send".into())
+    }
+
+    // Hosted Chromium can expose the composer in its accessibility tree while page-side DOM
+    // queries miss the React/shadow-root node. Focus the same backend node Chrome exposes to AX.
+    let tree = match tokio::time::timeout(
+        Duration::from_secs(3),
+        cmd(
+            ws,
+            "Accessibility.getFullAXTree",
+            json!({"interestingOnly": false}),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(tree)) => tree,
+        Ok(Err(Error::Timeout(_))) | Err(_) => return Ok(false),
+        Ok(Err(error)) => return Err(error),
+    };
+    let Some(backend) = composer_backend_node(&tree) else {
+        return Ok(false);
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        cmd(ws, "DOM.focus", json!({"backendNodeId": backend})),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(Error::Timeout(_))) | Err(_) => Ok(false),
+        Ok(Err(error)) => Err(error),
     }
 }
 
 /// Open the composer "+" menu and click the tool whose label matches (e.g. "deep research"). React
 /// portals ignore synthetic `.click()`, so we dispatch real CDP mouse events at element centers.
 async fn enable_tool(ws: &mut Ws, tool: &str) -> Result<()> {
-    let plus = r#"[...document.querySelectorAll('button')].find(b=>/add files|add photos|attach/i.test(b.getAttribute('aria-label')||''))"#;
-    if std::env::var("CGPT_DEBUG").is_ok() {
-        let buttons = eval(ws, "JSON.stringify([...document.querySelectorAll('button')].map(b=>({aria:b.getAttribute('aria-label'),test:b.getAttribute('data-testid'),text:(b.innerText||'').trim()})))").await?;
-        eprintln!("CGPT_DEBUG tool_buttons={buttons}");
-    }
-    if let Some((x, y)) = center_of(ws, plus).await? {
-        click_at(ws, x, y).await?;
-        sleep(Duration::from_millis(500)).await;
-    }
-    let item = if tool == "web search" {
-        r#"[...document.querySelectorAll('div,button,a,[role=menuitem]')].find(e=>{const t=(e.innerText||e.textContent||'').trim().toLowerCase();return (t==='search'||t.startsWith('web search'))&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0})"#.to_string()
-    } else {
-        format!(
-            r#"[...document.querySelectorAll('div,button,a,[role=menuitem]')].find(e=>{{const t=(e.innerText||e.textContent||'').trim().toLowerCase().replace('create an image','create image');return t.startsWith({t})&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0}})"#,
-            t = serde_json::to_string(tool).unwrap_or_default()
-        )
+    let names: &[&str] = match tool {
+        "web search" => &["Web search", "Search the web"],
+        "deep research" => &["Deep research"],
+        _ => return Err(Error::BadResponse("chatgpt_web: requested tool not found")),
     };
-    if tool == "create image" {
-        let shortcut = r#"[...document.querySelectorAll('button,[role=button],div')].find(e=>/^create an image$/i.test((e.innerText||'').trim()))"#;
-        let mut point = None;
-        for _ in 0..20 {
-            point = center_of(ws, shortcut).await?;
-            if point.is_some() {
-                break;
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-        if let Some((x, y)) = point {
+    let mut menu_found = false;
+    for _ in 0..3 {
+        let Some((x, y)) =
+            ax_exact_point_retry(ws, &["Add files and more", "Add photos and files"], 2).await?
+        else {
+            continue;
+        };
+        menu_found = true;
+        click_at(ws, x, y).await?;
+        sleep(Duration::from_millis(700)).await;
+        if let Some((x, y)) = ax_exact_point_retry(ws, names, 2).await? {
             click_at(ws, x, y).await?;
-            let mode = r#"(()=>{const e=[...document.querySelectorAll('textarea,[contenteditable="true"]')].find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0});return e?.getAttribute('placeholder')||''})()"#;
-            if !wait_until(ws, &format!("({mode}).toLowerCase().includes('image')"), 10).await? {
-                // Some builds expose the shortcut as a suggestion card but require a second
-                // real click after the portal settles.
-                if let Some((sx, sy)) = center_of(ws, shortcut).await? {
-                    click_at(ws, sx, sy).await?;
-                    wait_until(ws, &format!("({mode}).toLowerCase().includes('image')"), 10)
-                        .await?;
-                }
-            }
+            sleep(Duration::from_millis(900)).await;
             return Ok(());
         }
     }
-    if let Some((x, y)) = center_of(ws, &item).await? {
-        click_at(ws, x, y).await?;
-        sleep(Duration::from_millis(500)).await;
-    } else if std::env::var("CGPT_DEBUG").is_ok() {
-        let menu = eval(ws, "JSON.stringify([...document.querySelectorAll('[role=menuitem],button,[role=menu]')].map(e=>({role:e.getAttribute('role'),aria:e.getAttribute('aria-label'),text:(e.innerText||e.textContent||'').trim(),html:e.outerHTML.slice(0,500)})).filter(x=>x.text||x.aria))").await?;
-        eprintln!("CGPT_DEBUG tool_menu={menu}");
+    Err(Error::BadResponse(if menu_found {
+        "chatgpt_web: requested tool not available"
+    } else {
+        "chatgpt_web: tool menu button not found"
+    }))
+}
+
+fn ax_text<'a>(node: &'a Value, key: &str) -> &'a str {
+    node.get(key)
+        .and_then(|value| value.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+fn ax_focusable(node: &Value) -> bool {
+    node.get("properties")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|property| {
+            property.get("name").and_then(Value::as_str) == Some("focusable")
+                && property.pointer("/value/value").and_then(Value::as_bool) == Some(true)
+        })
+}
+
+fn ax_parent<'a>(nodes: &'a [Value], node: &Value) -> Option<&'a Value> {
+    let id = node.get("parentId")?.as_str()?;
+    nodes
+        .iter()
+        .find(|parent| parent.get("nodeId").and_then(Value::as_str) == Some(id))
+}
+
+fn ax_exact_backend(tree: &Value, names: &[&str]) -> Option<i64> {
+    let nodes = tree.get("nodes")?.as_array()?;
+    for node in nodes {
+        if node.get("ignored").and_then(Value::as_bool) == Some(true)
+            || !names
+                .iter()
+                .any(|name| ax_text(node, "name").eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        let mut hit = node;
+        let mut current = node;
+        let mut history = false;
+        for _ in 0..12 {
+            let role = ax_text(current, "role");
+            let name = ax_text(current, "name");
+            if matches!(role, "navigation" | "list" | "listitem" | "link")
+                || ["Chat history", "Sidebar"]
+                    .iter()
+                    .any(|blocked| name.eq_ignore_ascii_case(blocked))
+            {
+                history = true;
+                break;
+            }
+            if ax_focusable(current) {
+                hit = current;
+                break;
+            }
+            let Some(parent) = ax_parent(nodes, current) else {
+                break;
+            };
+            current = parent;
+        }
+        if !history {
+            if let Some(backend) = hit
+                .get("backendDOMNodeId")
+                .and_then(Value::as_i64)
+                .or_else(|| node.get("backendDOMNodeId").and_then(Value::as_i64))
+            {
+                return Some(backend);
+            }
+        }
     }
-    Ok(())
+    None
+}
+
+async fn ax_exact_point(ws: &mut Ws, names: &[&str]) -> Result<Option<(f64, f64)>> {
+    let tree = cmd(
+        ws,
+        "Accessibility.getFullAXTree",
+        json!({"interestingOnly": false}),
+    )
+    .await?;
+    let Some(backend) = ax_exact_backend(&tree, names) else {
+        return Ok(None);
+    };
+    let model = cmd(ws, "DOM.getBoxModel", json!({"backendNodeId": backend})).await?;
+    let Some(quad) = model.pointer("/model/content").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let numbers: Vec<f64> = quad.iter().filter_map(Value::as_f64).collect();
+    if numbers.len() < 8 {
+        return Ok(None);
+    }
+    let x = (numbers[0] + numbers[2] + numbers[4] + numbers[6]) / 4.0;
+    let y = (numbers[1] + numbers[3] + numbers[5] + numbers[7]) / 4.0;
+    Ok(Some((x, y)))
+}
+
+async fn ax_exact_point_retry(
+    ws: &mut Ws,
+    names: &[&str],
+    attempts: usize,
+) -> Result<Option<(f64, f64)>> {
+    for _ in 0..attempts {
+        match ax_exact_point(ws, names).await {
+            Ok(Some(point)) => return Ok(Some(point)),
+            Ok(None) | Err(Error::Timeout(_)) => sleep(Duration::from_millis(250)).await,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 /// Center (viewport coords) of the element returned by `find`, or `None` if absent / zero-sized.
@@ -666,17 +1115,25 @@ async fn center_of(ws: &mut Ws, find: &str) -> Result<Option<(f64, f64)>> {
         "(()=>{{const e={find};if(!e)return null;const r=e.getBoundingClientRect();\
          return (r.width>0&&r.height>0)?[r.left+r.width/2,r.top+r.height/2]:null;}})()"
     );
-    Ok(eval(ws, &js)
-        .await?
+    let value = match eval(ws, &js).await {
+        Ok(value) => value,
+        // ChatGPT replaces the document while hydrating. A stale DOM context is a miss, not a
+        // request failure; the caller will retry against the fresh page.
+        Err(Error::BadResponse("cdp error")) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(value
         .as_array()
         .filter(|a| a.len() == 2)
         .map(|a| (a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0))))
 }
 
 async fn click_at(ws: &mut Ws, x: f64, y: f64) -> Result<()> {
-    let down = json!({"type":"mousePressed","x":x,"y":y,"button":"left","clickCount":1});
-    let up = json!({"type":"mouseReleased","x":x,"y":y,"button":"left","clickCount":1});
+    let down =
+        json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1});
+    let up = json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":1});
     cmd(ws, "Input.dispatchMouseEvent", down).await?;
+    sleep(Duration::from_millis(80)).await;
     cmd(ws, "Input.dispatchMouseEvent", up).await?;
     Ok(())
 }
@@ -855,10 +1312,13 @@ async fn select_model(ws: &mut Ws, want: &str) -> Result<()> {
 async fn get_conversation(ws: &mut Ws, cid: &str) -> Result<Value> {
     // ChatGPT now prefixes web conversation URLs with `WEB:` (/c/WEB:<uuid>); the backend-api
     // conversation endpoint wants the bare id and rejects the prefixed form ("Invalid conversation").
-    let cid = cid.strip_prefix("WEB:").unwrap_or(cid);
+    let cid = normalize_conversation_cid(cid)?;
+    let url = serde_json::to_string(&format!(
+        "/backend-api/conversation/{cid}?include_visually_hidden_messages=true"
+    ))?;
     let js = format!(
         r#"(async()=>{{
-            const u='/backend-api/conversation/{cid}?include_visually_hidden_messages=true';
+            const u={url};
             const signal=AbortSignal.timeout(8000);
             // The browser UI is cookie-authenticated. `/api/auth/session` may rotate or omit
             // accessToken on Google OAuth sessions, so prefer the same cookie request the UI uses.
@@ -876,13 +1336,29 @@ async fn get_conversation(ws: &mut Ws, cid: &str) -> Result<Value> {
 }
 
 async fn is_logged_in(ws: &mut Ws) -> Result<bool> {
-    let js = r#"(async()=>{try{const r=await fetch('/api/auth/session',{credentials:'include'});const v=await r.json();return !!(v&&v.user);}catch(_){return false;}})()"#;
+    // A broken/stalled auth service must become a provider error, not hold the CDP socket
+    // forever. Runtime.evaluate has its own transport timeout, but an explicit browser-side
+    // abort gives ChatGPT's page a chance to unwind the promise cleanly.
+    let js = r#"(async()=>{try{const r=await fetch('/api/auth/session',{credentials:'include',signal:AbortSignal.timeout(8000)});const v=await r.json();return !!(v&&v.user);}catch(_){return false;}})()"#;
     Ok(eval(ws, js).await?.as_bool().unwrap_or(false))
 }
 
 async fn app_shell_authenticated(ws: &mut Ws) -> Result<bool> {
     let js = r#"(()=>{const visible=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0};return ![...document.querySelectorAll('[data-testid="login-button"],[data-testid="signup-button"]')].some(visible)})()"#;
     Ok(eval(ws, js).await?.as_bool().unwrap_or(false))
+}
+
+async fn browser_rate_limit(ws: &mut Ws) -> Result<Option<String>> {
+    let js = r#"(()=>{const t=(document.body?.innerText||'').toLowerCase();for(const p of ['making requests too quickly','temporarily limited access to your conversations','you\'ve made too many requests','too many requests','please wait a few minutes before trying again','unusual activity'])if(t.includes(p))return p;return null})()"#;
+    match eval(ws, js).await {
+        Ok(value) => Ok(value
+            .as_str()
+            .map(|phrase| format!("chatgpt_web: {phrase}; wait before retrying"))),
+        // ChatGPT's renderer can be busy during image submission. A diagnostic probe must not
+        // abort the request that is already in flight.
+        Err(Error::Timeout(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 async fn dismiss_account_picker(ws: &mut Ws) -> Result<()> {
@@ -915,12 +1391,60 @@ async fn install_cid_probe(ws: &mut Ws) -> Result<()> {
     Ok(())
 }
 
-async fn conversation_ids(ws: &mut Ws) -> Result<Vec<String>> {
-    let js = r#"(()=>[...document.querySelectorAll('a[href*="/c/"]')]
-        .map(e=>e.getAttribute('href')||'')
-        .map(u=>u.match(/\/c\/(?:WEB:)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1])
-        .filter(Boolean))()"#;
-    Ok(eval(ws, js)
+fn without_known_cids(candidates: Vec<String>, known: &[String]) -> Vec<String> {
+    candidates
+        .into_iter()
+        .filter(|cid| !known.iter().any(|old| old == cid))
+        .collect()
+}
+
+fn conversation_list_cids(list: &Value) -> Vec<String> {
+    list.get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .filter_map(|cid| normalize_conversation_cid(cid).ok())
+        .collect()
+}
+
+/// Read the authoritative recent-conversation list without touching the submitted page's DOM.
+async fn recent_conversation_cids(ws: &mut Ws, known: &[String]) -> Result<Vec<String>> {
+    let js = r#"(async()=>{
+        const u='/backend-api/conversations?offset=0&limit=28&order=updated&is_archived=false';
+        const signal=AbortSignal.timeout(8000);
+        let r=await fetch(u,{credentials:'include',cache:'no-store',signal});
+        if(!r.ok){
+            const v=await fetch('/api/auth/session',{credentials:'include',signal}).then(x=>x.json()).catch(()=>({}));
+            if(v.accessToken)r=await fetch(u,{credentials:'include',cache:'no-store',signal,headers:{Authorization:'Bearer '+v.accessToken}});
+        }
+        return await r.text();
+    })()"#;
+    let text = eval(ws, js).await?;
+    let list: Value = serde_json::from_str(text.as_str().unwrap_or(""))
+        .map_err(|_| Error::BadResponse("chatgpt_web: conversation list"))?;
+    Ok(without_known_cids(conversation_list_cids(&list), known))
+}
+
+async fn candidate_cids(ws: &mut Ws, known: &[String]) -> Result<Vec<String>> {
+    let js = r#"(()=>{
+        const uuid=/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+        const path=/\/c\/(?:WEB:)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+        const out=[];
+        const direct=[location.href,
+            // The new thread is inserted into the sidebar as soon as the first turn is
+            // accepted. This is the most reliable signal on builds that stream through a
+            // service worker (which hides the response body from page-level fetch hooks).
+            ...[...document.querySelectorAll('a[href*="/c/"]')].map(e=>e.getAttribute('href')||''),
+            ...[...document.querySelectorAll('a[href]')].map(e=>e.getAttribute('href')||'').filter(u=>path.test(u)),
+            ...[...document.querySelectorAll('[data-conversation-id]')].map(e=>e.getAttribute('data-conversation-id')||''),
+            ...(window.__fxConversationIds||[]),
+            ...performance.getEntriesByType('resource').map(e=>e.name).filter(u=>/\/(?:f\/)?conversation(?:\/|\?|$)/i.test(u)),
+            ...performance.getEntriesByType('resource').map(e=>e.name).filter(u=>/\/backend-api\/conversation\//i.test(u))];
+        for(const u of direct){const m=String(u||'').match(path)||String(u||'').match(uuid);if(m&&!out.includes(m[1]))out.push(m[1]);}
+        return out;
+    })()"#;
+    let candidates = eval(ws, js)
         .await?
         .as_array()
         .map(|a| {
@@ -928,76 +1452,418 @@ async fn conversation_ids(ws: &mut Ws) -> Result<Vec<String>> {
                 .filter_map(|x| x.as_str().map(str::to_string))
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok(without_known_cids(candidates, known))
 }
 
 async fn wait_for_cid(ws: &mut Ws, secs: u64, known: &[String]) -> Result<String> {
-    let known = serde_json::to_string(known).unwrap_or_else(|_| "[]".into());
-    let js = r#"(()=>{
-        const uuid=/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-        const path=/\/c\/(?:WEB:)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
-        const known=KNOWN;
-        const direct=[...(window.__fxConversationIds||[]),location.href,
-            // The new thread is inserted into the sidebar as soon as the first turn is
-            // accepted. This is the most reliable signal on builds that stream through a
-            // service worker (which hides the response body from page-level fetch hooks).
-            ...[...document.querySelectorAll('a[href*="/c/"]')].map(e=>e.getAttribute('href')||''),
-            ...[...document.querySelectorAll('a[href]')].map(e=>e.getAttribute('href')||'').filter(u=>path.test(u)),
-            ...[...document.querySelectorAll('[data-conversation-id]')].map(e=>e.getAttribute('data-conversation-id')||''),
-            ...performance.getEntriesByType('resource').map(e=>e.name).filter(u=>/\/(?:f\/)?conversation(?:\/|\?|$)/i.test(u)),
-            ...performance.getEntriesByType('resource').map(e=>e.name).filter(u=>/\/backend-api\/conversation\//i.test(u))];
-        for(const u of direct){const m=u.match(path)||u.match(uuid);if(m&&!known.includes(m[1]))return m[1];}
-        // Some ChatGPT builds keep the newly-created id in serialized React state while the
-        // address bar remains on `/`. Restrict the fallback to conversation-labelled fields;
-        // scanning arbitrary markup returns unrelated UUIDs (feature flags, telemetry, etc.).
-        const html=document.documentElement?.innerHTML||'';
-        const labelled=html.match(/(?:conversation[_-]?id|conversationId)[^0-9a-f]{0,24}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-        if(labelled && !known.includes(labelled[1]))return labelled[1];
-        return null;
-    })()"#
-        .replace("KNOWN", &known);
     for _ in 0..secs {
-        if let Some(c) = eval(ws, &js).await?.as_str() {
-            return Ok(c.to_string());
+        if let Some(c) = candidate_cids(ws, known).await?.into_iter().next() {
+            return Ok(c);
         }
         sleep(Duration::from_secs(1)).await;
     }
     Err(Error::Timeout("chatgpt_web: no conversation id"))
 }
 
-/// Poll for the finished generated image and return its `src`. The thumbnails carry `alt=""`; the
-/// rendered result's alt is `Generated image: <description>`, so match on that prefix.
+/// Return only an image persisted in the conversation that contains this submitted prompt.
+/// DOM and network images are useful byte caches, but cannot prove turn ownership.
 async fn wait_for_image(
     ws: &mut Ws,
     secs: u64,
-    baseline_images: u64,
+    fixed_cid: Option<&str>,
+    known_cids: &[String],
+    query: &str,
     baseline_sources: &[String],
-) -> Result<String> {
-    let baseline_sources = serde_json::to_string(baseline_sources).unwrap_or_else(|_| "[]".into());
-    let js = format!(
-        r#"(()=>{{const old={baseline_sources};const all=[...document.querySelectorAll('img[alt^="Generated image"]')].filter(i=>i.complete&&i.naturalWidth>200&&i.src);const i=all.slice({baseline_images}).pop()||all.find(i=>!old.includes(i.src));
-        return (i&&i.complete&&i.naturalWidth>200)?i.src:null;}})()"#
-    );
-    for _ in 0..secs {
-        if let Some(s) = eval(ws, &js).await?.as_str() {
-            return Ok(s.to_string());
+) -> Result<(String, String)> {
+    let fixed_cid = fixed_cid.map(str::to_owned);
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut query_cid = None;
+    while Instant::now() < deadline {
+        let mut candidates = match &fixed_cid {
+            Some(cid) => vec![cid.clone()],
+            None => match timeout(
+                Duration::from_secs(8),
+                recent_conversation_cids(ws, known_cids),
+            )
+            .await
+            {
+                Ok(Ok(cids)) => cids,
+                _ => Vec::new(),
+            },
+        };
+        if fixed_cid.is_none() {
+            if let Ok(Ok(extra)) =
+                timeout(Duration::from_secs(5), candidate_cids(ws, known_cids)).await
+            {
+                for cid in extra {
+                    if !candidates.iter().any(|old| old == &cid) {
+                        candidates.push(cid);
+                    }
+                }
+            }
         }
-        sleep(Duration::from_secs(1)).await;
+        for cid in candidates {
+            let conv = match timeout(Duration::from_secs(10), get_conversation(ws, &cid)).await {
+                Ok(Ok(conv)) => conv,
+                _ => continue,
+            };
+            if conversation_query_time(&conv, query).is_some() {
+                query_cid = Some(cid.clone());
+            }
+            let Some(source) =
+                conversation_image_source_after_query(&conv, query, baseline_sources)
+            else {
+                continue;
+            };
+            if let Ok(Ok(Some(source))) = timeout(
+                Duration::from_secs(10),
+                resolve_conversation_image_source(ws, &source, &cid),
+            )
+            .await
+            {
+                return Ok((cid, source));
+            }
+        }
+        // Image generation is asynchronous; poll often enough to catch the estuary PNG
+        // before the kickoff budget ends (15s gaps missed a live asset at t≈77s).
+        sleep(Duration::from_secs(4)).await;
     }
-    Err(Error::Timeout("chatgpt_web: no image"))
+    // ChatGPT can accept the prompt and still take longer than one hosted HTTP budget to
+    // persist the conversation. Hand back a poll session (empty cid if the thread is not
+    // listed yet) so the router never failovers and duplicates the generation.
+    if let Some(cid) = query_cid.or(fixed_cid.filter(|cid| !cid.is_empty())) {
+        return Ok((cid, String::new()));
+    }
+    tracing::warn!("chatgpt image conversation not yet listed; parking on poll session");
+    Ok((String::new(), String::new()))
+}
+
+/// Fetch the result of an image generation that outlived its kickoff request. Matches the stored
+/// submitted prompt, so a same-conversation edit cannot bind the response to an older turn.
+async fn fetch_polled_image(
+    ws: &mut Ws,
+    cid: String,
+    query: &str,
+    cost: i64,
+    secs: u64,
+) -> Result<Outcome> {
+    let (image_cid, src) = wait_for_image(
+        ws,
+        secs,
+        (!cid.is_empty()).then_some(cid.as_str()),
+        &[],
+        query,
+        &[],
+    )
+    .await?;
+    if src.is_empty() {
+        let mut out = Outcome::new(
+            "Image is still generating. Call create_image again with this session to fetch it when ready."
+                .into(),
+            cost,
+        );
+        let park = if image_cid.is_empty() { cid } else { image_cid };
+        out.session = Some(format!("img|poll|{park}|{}", percent_encode(query)));
+        return Ok(out);
+    }
+    tracing::debug!("chatgpt generated image found");
+    let mut out = Outcome::new(String::new(), cost.max(1));
+    out.image = Some(fetch_image(ws, &src).await?);
+    out.session = Some(image_cid);
+    Ok(out)
+}
+
+fn trusted_estuary_source(source: &str) -> bool {
+    fn relative(source: &str) -> bool {
+        source
+            .strip_prefix("/backend-api/estuary/content")
+            .is_some_and(|suffix| {
+                suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('?')
+            })
+    }
+    relative(source)
+        || source
+            .strip_prefix("https://chatgpt.com")
+            .is_some_and(relative)
+}
+
+fn sediment_file(source: &str) -> Option<&str> {
+    let file = source.strip_prefix("sediment://")?;
+    (file.len() > "file_".len()
+        && file.starts_with("file_")
+        && file
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    .then_some(file)
+}
+
+fn conversation_image_sources_after(conv: &Value, after: f64) -> Vec<String> {
+    fn walk(v: &Value, image_gen: bool, create_time: f64, out: &mut Vec<(f64, String)>) {
+        match v {
+            Value::String(s) if trusted_estuary_source(s) => {
+                out.push((create_time, s.clone()));
+            }
+            Value::String(s) if image_gen && sediment_file(s).is_some() => {
+                out.push((create_time, s.clone()));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, image_gen, create_time, out)),
+            Value::Object(o) => o
+                .values()
+                .for_each(|x| walk(x, image_gen, create_time, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    let messages: Vec<&Value> = conv
+        .get("mapping")
+        .and_then(Value::as_object)
+        .map(|mapping| {
+            mapping
+                .values()
+                .filter_map(|node| node.get("message"))
+                .filter(|message| !message.is_null())
+                .collect()
+        })
+        .unwrap_or_default();
+    if messages.is_empty() && after == f64::NEG_INFINITY {
+        // Keep parsing older conversation shapes that do not expose a mapping.
+        walk(conv, false, 0.0, &mut found);
+    } else {
+        for message in messages {
+            let create_time = message
+                .get("create_time")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if create_time < after
+                || message.pointer("/author/role").and_then(Value::as_str) == Some("user")
+            {
+                continue;
+            }
+            let image_gen = message
+                .pointer("/metadata/notification_channel_id")
+                .and_then(Value::as_str)
+                == Some("image_gen")
+                || message
+                    .pointer("/metadata/permissions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|permission| {
+                        permission
+                            .get("notification_channel_id")
+                            .and_then(Value::as_str)
+                            == Some("image_gen")
+                    });
+            walk(message, image_gen, create_time, &mut found);
+        }
+    }
+    found.sort_by(|(ta, sa), (tb, sb)| ta.total_cmp(tb).then_with(|| sa.cmp(sb)));
+    let mut out = Vec::new();
+    for (_, source) in found {
+        if !out.iter().any(|old| old == &source) {
+            out.push(source);
+        }
+    }
+    out
+}
+
+fn conversation_image_sources(conv: &Value) -> Vec<String> {
+    conversation_image_sources_after(conv, f64::NEG_INFINITY)
+}
+
+fn stored_query_matches(stored: &str, query: &str) -> bool {
+    const IMAGE_WRAP: &str = "Generate an image from this request:\n";
+    let stored = stored.trim();
+    let query = query.trim();
+    if stored.is_empty() || query.is_empty() {
+        return false;
+    }
+    if stored == query {
+        return true;
+    }
+    query
+        .strip_prefix(IMAGE_WRAP)
+        .is_some_and(|inner| inner.trim() == stored)
+        || stored
+            .strip_prefix(IMAGE_WRAP)
+            .is_some_and(|inner| inner.trim() == query)
+}
+
+fn conversation_query_time(conv: &Value, query: &str) -> Option<f64> {
+    conv.get("mapping")?
+        .as_object()?
+        .values()
+        .filter_map(|node| node.get("message"))
+        .filter(|message| {
+            message.pointer("/author/role").and_then(Value::as_str) == Some("user")
+                && message
+                    .pointer("/content/parts")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        stored_query_matches(
+                            &parts
+                                .iter()
+                                .filter_map(|part| {
+                                    part.as_str()
+                                        .or_else(|| part.get("text").and_then(Value::as_str))
+                                })
+                                .collect::<String>(),
+                            query,
+                        )
+                    })
+        })
+        .filter_map(|message| message.get("create_time").and_then(Value::as_f64))
+        .max_by(f64::total_cmp)
+}
+
+fn conversation_image_source_after_query(
+    conv: &Value,
+    query: &str,
+    baseline_sources: &[String],
+) -> Option<String> {
+    let query_time = conversation_query_time(conv, query)?;
+    conversation_image_sources_after(conv, query_time)
+        .into_iter()
+        .rev()
+        .find(|source| !baseline_sources.iter().any(|old| old == source))
+}
+
+fn sediment_download_url(source: &str, cid: &str) -> Option<String> {
+    let file = sediment_file(source)?;
+    let cid = normalize_conversation_cid(cid).ok()?;
+    Some(format!(
+        "/backend-api/files/download/{file}?conversation_id={cid}&inline=false&download_intent=false"
+    ))
+}
+
+async fn resolve_conversation_image_source(
+    ws: &mut Ws,
+    source: &str,
+    cid: &str,
+) -> Result<Option<String>> {
+    if trusted_estuary_source(source) {
+        return Ok(Some(source.to_string()));
+    }
+    let Some(download_path) = sediment_download_url(source, cid) else {
+        return Ok(None);
+    };
+    let path = serde_json::to_string(&download_path).unwrap_or_default();
+    let js = format!(
+        r#"(async()=>{{
+            const u={path};
+            const signal=AbortSignal.timeout(8000);
+            let r=await fetch(u,{{credentials:'include',signal}});
+            if(!r.ok){{
+                const v=await fetch('/api/auth/session',{{credentials:'include',signal}}).then(x=>x.json()).catch(()=>({{}}));
+                if(v.accessToken)r=await fetch(u,{{credentials:'include',signal,headers:{{Authorization:'Bearer '+v.accessToken}}}});
+            }}
+            if(!r.ok)return null;
+            const v=await r.json().catch(()=>null);
+            return v&&typeof v.download_url==='string'&&v.download_url?v.download_url:null;
+        }})()"#
+    );
+    Ok(eval(ws, &js)
+        .await?
+        .as_str()
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned))
 }
 
 /// Fetch the rendered image inside the page (its session cookies satisfy the gate) and split the
 /// resulting `data:<mime>;base64,<data>` URL into mime + b64. `eval` already awaits the promise.
 async fn fetch_image(ws: &mut Ws, src: &str) -> Result<OutImage> {
+    tracing::debug!(
+        source_kind = image_url_kind(src),
+        "chatgpt fetching generated image bytes"
+    );
+    // Network.getResponseBody reads the exact authenticated response already received by
+    // Chromium. This avoids a second fetch, which can hang or be rejected after the signed URL
+    // has been consumed by the page.
+    if let Some(item) = cdp_image_response(src) {
+        if let Ok(body) = cmd(
+            ws,
+            "Network.getResponseBody",
+            json!({"requestId": item.request_id}),
+        )
+        .await
+        {
+            if let (Some(data), Some(base64_encoded)) = (
+                body.get("body").and_then(Value::as_str),
+                body.get("base64Encoded").and_then(Value::as_bool),
+            ) {
+                if base64_encoded && !data.is_empty() {
+                    return Ok(OutImage {
+                        mime: if item.mime.is_empty() {
+                            "image/png".into()
+                        } else {
+                            item.mime
+                        },
+                        b64: data.into(),
+                    });
+                }
+            }
+        }
+    }
     let s = serde_json::to_string(src).unwrap_or_default();
+    // ChatGPT's signed estuary URL can hang on a second fetch even though Chromium has already
+    // decoded and displayed the image. Capture the rendered image element first; this stays
+    // inside the authenticated browser and does not depend on the CDN request completing again.
+    let clip = eval(
+        ws,
+        &format!(
+            r#"(()=>{{const i=[...document.images].find(i=>(i.currentSrc||i.src)==={s});if(!i)return null;const r=i.getBoundingClientRect();return i.complete&&i.naturalWidth>0&&r.width>0&&r.height>0?{{x:r.left,y:r.top,width:r.width,height:r.height,scale:1}}:null;}})()"#
+        ),
+    )
+    .await?;
+    if !clip.is_null() {
+        // Chromium can stop answering captureScreenshot while the image compositor is busy.
+        // The authenticated in-page fetch below is an equivalent fallback; a screenshot timeout
+        // must not discard a successfully rendered image.
+        match cmd(
+            ws,
+            "Page.captureScreenshot",
+            json!({"format":"png","fromSurface":true,"captureBeyondViewport":true,"clip":clip}),
+        )
+        .await
+        {
+            Ok(shot) => {
+                if let Some(b64) = shot
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Ok(OutImage {
+                        mime: "image/png".into(),
+                        b64: b64.into(),
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "chatgpt browser screenshot unavailable; using in-page image fetch")
+            }
+        }
+    }
+    // If the source came from conversation JSON rather than a mounted image element, load it
+    // into a tiny detached Image and read it via canvas. This keeps the request cookie-authenticated
+    // and avoids a second CDP screenshot of the busy compositor.
     let js = format!(
         r#"(async()=>{{
-            const b=await fetch({s}).then(r=>r.blob());
-            return await new Promise(res=>{{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.readAsDataURL(b);}});
+            try {{
+                const b=await fetch({s},{{credentials:'include',signal:AbortSignal.timeout(12000)}})
+                    .then(r=>{{if(!r.ok)throw Error('HTTP '+r.status);return r.blob();}});
+                return await new Promise(res=>{{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>res(null);fr.readAsDataURL(b);}});
+            }} catch (_) {{ return null; }}
         }})()"#
     );
-    let data = eval(ws, &js).await?;
+    let data = match tokio::time::timeout(Duration::from_secs(15), eval(ws, &js)).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(Error::Timeout(_))) | Err(_) => Value::Null,
+        Ok(Err(error)) => return Err(error),
+    };
+    if data.as_str().is_none() {
+        return Err(Error::BadResponse("chatgpt_web: image bytes unavailable"));
+    }
     let (mime, b64) = data
         .as_str()
         .and_then(|u| u.strip_prefix("data:"))
@@ -1011,8 +1877,13 @@ async fn fetch_image(ws: &mut Ws, src: &str) -> Result<OutImage> {
 
 async fn wait_until(ws: &mut Ws, cond: &str, secs: u64) -> Result<bool> {
     for _ in 0..secs {
-        if eval(ws, cond).await?.as_bool() == Some(true) {
-            return Ok(true);
+        match eval(ws, cond).await {
+            Ok(value) if value.as_bool() == Some(true) => return Ok(true),
+            Ok(_) => {}
+            Err(Error::Timeout(_)) => {
+                tracing::warn!("chatgpt browser wait condition timed out; retrying");
+            }
+            Err(e) => return Err(e),
         }
         sleep(Duration::from_secs(1)).await;
     }
@@ -1035,6 +1906,112 @@ async fn cmd(ws: &mut Ws, method: &str, params: Value) -> Result<Value> {
 
 static CDP_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Debug)]
+struct CdpImageResponse {
+    request_id: String,
+    url: String,
+    mime: String,
+    finished: bool,
+}
+
+fn image_url_kind(url: &str) -> &'static str {
+    if url.contains("/estuary/content") {
+        "estuary"
+    } else if url.contains("/backend-api/files") {
+        "file"
+    } else if url.contains("/dalle") {
+        "dalle"
+    } else if url.starts_with("data:image/") {
+        "data"
+    } else {
+        "other"
+    }
+}
+
+static CDP_IMAGE_RESPONSES: OnceLock<Mutex<Vec<CdpImageResponse>>> = OnceLock::new();
+
+fn cdp_image_responses() -> &'static Mutex<Vec<CdpImageResponse>> {
+    CDP_IMAGE_RESPONSES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn clear_cdp_image_responses() {
+    if let Ok(mut responses) = cdp_image_responses().lock() {
+        responses.clear();
+    }
+}
+
+fn record_cdp_event(msg: &Value) {
+    match msg.get("method").and_then(Value::as_str) {
+        Some("Network.responseReceived") => {
+            let Some(response) = msg.pointer("/params/response") else {
+                return;
+            };
+            let Some(url) = response.get("url").and_then(Value::as_str) else {
+                return;
+            };
+            if url.contains("/backend-api/conversation") || url.contains("/backend-api/files") {
+                tracing::debug!(
+                    endpoint = image_url_kind(url),
+                    "chatgpt browser backend response"
+                );
+            }
+            let mime = response
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !(mime.starts_with("image/")
+                || url.contains("/estuary/content")
+                || url.contains("/dalle")
+                || (url.contains("/backend-api/files") && mime != "application/json"))
+            {
+                return;
+            }
+            let Some(request_id) = msg.pointer("/params/requestId").and_then(Value::as_str) else {
+                return;
+            };
+            if let Ok(mut responses) = cdp_image_responses().lock() {
+                if !responses.iter().any(|item| item.request_id == request_id) {
+                    tracing::debug!(
+                        kind = image_url_kind(url),
+                        mime,
+                        "chatgpt browser image network response"
+                    );
+                    responses.push(CdpImageResponse {
+                        request_id: request_id.to_string(),
+                        url: url.to_string(),
+                        mime: mime.to_string(),
+                        finished: false,
+                    });
+                }
+            }
+        }
+        Some("Network.loadingFinished") => {
+            let Some(request_id) = msg.pointer("/params/requestId").and_then(Value::as_str) else {
+                return;
+            };
+            if let Ok(mut responses) = cdp_image_responses().lock() {
+                if let Some(item) = responses
+                    .iter_mut()
+                    .find(|item| item.request_id == request_id)
+                {
+                    item.finished = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cdp_image_response(src: &str) -> Option<CdpImageResponse> {
+    cdp_image_responses()
+        .lock()
+        .ok()?
+        .iter()
+        .rev()
+        .find(|item| item.finished && item.url == src)
+        .cloned()
+}
+
 /// Like `cmd` but optionally targets an attached (OOPIF) session by id. Responses carry the same
 /// globally-unique `id`, so matching by id works regardless of which session answered.
 async fn cmd_on(ws: &mut Ws, sess: Option<&str>, method: &str, params: Value) -> Result<Value> {
@@ -1044,12 +2021,14 @@ async fn cmd_on(ws: &mut Ws, sess: Option<&str>, method: &str, params: Value) ->
         frame["sessionId"] = json!(s);
     }
     ws.send(Message::Text(frame.to_string().into())).await?;
-    let result = timeout(Duration::from_secs(15), async {
+    let result = timeout(CDP_COMMAND_WAIT, async {
         while let Some(f) = ws.next().await {
             if let Message::Text(txt) = f? {
                 let msg: Value = serde_json::from_str(txt.as_str())?;
+                record_cdp_event(&msg);
                 if msg["id"].as_u64() == Some(id) {
                     if msg.get("error").is_some() {
+                        tracing::warn!(method, response = %msg, "chatgpt browser CDP returned an error");
                         return Err(Error::BadResponse("cdp error"));
                     }
                     return Ok(msg["result"].clone());
@@ -1061,7 +2040,14 @@ async fn cmd_on(ws: &mut Ws, sess: Option<&str>, method: &str, params: Value) ->
     .await;
     match result {
         Ok(result) => result,
-        Err(_) => Err(Error::Timeout("chatgpt_web: cdp command")),
+        Err(_) => {
+            let detail = params
+                .get("expression")
+                .and_then(Value::as_str)
+                .map(|s| s.chars().take(180).collect::<String>());
+            tracing::warn!(method, ?detail, "chatgpt browser CDP command timed out");
+            Err(Error::Timeout("chatgpt_web: cdp command"))
+        }
     }
 }
 
@@ -1224,21 +2210,11 @@ async fn start_dr_plan(ws: &mut Ws, cid: &str) -> Result<Outcome> {
     Ok(out)
 }
 
-/// Save a screenshot of the headless page (debugging the driver).
-#[allow(dead_code)]
-async fn screenshot(ws: &mut Ws, path: &Path) -> Result<()> {
-    let r = cmd(ws, "Page.captureScreenshot", json!({ "format": "png" })).await?;
-    if let Some(d) = r["data"].as_str() {
-        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(d) {
-            let _ = std::fs::write(path, bytes);
-        }
-    }
-    Ok(())
-}
-
 async fn wait_for_page(port: u16) -> Result<String> {
     let http = reqwest::Client::new();
-    for _ in 0..20 {
+    // Hosted Chromium can cold-start under CPU contention while loading the ChatGPT shell.
+    // Ten seconds made a healthy browser look unavailable and caused an unnecessary failover.
+    for _ in 0..120 {
         if let Ok(resp) = http
             .get(format!("http://127.0.0.1:{port}/json"))
             .send()
@@ -1270,13 +2246,73 @@ fn login_err() -> Error {
     Error::Provider {
         provider: "chatgpt_web",
         status: 401,
-        body: "not logged in; run `fetchira login chatgpt_web`".into(),
+        body: format!(
+            "not logged in; {}",
+            crate::usage::provider_login_hint("chatgpt_web")
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::norm;
+    use super::{
+        ax_exact_backend, composer_backend_node, conversation_image_source_after_query,
+        conversation_image_sources, conversation_list_cids, conversation_query_time, norm,
+        normalize_conversation_cid, parse_img_poll, percent_decode, percent_encode,
+        sediment_download_url, stored_query_matches, trusted_estuary_source, without_known_cids,
+    };
+
+    #[test]
+    fn img_poll_query_round_trips_separators_and_unicode() {
+        for query in [
+            "A blue square|with text 100% sure",
+            "multiline\nprompt: emoji 🖼️",
+            "Generate an image from this request:\nplain",
+        ] {
+            assert_eq!(percent_decode(&percent_encode(query)), query);
+        }
+        assert!(percent_encode("a|b").find('|').is_none());
+    }
+
+    #[test]
+    fn img_poll_allows_empty_cid_before_conversation_lists() {
+        let query = "Generate an image from this request:\nHOSTED";
+        let token = format!("img|poll||{}", percent_encode(query));
+        let (cid, got) = parse_img_poll(Some(&token)).unwrap().unwrap();
+        assert!(cid.is_empty());
+        assert_eq!(got, query);
+        let cid = "6a7ad1b3-9208-83eb-a59c-a79ff60054d4";
+        let token = format!("img|poll|{cid}|{}", percent_encode(query));
+        let parsed = parse_img_poll(Some(&token)).unwrap().unwrap();
+        assert_eq!(parsed.0, cid);
+        assert_eq!(parsed.1, query);
+        assert!(parse_img_poll(Some("img|poll|not-a-uuid|q")).is_err());
+        assert!(parse_img_poll(Some("dr|poll|abc")).unwrap().is_none());
+    }
+
+    #[test]
+    fn ax_tool_picker_rejects_sidebar_history() {
+        let tree = serde_json::json!({"nodes": [
+            {"nodeId":"history","role":{"value":"link"},"name":{"value":"Create image"},"backendDOMNodeId":10},
+            {"nodeId":"label","parentId":"row","role":{"value":"generic"},"name":{"value":"Create image"},"backendDOMNodeId":20},
+            {"nodeId":"row","parentId":"group","role":{"value":"generic"},"name":{"value":""},"backendDOMNodeId":21,
+             "properties":[{"name":"focusable","value":{"value":true}}]},
+            {"nodeId":"group","role":{"value":"group"},"name":{"value":""}}
+        ]});
+        assert_eq!(ax_exact_backend(&tree, &["Create image"]), Some(21));
+    }
+
+    #[test]
+    fn ax_tree_finds_chatgpt_composer() {
+        let tree = serde_json::json!({
+            "nodes": [{
+                "role": {"value": "textbox"},
+                "name": {"value": "chat with chatgpt"},
+                "backendDOMNodeId": 42
+            }]
+        });
+        assert_eq!(composer_backend_node(&tree), Some(42));
+    }
 
     #[test]
     fn norm_matches_picker_labels() {
@@ -1286,5 +2322,185 @@ mod tests {
         assert_eq!(norm("o3"), "o3");
         // user input variants land on the same key as the live label
         assert_eq!(norm("GPT 5.4"), norm("GPT-5.4"));
+    }
+
+    #[test]
+    fn prefixed_image_prompt_matches_unprefixed_user_turn() {
+        assert!(stored_query_matches(
+            "orange circle",
+            "Generate an image from this request:\norange circle"
+        ));
+        let conv = serde_json::json!({"mapping": {
+            "prompt": {"message": {
+                "create_time": 2.0,
+                "author": {"role": "user"},
+                "content": {"parts": ["orange circle"]}
+            }}
+        }});
+        assert!(conversation_query_time(
+            &conv,
+            "Generate an image from this request:\norange circle"
+        )
+        .is_some());
+        assert!(!stored_query_matches("orange circle", "circle"));
+    }
+
+    #[test]
+    fn image_source_must_follow_the_submitted_query() {
+        let conv = serde_json::json!({"mapping": {
+            "stale": {"message": {
+                "create_time": 1.0,
+                "author": {"role": "tool"},
+                "metadata": {"notification_channel_id": "image_gen"},
+                "content": {"parts": [{"asset_pointer": "sediment://file_stale"}]}
+            }},
+            "prompt": {"message": {
+                "create_time": 2.0,
+                "author": {"role": "user"},
+                "content": {"parts": ["orange circle"]}
+            }},
+            "fresh": {"message": {
+                "create_time": 3.0,
+                "author": {"role": "tool"},
+                "metadata": {"notification_channel_id": "image_gen"},
+                "content": {"parts": [{"asset_pointer": "sediment://file_orange"}]}
+            }}
+        }});
+
+        assert_eq!(
+            conversation_image_source_after_query(&conv, "orange circle", &[]).as_deref(),
+            Some("sediment://file_orange")
+        );
+        assert_eq!(
+            conversation_image_source_after_query(&conv, "foreign prompt", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn candidate_baseline_filters_every_preexisting_cid_source() {
+        let known = vec!["sidebar-old".into(), "probe-old".into()];
+        assert_eq!(
+            without_known_cids(
+                vec!["sidebar-old".into(), "probe-old".into(), "fresh".into()],
+                &known,
+            ),
+            vec!["fresh"]
+        );
+    }
+
+    #[test]
+    fn conversation_list_provides_renderer_independent_candidates() {
+        let fresh = "6a7ac323-f374-83eb-b93d-9bd32f32923d";
+        let older = "6a7ab8aa-0000-4000-8000-000000000000";
+        let list = serde_json::json!({"items": [
+            {"id": format!("WEB:{fresh}")},
+            {"id": older},
+            {"id": "../../malicious"}
+        ]});
+        assert_eq!(conversation_list_cids(&list), vec![fresh, older]);
+    }
+
+    #[test]
+    fn conversation_session_accepts_only_a_uuid_with_optional_web_prefix() {
+        let cid = "6A7AC323-F374-83EB-B93D-9BD32F32923D";
+        assert_eq!(
+            normalize_conversation_cid(&format!("WEB:{cid}")).unwrap(),
+            cid.to_ascii_lowercase()
+        );
+        for malicious in [
+            "../../api/auth/session",
+            "WEB:WEB:6a7ac323-f374-83eb-b93d-9bd32f32923d",
+            "6a7ac323-f374-83eb-b93d-9bd32f32923d';alert(1)//",
+            "//evil.test/6a7ac323-f374-83eb-b93d-9bd32f32923d",
+        ] {
+            assert!(normalize_conversation_cid(malicious).is_err());
+        }
+    }
+
+    #[test]
+    fn conversation_image_source_rejects_untrusted_urls() {
+        assert!(trusted_estuary_source("/backend-api/estuary/content/file"));
+        assert!(trusted_estuary_source(
+            "https://chatgpt.com/backend-api/estuary/content/file"
+        ));
+        for foreign in [
+            "https://evil.test/backend-api/estuary/content/file",
+            "https://chatgpt.com.evil.test/backend-api/estuary/content/file",
+            "//evil.test/backend-api/estuary/content/file",
+            "data:text/plain,/backend-api/estuary/content/file",
+        ] {
+            assert!(!trusted_estuary_source(foreign));
+        }
+
+        let conv = serde_json::json!({"parts": [
+            "https://evil.test/backend-api/estuary/content/file",
+            "//evil.test/backend-api/estuary/content/file",
+            "data:text/plain,/backend-api/estuary/content/file",
+            "/backend-api/estuary/content/file",
+            "https://chatgpt.com/backend-api/estuary/content/file"
+        ]});
+        assert_eq!(
+            conversation_image_sources(&conv),
+            vec![
+                "/backend-api/estuary/content/file",
+                "https://chatgpt.com/backend-api/estuary/content/file"
+            ]
+        );
+    }
+
+    #[test]
+    fn sediment_image_source_resolves_to_file_download() {
+        let cid = "6a7a71ac-0afc-83eb-ac78-cad9334210e4";
+        let source = "sediment://file_00000000119481f4a8f8bdb6105f9dc7";
+        let conv = serde_json::json!({
+            "mapping": {
+                "user-upload": {"message": {
+                    "create_time": 1.0,
+                    "author": {"role": "user"},
+                    "metadata": {"notification_channel_id": "file_upload"},
+                    "content": {"parts": [{"asset_pointer": "sediment://file_user"}]}
+                }},
+                "older-image": {"message": {
+                    "create_time": 2.0,
+                    "author": {"role": "tool"},
+                    "metadata": {"notification_channel_id": "image_gen"},
+                    "content": {"parts": [{"asset_pointer": "sediment://file_old"}]}
+                }},
+                "newer-image": {"message": {
+                    "create_time": 3.0,
+                    "author": {"role": "tool"},
+                    "metadata": {"permissions": [{"notification_channel_id": "image_gen"}]},
+                    "content": {"parts": [{"asset_pointer": source}]}
+                }},
+                "legacy": {"message": {
+                    "create_time": 4.0,
+                    "author": {"role": "assistant"},
+                    "metadata": {},
+                    "content": {"parts": ["/backend-api/estuary/content/legacy"]}
+                }}
+            }
+        });
+
+        assert_eq!(
+            conversation_image_sources(&conv),
+            vec![
+                "sediment://file_old",
+                source,
+                "/backend-api/estuary/content/legacy"
+            ]
+        );
+        assert_eq!(
+            sediment_download_url(source, cid).as_deref(),
+            Some("/backend-api/files/download/file_00000000119481f4a8f8bdb6105f9dc7?conversation_id=6a7a71ac-0afc-83eb-ac78-cad9334210e4&inline=false&download_intent=false")
+        );
+        assert_eq!(
+            sediment_download_url("https://evil.test/image.png", cid),
+            None
+        );
+        assert_eq!(
+            sediment_download_url("sediment://file_safe?redirect=evil", cid),
+            None
+        );
     }
 }

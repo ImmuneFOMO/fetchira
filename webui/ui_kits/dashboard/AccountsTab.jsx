@@ -14,7 +14,7 @@ function planBadge(tier) {
   return <Badge tone={tier === 'free' ? 'neutral' : 'cyan'} variant="outline">{tier}</Badge>;
 }
 
-// "anton.bavirov@gmail.com" -> "an****@gm****om"
+// "user@example.com" -> "us****@ex****om"
 function maskEmail(e) {
   const at = String(e).indexOf('@');
   if (at < 1) return e;
@@ -26,8 +26,8 @@ function maskEmail(e) {
 function EmailChip({ email }) {
   const [show, setShow] = React.useState(false);
   return (
-    <span onClick={(e) => { e.stopPropagation(); setShow((s) => !s); }} title="click to reveal"
-      style={{ cursor: 'pointer', color: 'var(--text-lo)' }}>{show ? email : maskEmail(email)}</span>
+    <button type="button" onClick={(e) => { e.stopPropagation(); setShow((s) => !s); }} title="click to reveal"
+      style={{ border: 0, background: 'transparent', cursor: 'pointer', color: 'var(--text-lo)', padding: 0 }}>{show ? email : maskEmail(email)}</button>
   );
 }
 
@@ -51,7 +51,7 @@ function PasteSessionModal({ label, onClose }) {
       <div onClick={(e) => e.stopPropagation()} style={{ width: 460, maxWidth: '100%', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
           <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Paste session · <span style={{ color: 'var(--lime-500)' }}>{label}</span></span>
-          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
+          <button aria-label="Close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
         </div>
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <textarea value={val} onChange={(e) => setVal(e.target.value)} spellCheck={false} autoFocus
@@ -87,7 +87,7 @@ function RenameModal({ label, onClose }) {
       <div onClick={(e) => e.stopPropagation()} style={{ width: 420, maxWidth: '100%', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
           <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Rename · <span style={{ color: 'var(--lime-500)' }}>{label}</span></span>
-          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
+          <button aria-label="Close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
         </div>
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Input label="New label" value={val} mono onChange={(e) => setVal(e.target.value)} />
@@ -127,7 +127,7 @@ function ProxyModal({ label, current, onClose }) {
       <div onClick={(e) => e.stopPropagation()} style={{ width: 440, maxWidth: '100%', background: 'var(--surface-raised, #0e1016)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
           <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Proxy · <span style={{ color: 'var(--lime-500)' }}>{label}</span></span>
-          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
+          <button aria-label="Close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, padding: 4 }}>✕</button>
         </div>
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ display: 'flex', gap: 6 }}>{seg('direct', 'Direct')}{seg('pool', 'Pool')}{seg('custom', 'Custom')}</div>
@@ -172,7 +172,7 @@ function RowMenu({ r, onLogin, onError, disabled }) {
 
   return (
     <span style={{ position: 'relative', display: 'inline-block' }}>
-      <Button size="sm" variant="ghost" disabled={disabled} onClick={(e) => {
+      <Button size="sm" variant="ghost" aria-label={`More actions for ${r.label}`} disabled={disabled} onClick={(e) => {
         const b = e.currentTarget.getBoundingClientRect();
         setPos({ top: b.bottom + 4, right: window.innerWidth - b.right });
         setOpen((o) => !o);
@@ -202,6 +202,7 @@ function RowActions({ r }) {
   const [busy, setBusy] = React.useState(null);
   const busyRef = React.useRef(false);
   const [test, setTest] = React.useState(null);
+  const [hostedLogin, setHostedLogin] = React.useState(false);
   const needsLogin = r.status === 'needs-login';
   const spinner = <span className="fx-spin" aria-hidden="true" style={{ width: 11, height: 11, flexShrink: 0, border: '1.5px solid currentColor', borderRightColor: 'transparent', borderRadius: '50%' }} />;
 
@@ -215,6 +216,10 @@ function RowActions({ r }) {
     setBusy(null);
   };
   const doLogin = async (browser) => {
+    if (window.fxHosted) {
+      setHostedLogin(true);
+      return;
+    }
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy('login'); setTest(null);
@@ -235,6 +240,7 @@ function RowActions({ r }) {
         ? <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={() => doLogin('chrome')} disabled={!!busy}>{busy === 'login' ? <React.Fragment>{spinner} Waiting…</React.Fragment> : needsLogin ? 'Login' : 'Re-login'}</Button>
         : <span style={{ width: 62 }} />}
       <RowMenu r={r} onLogin={doLogin} onError={(e) => setTest({ ok: false, error: e })} disabled={!!busy} />
+      {hostedLogin && <window.AddAccountModal initialProvider={r.provider} initialLabel={r.label} loginOnly onClose={() => { setHostedLogin(false); if (window.fxRefresh) window.fxRefresh(); }} />}
     </div>
   );
 }
@@ -320,9 +326,11 @@ function AccountRow({ r }) {
         <tr style={{ background: 'var(--surface-inset)' }}>
           <td />
           <td colSpan={7} style={{ padding: '10px 14px 14px 30px' }}>
-            {r.limits
-              ? <LimitChips limits={r.limits} />
-              : spinner('loading live limits…')}
+            {r.pending
+              ? spinner('loading live limits…')
+              : r.limits
+                ? <LimitChips limits={r.limits} />
+                : <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>live limits unavailable · account is still connected</span>}
           </td>
         </tr>
       )}

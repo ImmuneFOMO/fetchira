@@ -683,10 +683,26 @@ impl Provider {
 
     /// Live per-tier tool/model limits + the selectable model catalog, when the provider exposes
     /// them. Best-effort: `None` if unsupported or the fetch fails.
-    pub async fn live_limits(&self, client: &wreq::Client, acct: &str) -> Option<LiveLimits> {
+    pub async fn live_limits(
+        &self,
+        client: &wreq::Client,
+        acct: &str,
+        cookies: &[crate::web::Cookie],
+        browser_fallback: bool,
+    ) -> Option<LiveLimits> {
         match self.kind {
             // chatgpt keys its bearer cache (and the rotated-cookie capture) by account label.
-            ProviderKind::ChatgptWeb => chatgpt_web::limits(&self.base, client, acct).await.ok(),
+            ProviderKind::ChatgptWeb => match chatgpt_web::limits(&self.base, client, acct).await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(provider = "chatgpt_web", account = %acct, error = %e, "live limits failed");
+                    if browser_fallback {
+                        chatgpt_browser::limits(cookies).await.ok()
+                    } else {
+                        None
+                    }
+                }
+            },
             ProviderKind::GrokWeb => grok_web::limits(&self.base, client).await.ok(),
             ProviderKind::GeminiWeb => gemini_web::limits(&self.base, client).await.ok(),
             _ => None,

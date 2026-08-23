@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, s, Capability, Hit, Input, LiveBalance, Outcome};
+use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -120,7 +120,8 @@ async fn research(
     )
     .await?;
     let v: Value = check("exa", resp).await?.json().await?;
-    Ok(Outcome::new(fmt_hits(&hits(&v)), 1))
+    let text = research_text(&v).ok_or(Error::BadResponse("exa"))?;
+    Ok(Outcome::new(text, 1))
 }
 
 fn research_body(input: &Input) -> Result<Value> {
@@ -130,6 +131,18 @@ fn research_body(input: &Input) -> Result<Value> {
         _ => "deep",
     });
     Ok(body)
+}
+
+fn research_text(v: &Value) -> Option<String> {
+    let output = &v["output"]["content"];
+    if !output.is_null() {
+        let text = value_to_text(output).trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    let text = fmt_hits(&hits(v));
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// Live $ balance via the dashboard's cookie session (the api-key has no balance endpoint — exa is a
@@ -246,5 +259,28 @@ mod tests {
         })
         .unwrap();
         assert_eq!(deep["type"], "deep-reasoning");
+    }
+
+    #[test]
+    fn research_prefers_synthesized_output() {
+        let text = research_text(&json!({
+            "results": [],
+            "output": { "content": "Final deep report" }
+        }))
+        .unwrap();
+        assert_eq!(text, "Final deep report");
+    }
+
+    #[test]
+    fn research_falls_back_to_hits() {
+        let text = research_text(&json!({
+            "results": [{
+                "title": "A",
+                "url": "https://example.com",
+                "text": "B"
+            }]
+        }))
+        .unwrap();
+        assert!(text.contains("https://example.com"));
     }
 }

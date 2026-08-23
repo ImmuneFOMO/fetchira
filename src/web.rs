@@ -194,6 +194,17 @@ pub(crate) fn detect_browser() -> Option<Browser> {
     browser_candidates(None).into_iter().next()
 }
 
+pub(crate) fn require_browser() -> Result<()> {
+    if std::env::var("FETCHIRA_REQUIRE_BROWSER").as_deref() == Ok("1") && detect_browser().is_none()
+    {
+        return Err(Error::Config(
+            "hosted browser runtime is incomplete: Chromium is missing from the Fetchira image"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 // (url, cookie-domain, auth-cookie, optional page-eval that must be true for a *real* login —
 // Google keeps its auth cookie while signed out, so the cookie alone isn't proof).
 type LoginTarget = (

@@ -116,6 +116,7 @@ function KeyProviderCard({ p, onOpenModal }) {
 // runs the guided login (browser picker, session-paste fallback).
 function WebProviderCard({ p, onOpenModal }) {
   const connected = (window.FX.accounts || []).some((a) => a.provider === p.id && a.loggedIn);
+  const hosted = !!window.fxHosted;
   return (
     <Card accent={connected ? 'ok' : undefined} pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -129,7 +130,9 @@ function WebProviderCard({ p, onOpenModal }) {
         {connected ? 'Add another account' : 'Connect — sign in via browser'}
       </Button>
       <span style={{ fontFamily: 'var(--font-ui)', fontSize: 11, color: 'var(--text-faint)' }}>
-        Opens a browser window for you to sign in (~30s). Cookies stay on this machine — no password is stored.
+        {hosted
+          ? 'Run the one-time command shown next on your computer. Your local Fetchira opens the browser and uploads an encrypted session to this server.'
+          : 'Opens a browser window for you to sign in (~30s). Cookies stay on this machine — no password is stored.'}
       </span>
     </Card>
   );
@@ -183,6 +186,10 @@ function TrySearch() {
 }
 
 function Onboarding({ onDone }) {
+  return window.fxHosted ? <HostedOnboarding onDone={onDone} /> : <LocalOnboarding onDone={onDone} />;
+}
+
+function LocalOnboarding({ onDone }) {
   const [modalProv, setModalProv] = React.useState(null);
   const catalog = obCatalog();
   const accounts = window.FX.accounts || [];
@@ -196,7 +203,7 @@ function Onboarding({ onDone }) {
   return (
     <div style={{ maxWidth: 860, margin: '5vh auto 60px', padding: '0 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <img src="../../assets/logo-mark.svg" alt="" style={{ width: 34, height: 34 }} />
+        <img src={window.fxHosted ? '/admin/assets/assets/logo-mark.svg' : '../../assets/logo-mark.svg'} alt="" width="34" height="34" style={{ width: 34, height: 34 }} />
         <span style={{ fontFamily: 'var(--font-display)', fontSize: 24, fontWeight: 600, letterSpacing: '-0.03em', color: 'var(--text-hi)' }}>fetchira</span>
       </div>
       <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.02em', marginBottom: 6 }}>
@@ -250,6 +257,78 @@ function Onboarding({ onDone }) {
       )}
     </div>
   );
+}
+
+function HostedOnboarding({ onDone }) {
+  const [modalProv, setModalProv] = React.useState(null);
+  const [key, setKey] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [commandCopied, setCommandCopied] = React.useState(false);
+  const [connectionReady, setConnectionReady] = React.useState(false);
+  const [checkingConnection, setCheckingConnection] = React.useState(false);
+  const catalog = obCatalog();
+  const accounts = window.FX.accounts || [];
+  const endpoint = `${location.origin}/mcp`;
+  const createKey = async () => {
+    setBusy(true); setError('');
+    try {
+      const result = await window.hostedAdminJSON('/admin/keys', { method: 'POST', body: { id: `local-${Math.random().toString(36).slice(2, 8)}`, name: 'Local Fetchira', scopes: ['mcp', 'usage:read', 'accounts:manage'], rpm: 60, daily_limit: 0, monthly_limit: 0, concurrency_limit: 4, expires_at: null } });
+      setKey(result.key);
+    } catch (e) { setError(e.message || 'Unable to create API key'); }
+    finally { setBusy(false); }
+  };
+  const copy = async (value, kind) => {
+    await navigator.clipboard?.writeText(value);
+    if (kind === 'setup') setCommandCopied(true);
+  };
+  const command = `fetchira remote set ${endpoint} --key '${key || 'your key'}'`;
+  const checkCommand = 'fetchira remote check';
+  const keyId = key ? key.split('_')[2] : '';
+  const refreshConnection = React.useCallback(async () => {
+    if (!key) return false;
+    try {
+      const result = await window.hostedAdminJSON('/admin/keys', { cache: 'no-store' });
+      const current = (result.keys || []).find((item) => item.id === keyId);
+      const ready = Boolean(current?.remoteChecked);
+      setConnectionReady(ready);
+      return ready;
+    } catch (_) { return false; }
+  }, [key, keyId]);
+  React.useEffect(() => {
+    if (!key || connectionReady) return undefined;
+    const poll = () => refreshConnection();
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => window.clearInterval(timer);
+  }, [key, connectionReady, refreshConnection]);
+  const checkNow = async () => {
+    setCheckingConnection(true);
+    const ready = await refreshConnection();
+    if (!ready) setError('No successful remote check received yet. Run fetchira remote check in the terminal.');
+    setCheckingConnection(false);
+  };
+  return <div style={{ maxWidth: 860, margin: '5vh auto 60px', padding: '0 20px' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+      <img src="/admin/assets/assets/logo-mark.svg" alt="" style={{ width: 34, height: 34 }} />
+      <span style={{ fontFamily: 'var(--font-display)', fontSize: 24, fontWeight: 600, color: 'var(--text-hi)' }}>fetchira</span>
+      <Badge tone="accent" variant="outline">hosted setup</Badge>
+    </div>
+    <div style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 600, color: 'var(--text-hi)', marginBottom: 6 }}>Connect this server to your local Fetchira</div>
+    <div style={{ fontFamily: 'var(--font-ui)', fontSize: 14, color: 'var(--text-mid)', lineHeight: 1.55 }}>Create a scoped API key, configure your local CLI, then add provider credentials here. Browser sessions are captured on your computer and encrypted before upload.</div>
+    <SectionLabel>1 · connect your local cli</SectionLabel>
+    <Card pad={16} style={{ display: 'grid', gap: 12 }}>
+      <div style={{ color: 'var(--text-lo)', fontSize: 12 }}>The CLI checks the server protocol and schema before every MCP connection.</div>
+      <div className="secret-row"><code>{endpoint}</code><Button variant="secondary" size="sm" onClick={() => copy(endpoint)}>Copy endpoint</Button></div>
+      <div style={{ display: 'grid', gap: 8 }}><div style={{ color: 'var(--text-faint)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>RUN THIS LOCALLY</div><div className="secret-row"><code>{command}</code><Button variant="secondary" size="sm" disabled={!key} onClick={() => copy(command, 'setup')}>{commandCopied ? 'Copied' : 'Copy command'}</Button></div><span style={{ color: 'var(--text-faint)', font: '11px var(--font-mono)' }}>{key ? 'Paste this into your local terminal first.' : 'Generate an API key below to enable this command.'}</span></div>
+      {commandCopied && <div style={{ display: 'grid', gap: 8, padding: '12px 0 0', borderTop: '1px solid var(--border-faint)' }}><div style={{ color: 'var(--lime-500)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>VERIFY CONNECTION</div><div style={{ color: 'var(--text-mid)', fontSize: 12 }}>After the setup command finishes, copy and paste this command into the same terminal:</div><div className="secret-row"><code>{checkCommand}</code><Button variant="secondary" size="sm" onClick={() => copy(checkCommand)}>Copy check command</Button></div><Button variant="ghost" size="sm" onClick={checkNow} disabled={checkingConnection}>{checkingConnection ? 'Checking…' : connectionReady ? 'Connected ✓' : 'Check connection'}</Button></div>}
+      {!key && <Button variant="primary" onClick={createKey} disabled={busy}>{busy ? 'Generating…' : 'Generate API key'}</Button>}
+      {error && <div role="alert" style={{ color: 'var(--red-500)', font: '12px var(--font-mono)' }}>{error}</div>}
+    </Card>
+    {connectionReady ? <><SectionLabel>2 · add providers</SectionLabel><div style={{ display: 'grid', gap: 12 }}>{catalog.filter((p) => p.web).map((p) => <WebProviderCard key={p.id} p={p} onOpenModal={setModalProv} />)}</div>{catalog.filter((p) => !p.web).length > 0 && <><SectionLabel>api-key providers</SectionLabel><div style={{ display: 'grid', gap: 12 }}>{catalog.filter((p) => !p.web).slice(0, 3).map((p) => <KeyProviderCard key={p.id} p={p} onOpenModal={setModalProv} />)}</div></>}</> : <Card pad={16} style={{ marginTop: 22, borderStyle: 'dashed' }}><div style={{ color: 'var(--text-mid)', fontSize: 13 }}>Finish the local setup and run <code>fetchira remote check</code>. Provider login unlocks after this server confirms the connection.</div></Card>}
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 28, paddingTop: 16, borderTop: '1px solid var(--border-faint)' }}><span style={{ color: accounts.length ? 'var(--lime-500)' : 'var(--text-faint)', font: '12px var(--font-mono)' }}>{accounts.length ? `${accounts.length} provider${accounts.length === 1 ? '' : 's'} connected` : connectionReady ? 'ready for provider setup' : 'waiting for local connection'}</span><Button variant="primary" onClick={onDone} disabled={!connectionReady}>Open dashboard →</Button></div>
+    {modalProv && <window.AddAccountModal initialProvider={modalProv} onClose={() => { setModalProv(null); if (window.fxRefresh) window.fxRefresh(); }} />}
+  </div>;
 }
 
 window.Onboarding = Onboarding;

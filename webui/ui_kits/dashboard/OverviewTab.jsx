@@ -185,7 +185,7 @@ function RoutingPriority() {
             </div>
           ))}
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
-            drag to reorder — 1 is tried first, the rest are failover · dimmed = no account yet · agents can force one with provider=… · running MCP servers pick changes up on restart
+            drag to reorder — 1 is tried first, the rest are failover · dimmed = no account yet · agents can force one with provider=… · {window.fxHosted ? 'hosted requests use changes immediately' : 'running MCP servers pick changes up on restart'}
           </span>
         </Card>
       )}
@@ -228,7 +228,7 @@ function CapabilityMatrix() {
                   </div>
                 ))}
               </div>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>call usage(provider={c.provider}) for exact calls</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>{window.fxHosted ? 'Live limits are shown from this server' : `call usage(provider=${c.provider}) for exact calls`}</span>
             </Card>
             </div>
           ))}
@@ -388,10 +388,19 @@ function LiveLog() {
 
   React.useEffect(() => {
     if (paused) return;
-    const token = new URLSearchParams(location.search).get('token') || '';
+    if (window.fxHosted) {
+      const id = setInterval(async () => {
+        try {
+          const d = await window.apiGet('/api/state');
+          const next = (d.log || []).map((l, i) => ({ ...l, _id: i, fresh: false }));
+          setLines((prev) => next.length > prev.length ? next : prev);
+        } catch (_) {}
+      }, 2000);
+      return () => clearInterval(id);
+    }
     let es;
     try {
-      es = new EventSource('/api/events?token=' + encodeURIComponent(token));
+      es = new EventSource(window.fxEventsUrl || '/api/events');
       es.onmessage = (e) => {
         let batch;
         try { batch = JSON.parse(e.data); } catch (err) { return; }
@@ -438,7 +447,7 @@ function GhostProviderCard({ c, onConnect }) {
       </div>
       <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)', flex: 1 }}>{c.blurb}</span>
       <Button variant="secondary" onClick={onConnect} style={{ alignSelf: 'flex-start' }}>
-        {c.web ? 'Connect — sign in via browser' : '+ Connect'}
+        {c.web ? (window.fxHosted ? 'Connect — use local CLI' : 'Connect — sign in via browser') : '+ Connect'}
       </Button>
     </Card>
   );
@@ -463,7 +472,7 @@ function OverviewTab() {
     ghosts: catalog.filter((c) => c.group === id && !configured.has(c.id)),
   })).filter((g) => g.providers.length || g.ghosts.length);
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 380px', gap: 20, alignItems: 'start', height: '100%' }}>
+    <div className="fx-overview-layout" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 380px', gap: 20, alignItems: 'start', height: '100%' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
         <window.GettingStarted />
         <BurnRadar />

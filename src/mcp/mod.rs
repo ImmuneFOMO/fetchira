@@ -6,7 +6,8 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -96,12 +97,16 @@ pub struct UsageArgs {
 }
 
 pub struct Fetchira {
-    router: Arc<Router>,
+    router: Arc<tokio::sync::RwLock<Arc<Router>>>,
     tool_router: ToolRouter<Self>,
 }
 
 impl Fetchira {
     pub fn new(router: Arc<Router>) -> Self {
+        Self::new_shared(Arc::new(tokio::sync::RwLock::new(router)))
+    }
+
+    pub fn new_shared(router: Arc<tokio::sync::RwLock<Arc<Router>>>) -> Self {
         Self {
             router,
             tool_router: Self::tool_router(),
@@ -114,7 +119,8 @@ impl Fetchira {
         input: Input,
         forced: Option<ProviderKind>,
     ) -> Result<CallToolResult, ErrorData> {
-        Ok(match self.router.call(cap, &input, forced).await {
+        let router = self.router.read().await.clone();
+        Ok(match router.call(cap, &input, forced).await {
             Ok(reply) => {
                 if let Some(img) = reply.image {
                     return Ok(image_result(img, None, None));
@@ -130,10 +136,31 @@ impl Fetchira {
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
         })
     }
+
+    async fn run_http(
+        &self,
+        context: RequestContext<RoleServer>,
+        cap: Capability,
+        input: Input,
+        forced: Option<ProviderKind>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(request_id) = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|p| p.headers.get("x-fetchira-request-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+        else {
+            return self.run(cap, input, forced).await;
+        };
+        crate::usage::HOSTED_REQUEST_ID
+            .scope(request_id, self.run(cap, input, forced))
+            .await
+    }
 }
 
 /// Resolve which provider to force and the opaque resume token. A `session` token is
-/// `provider:opaque`; it pins the provider and carries the opaque part to the provider.
+/// `provider:<base64-label>:opaque`; `route` strips the provider and leaves the rest.
 fn route(
     provider: Option<ProviderKind>,
     session: Option<String>,
@@ -179,12 +206,14 @@ impl Fetchira {
     pub async fn search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let (forced, session) = route(args.provider, args.session.clone());
         let input = search_input(args, session);
         // An attachment needs a web session that can upload; grok_web is the default carrier.
         let forced = forced.or_else(|| (!input.file.is_empty()).then_some(ProviderKind::GrokWeb));
-        self.run(Capability::Search, input, forced).await
+        self.run_http(context, Capability::Search, input, forced)
+            .await
     }
 
     #[tool(
@@ -193,13 +222,15 @@ impl Fetchira {
     pub async fn read(
         &self,
         Parameters(args): Parameters<ReadArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let input = Input {
             url: Some(args.url),
             mode: args.mode,
             ..Default::default()
         };
-        self.run(Capability::Read, input, args.provider).await
+        self.run_http(context, Capability::Read, input, args.provider)
+            .await
     }
 
     #[tool(
@@ -208,11 +239,13 @@ impl Fetchira {
     pub async fn deep_research(
         &self,
         Parameters(args): Parameters<ResearchArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let (forced, session) = route(args.base.provider, args.base.session.clone());
         let mut input = search_input(args.base, session);
         input.depth = args.depth;
-        self.run(Capability::DeepResearch, input, forced).await
+        self.run_http(context, Capability::DeepResearch, input, forced)
+            .await
     }
 
     #[tool(
@@ -221,12 +254,14 @@ impl Fetchira {
     pub async fn browser(
         &self,
         Parameters(args): Parameters<BrowserArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let input = Input {
             url: Some(args.url),
             ..Default::default()
         };
-        self.run(Capability::Browser, input, None).await
+        self.run_http(context, Capability::Browser, input, None)
+            .await
     }
 
     #[tool(
@@ -235,8 +270,24 @@ impl Fetchira {
     pub async fn usage(
         &self,
         Parameters(args): Parameters<UsageArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        Ok(match self.router.usage_snapshot().await {
+        let router = self.router.read().await.clone();
+        let future = router.usage_snapshot();
+        let snapshot = if let Some(request_id) = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|p| p.headers.get("x-fetchira-request-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+        {
+            crate::usage::HOSTED_REQUEST_ID
+                .scope(request_id, future)
+                .await
+        } else {
+            future.await
+        };
+        Ok(match snapshot {
             Ok(views) => {
                 let text = match args.provider {
                     Some(p) => crate::router::provider_sheet(p, &views),
@@ -254,6 +305,7 @@ impl Fetchira {
     pub async fn create_image(
         &self,
         Parameters(args): Parameters<ImageArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let (forced, session) = route(args.provider, args.session);
         let input = Input {
@@ -267,25 +319,70 @@ impl Fetchira {
                 .collect(),
             ..Default::default()
         };
-        Ok(
-            match self.router.call(Capability::Image, &input, forced).await {
-                Ok(reply) => match reply.image {
-                    Some(img) => image_result(img, args.path, reply.session),
-                    None => CallToolResult::success(vec![Content::text(reply.text)]),
-                },
-                Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
+        let router = self.router.read().await.clone();
+        let future = router.call(Capability::Image, &input, forced);
+        let result = if let Some(request_id) = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|p| p.headers.get("x-fetchira-request-id"))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+        {
+            crate::usage::HOSTED_REQUEST_ID
+                .scope(request_id, future)
+                .await
+        } else {
+            future.await
+        };
+        Ok(match result {
+            Ok(reply) => match reply.image {
+                Some(img) => image_result_with_write(
+                    img,
+                    args.path,
+                    reply.session,
+                    context.extensions.get::<http::request::Parts>().is_none(),
+                ),
+                None => image_pending_result(reply.text, reply.session),
             },
-        )
+            Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
+        })
     }
 }
 
-/// Agents can't reach inline MCP bytes, so every image also lands on disk and the
-/// result names the file. An explicit `path` means "file only" — skip the inline copy.
+fn image_pending_result(mut text: String, session: Option<String>) -> CallToolResult {
+    if let Some(s) = session {
+        text.push_str(&format!(
+            "\n\n⟦session: {s} — pass as `session` to create_image to fetch or edit this image⟧"
+        ));
+    }
+    CallToolResult::success(vec![Content::text(text)])
+}
+
+/// Local stdio callers get a file because agents cannot consume inline MCP bytes. Hosted HTTP
+/// callers skip this write; the local remote bridge materializes the returned image instead.
 fn image_result(
     img: crate::providers::OutImage,
     path: Option<String>,
     session: Option<String>,
 ) -> CallToolResult {
+    image_result_with_write(img, path, session, true)
+}
+
+fn image_result_with_write(
+    img: crate::providers::OutImage,
+    path: Option<String>,
+    session: Option<String>,
+    write_file: bool,
+) -> CallToolResult {
+    if !write_file {
+        let mut content = vec![Content::image(img.b64, img.mime)];
+        if let Some(s) = session {
+            content.push(Content::text(format!(
+                "⟦session: {s} — pass as `session` to create_image to edit this image in the same chat⟧"
+            )));
+        }
+        return CallToolResult::success(content);
+    }
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&img.b64) {
         Ok(b) => b,
         Err(e) => return CallToolResult::error(vec![Content::text(format!("bad image: {e}"))]),
@@ -350,6 +447,7 @@ impl ServerHandler for Fetchira {
 mod tests {
     use super::*;
     use crate::providers::OutImage;
+    use rmcp::model::RawContent;
 
     #[test]
     fn image_result_writes_explicit_path() {
@@ -372,5 +470,21 @@ mod tests {
             b64: "%%%".into(),
         };
         assert_eq!(image_result(img, None, None).is_error, Some(true));
+    }
+
+    #[test]
+    fn pending_image_keeps_session() {
+        let out = image_pending_result(
+            "Image is still generating.".into(),
+            Some("chatgpt_web:abc:img|poll||query".into()),
+        );
+        assert_ne!(out.is_error, Some(true));
+        let RawContent::Text(text) = &out.content[0].raw else {
+            panic!("expected text");
+        };
+        assert!(text.text.contains("still generating"));
+        assert!(text
+            .text
+            .contains("⟦session: chatgpt_web:abc:img|poll||query"));
     }
 }

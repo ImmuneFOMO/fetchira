@@ -131,7 +131,10 @@ async fn post(
         401 | 403 => Err(Error::Provider {
             provider: "chatgpt_web",
             status: 403,
-            body: "session/cloudflare; run `fetchira login chatgpt_web`".into(),
+            body: format!(
+                "session/cloudflare; {}",
+                crate::usage::provider_login_hint("chatgpt_web")
+            ),
         }),
         s if s >= 400 => Err(Error::Provider {
             provider: "chatgpt_web",

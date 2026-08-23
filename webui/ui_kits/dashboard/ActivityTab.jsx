@@ -147,8 +147,7 @@ function ActivityTab() {
 
   const fetchRows = async (after) => {
     try {
-      const r = await fetch(`/api/debug?after=${after}&limit=200`, { headers: { 'x-fetchira-token': window.FX_TOKEN } });
-      if (r.ok) return await r.json();
+      return await window.apiGet(`/api/debug?after=${after}&limit=200`);
     } catch (e) { /* offline / opened as a static file */ }
   };
 
@@ -182,9 +181,7 @@ function ActivityTab() {
     setOpenId(closing ? null : row.id);
     if (closing || details[row.id]) return;
     try {
-      const r = await fetch(`/api/debug/${row.id}`, { headers: { 'x-fetchira-token': window.FX_TOKEN } });
-      if (!r.ok) return;
-      const full = await r.json();
+      const full = await window.apiGet(`/api/debug/${row.id}`);
       setDetails((prev) => ({ ...prev, [row.id]: full }));
     } catch (e) { /* offline */ }
   };
@@ -215,7 +212,7 @@ function ActivityTab() {
             {fallback ? (
               <React.Fragment>
                 <div style={{ padding: '4px 10px 10px', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-                  full capture is off or expired (debug_log in fetchira.toml) — showing the routed-call log
+                  {window.fxHosted ? 'Detailed capture is disabled or expired on this server' : 'Full capture is off or expired (debug_log in fetchira.toml)'} — showing the routed-call log
                 </div>
                 {window.FX.log.map((l, i) => <RouteLogLine key={i} {...l} />)}
               </React.Fragment>

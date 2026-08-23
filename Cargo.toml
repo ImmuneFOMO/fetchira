@@ -14,8 +14,9 @@ name = "fetchira"
 path = "src/main.rs"
 
 [dependencies]
-rmcp = { version = "1.8", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.8", features = ["server", "client", "macros", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "time", "process", "net", "fs"] }
+tokio-util = "0.7"
 reqwest = { version = "0.13", features = ["json"] }
 # Rebuild a `reqwest::Response` from parts after the raw-HTTP tracer reads its body (src/httptrace.rs).
 http = "1"
@@ -40,12 +41,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Local web dashboard (`fetchira ui`): embedded axum server + assets baked into the binary.
 axum = "0.8"
-rust-embed = "8"
+rust-embed = { version = "8", features = ["include-exclude"] }
 open = "5"
 # Self-update (`fetchira update`): atomic in-place replace of the running binary.
 self-replace = "1"
 semver = "1"
 sha2 = "0.10"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
 
 [dev-dependencies]
 wiremock = "0.6"

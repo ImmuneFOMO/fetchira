@@ -2559,7 +2559,7 @@ window.FX = function () {
     used: 36,
     quota: 1000,
     resetWindow: 'monthly',
-    proxy: '45.38.78.x:6184',
+    proxy: '192.0.2.x:6184',
     status: 'healthy',
     key: true,
     web: false
@@ -2579,7 +2579,7 @@ window.FX = function () {
     used: 46,
     quota: 1000,
     resetWindow: 'monthly',
-    proxy: '45.38.91.x:6184',
+    proxy: '198.51.100.x:6184',
     status: 'healthy',
     key: true,
     web: false

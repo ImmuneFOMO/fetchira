@@ -37,7 +37,14 @@ async fn mount_search(m: &MockServer, body: serde_json::Value) {
 }
 
 async fn fresh_store(name: &str) -> Store {
-    let path = std::env::temp_dir().join(format!("fetchira_test_{name}.db"));
+    let path = std::env::temp_dir().join(format!(
+        "fetchira_test_{name}_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&path);
     Store::open(path.to_str().expect("temp path"))
         .await

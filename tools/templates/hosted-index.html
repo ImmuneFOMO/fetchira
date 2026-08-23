@@ -1,0 +1,331 @@
+<!-- @dsCard group="Dashboard" viewport="1320x880" name="fetchira dashboard" subtitle="Overview · Accounts · Activity — live quota router control panel" -->
+<!-- @startingPoint section="Dashboard" subtitle="Full fetchira router dashboard — 3 tabs, live log, add-account flow" viewport="1320x880" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fetchira — router dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/admin/assets/assets/logo-mark.svg">
+<link rel="stylesheet" href="/admin/assets/styles.css">
+<link rel="stylesheet" href="/admin/assets/hosted/hosted.css">
+<style>
+  html, body { background: var(--bg-base); }
+  #root { min-height: 100vh; }
+  @keyframes fx-spin { to { transform: rotate(360deg); } }
+  .fx-spin { animation: fx-spin 0.7s linear infinite; }
+</style>
+<!-- Vendored locally so the dashboard works fully offline (no CDN dependency). -->
+<script src="/admin/assets/vendor/react.production.min.js"></script>
+<script src="/admin/assets/vendor/react-dom.production.min.js"></script>
+<script src="/admin/assets/_ds_bundle.js"></script>
+<script src="/admin/assets/ui_kits/dashboard/data.js"></script>
+</head>
+<body class="fx-backplate">
+<div id="root"></div>
+
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/TopBar.jsx"></script>
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/OverviewTab.jsx"></script>
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/AccountsTab.jsx"></script>
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/ActivityTab.jsx"></script>
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/AddAccountModal.jsx"></script>
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/Onboarding.jsx"></script>
+<script type="text/babel" src="/admin/assets/ui_kits/dashboard/GettingStarted.jsx"></script>
+<script type="text/babel" src="/admin/assets/hosted/Admin.jsx"></script>
+
+<script type="text/babel">
+const { Tabs, Button } = window.FetchiraDesignSystem_6526df;
+window.fxHosted = true;
+
+function Loading() {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '40vh', gap: 12, fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-faint)' }}>
+      <span className="fx-spin" style={{ width: 16, height: 16, border: '2px solid var(--border-hairline)', borderTopColor: 'var(--lime-500)', borderRadius: '50%' }} />
+      loading live quota…
+    </div>
+  );
+}
+
+function OfflineToast({ stale }) {
+  return (
+    <div style={{ position: 'fixed', bottom: 16, left: 0, right: 0, zIndex: 100, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.4)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
+        <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--red-500)' }} />
+        {stale
+          ? <span>this hosted session expired — reload the page and sign in again</span>
+          : <span>hosted server unavailable — check the server connection and reload</span>}
+      </div>
+    </div>
+  );
+}
+
+function HostedUnavailable() {
+  return <main className="login-shell" role="alert"><section className="login-panel"><div className="brand"><img src="/admin/assets/assets/logo-mark.svg" alt="" width="27" height="27" /> fetchira <code>hosted</code></div><div className="not-found-code mono">CONNECTION <span>·</span> unavailable</div><h1>Hosted server is unavailable.</h1><p className="muted">The admin session is valid, but the server did not answer. Check the service and reload this page.</p><button className="primary" onClick={() => location.reload()}>Reload dashboard</button></section></main>;
+}
+
+function HostedLogin({ onLogin }) {
+  const [password, setPassword] = React.useState('');
+  const [error, setError] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  return <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}><section style={{ width: 'min(430px,100%)', background: 'var(--surface-1)', border: '1px solid var(--border-hairline)', borderTop: '2px solid var(--lime-500)', borderRadius: 'var(--r-md)', padding: 32 }}><div style={{ display: 'flex', alignItems: 'center', gap: 9, fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600 }}><img src="/admin/assets/assets/logo-mark.svg" alt="" style={{ width: 27 }} /> fetchira <code style={{ color: 'var(--lime-500)', font: '10px var(--font-mono)', border: '1px solid var(--border-accent)', padding: '2px 6px' }}>hosted</code></div><div style={{ marginTop: 48, font: '600 10px var(--font-mono)', letterSpacing: '.12em', color: 'var(--text-lo)' }}>PRIVATE CONTROL PLANE</div><h1 style={{ fontFamily: 'var(--font-display)', color: 'var(--text-hi)', margin: '6px 0 10px' }}>Unlock the router</h1><p style={{ color: 'var(--text-lo)', lineHeight: 1.5 }}>Provider sessions, friend keys and request history stay behind this administrator session.</p><form onSubmit={async (e) => { e.preventDefault(); if (busy) return; setBusy(true); setError(''); try { const r = await fetch('/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }); if (!r.ok) throw new Error((await r.text()) || 'login failed'); onLogin(); } catch (x) { setError(x.message); } finally { setBusy(false); } }} style={{ display: 'grid', gap: 16, marginTop: 26 }}><label style={{ display: 'grid', gap: 7, color: 'var(--text-mid)', font: '600 12px var(--font-mono)' }}>ADMIN PASSWORD<input type="password" autoFocus required value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: '100%', boxSizing: 'border-box', background: 'var(--surface-inset)', color: 'var(--text-hi)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', padding: 11 }} /></label><button className="primary" disabled={busy} style={{ minHeight: 40 }}>{busy ? 'Unlocking…' : 'Log in'}</button>{error && <div style={{ color: 'var(--red-500)', font: '12px var(--font-mono)' }}>{error}</div>}</form></section></main>;
+}
+
+function HostedMenu({ onSelect, active }) {
+  const items = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'accounts', label: 'Accounts', count: window.FX.accounts.length },
+    { id: 'activity', label: 'Activity' },
+    { id: 'keys', label: 'API keys' },
+    { id: 'audit', label: 'Audit' },
+    { id: 'update', label: 'Update' },
+  ];
+  return <nav className="hosted-menu" aria-label="Hosted administration">
+    <span className="hosted-menu-label">HOSTED ADMIN</span>
+    <Tabs items={items} value={active} onChange={onSelect} />
+  </nav>;
+}
+
+function UpdateBanner({ u, pending }) {
+  const [busy, setBusy] = React.useState(false);
+  const [done, setDone] = React.useState(null); // { ok, msg } after the update ran
+  const [blocked, setBlocked] = React.useState(null); // { latest, instances } from a schema-gated update
+  const [idle, setIdle] = React.useState(!!pending); // an idle waiter is armed
+  const brew = u.command !== 'fetchira update';
+
+  const update = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const r = await window.apiPost('/api/update');
+      if (r.blocked) setBlocked(r);
+      else {
+        setDone(r);
+        // 2.5s for the re-exec'd server to bind before the tab reloads
+        if (r.restarted) setTimeout(() => location.reload(), 2500);
+      }
+    }
+    catch (e) { setDone({ ok: false, msg: String(e.message || e) }); }
+    setBusy(false);
+  };
+
+  const updateWhenIdle = async () => {
+    try { await window.apiPost('/api/update/idle'); setIdle(true); }
+    catch (e) { setDone({ ok: false, msg: String(e.message || e) }); }
+  };
+
+  const box = { margin: '0 auto 16px', padding: '10px 16px', background: 'var(--lime-dim, rgba(170,230,90,0.12))', border: '1px solid rgba(170,230,90,0.35)', borderRadius: 'var(--r-sm)', fontFamily: 'var(--font-ui)', fontSize: 13, color: 'var(--text-hi)' };
+  const dot = <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--lime-500)', flexShrink: 0 }} />;
+
+  if (idle) {
+    return (
+      <div style={{ ...box, display: 'flex', alignItems: 'center', gap: 10 }}>
+        {dot}
+        <span>update to <b>{(pending && pending.target) || (blocked && blocked.latest) || u.latest}</b> pending — installs once every fetchira process (this dashboard too) exits</span>
+      </div>
+    );
+  }
+
+  if (blocked) {
+    return (
+      <div style={{ ...box, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {dot}
+          <span style={{ flex: 1 }}>fetchira <b>{blocked.latest}</b> changes the data format — restart the fetchira MCP servers below first, then retry</span>
+          <Button variant="ghost" size="sm" onClick={updateWhenIdle}>Update when idle</Button>
+          <Button variant="primary" size="sm" onClick={update} disabled={busy}>{busy ? 'Checking…' : 'Retry'}</Button>
+        </div>
+        {blocked.instances.map((i) => (
+          <div key={i.pid} style={{ display: 'flex', gap: 10, alignItems: 'baseline', fontFamily: 'var(--font-mono)', fontSize: 12, paddingLeft: 17 }}>
+            <span style={{ color: 'var(--text-faint)' }}>{i.pid}</span>
+            <span style={{ color: 'var(--text-hi)', width: 40 }}>{i.mode}</span>
+            <span style={{ color: 'var(--text-faint)', width: 56 }}>{i.version || '?'}</span>
+            <span style={{ color: 'var(--text-lo)' }}>{i.hint || 'restart the tool — MCP servers respawn on launch'}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ ...box, display: 'flex', alignItems: 'center', gap: 10 }}>
+      {dot}
+      {done ? (
+        <span>{done.msg}</span>
+      ) : (
+        <React.Fragment>
+          <span style={{ flex: 1 }}>fetchira <b>{u.latest}</b> is available{brew && <> — run <code style={{ fontFamily: 'var(--font-mono)', background: 'rgba(255,255,255,0.07)', padding: '1px 6px', borderRadius: 4, color: 'var(--text-hi)' }}>{u.command}</code></>}</span>
+          {!brew && (
+            <Button variant="primary" size="sm" onClick={update} disabled={busy}>
+              {busy ? 'Updating…' : 'Update'}
+            </Button>
+          )}
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [adminTab, setAdminTab] = React.useState(() => {
+    const aliases = { dashboard: 'overview', providers: 'accounts', requests: 'activity' };
+    const hash = location.hash.slice(1);
+    return aliases[hash] || ['overview', 'accounts', 'activity', 'keys', 'audit', 'update'].includes(hash) ? (aliases[hash] || hash) : 'overview';
+  });
+  const [authenticated, setAuthenticated] = React.useState(false);
+  const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
+  // null until the first live state answers; a fresh install (zero accounts) opens the
+  // onboarding flow, which sticks until the user leaves it (adds keep it on screen).
+  const [onboard, setOnboard] = React.useState(null);
+  const [online, setOnline] = React.useState(true);
+  // The server restarted and minted a new token: this tab will 401 forever. Say so instead
+  // of silently falling back to the demo mock.
+  const [stale, setStale] = React.useState(false);
+  // 'loading' until the first live /admin/state. A failed first request shows an explicit
+  // connection state; hosted must never silently render bundled demo data.
+  const [phase, setPhase] = React.useState('loading');
+  const [, bump] = React.useState(0); // re-render with the freshly polled state
+  const everOnline = React.useRef(false); // only nag once the server has actually been reached
+
+  React.useEffect(() => {
+    if (!authenticated) return undefined;
+    window.fxSetOffline = (v) => setOnline(!v);
+    // Poll keeps quota and the route-log snapshot live, so tabs re-seed from current data
+    // instead of the page-load snapshot (the Overview log seeds from FX.log on mount).
+    const ping = async () => {
+      try {
+        const d = await loadHostedState();
+        if (!d) {
+          setStale(true);
+          setOnline(false); setPhase((p) => p === 'loading' ? 'offline' : p); return;
+        }
+        setStale(false);
+        everOnline.current = true;
+        setOnline(true);
+        window.FX = Object.assign({}, window.FX, d);
+        setPhase('live');
+        setOnboard((o) => o === null ? (window.FX.accounts || []).length === 0 : o);
+        bump((n) => n + 1);
+      } catch (e) { setOnline(false); setPhase((p) => p === 'loading' ? 'offline' : p); }
+    };
+    ping();
+    const id = setInterval(ping, 5000);
+    return () => clearInterval(id);
+  }, [authenticated]);
+
+  if (!authenticated) return <HostedLogin onLogin={() => { setAuthenticated(true); setPhase('loading'); }} />;
+
+  if (phase === 'offline' && !everOnline.current) return <HostedUnavailable />;
+
+  if (onboard) {
+    return (
+      <React.Fragment>
+        {stale ? <OfflineToast stale /> : !online && everOnline.current && <OfflineToast />}
+        <window.Onboarding onDone={() => setOnboard(false)} />
+      </React.Fragment>
+    );
+  }
+
+  return (
+    <React.Fragment>
+      {stale ? <OfflineToast stale /> : !online && everOnline.current && <OfflineToast />}
+      <window.TopBar onAdd={() => setModal(true)} />
+
+      <HostedMenu active={adminTab} onSelect={(next) => { setAdminTab(next); history.replaceState(null, '', next === 'overview' ? location.pathname : '#' + next); }} />
+      {adminTab === 'keys' || adminTab === 'audit' || adminTab === 'update' ? <window.HostedAdminFull tab={adminTab} /> : (
+        <React.Fragment>
+          <main style={{ maxWidth: 'var(--container-max)', margin: '0 auto', padding: '20px' }}>
+            {window.FX.update && adminTab === 'overview' && <UpdateBanner u={window.FX.update} pending={window.FX.update_pending} />}
+            {phase === 'loading' ? <Loading />
+              : adminTab === 'overview' ? <window.OverviewTab />
+              : adminTab === 'accounts' ? <window.AccountsTab onAdd={() => setModal(true)} />
+              : <window.ActivityTab />}
+          </main>
+          {modal && <window.AddAccountModal onClose={() => setModal(false)} />}
+        </React.Fragment>
+      )}
+    </React.Fragment>
+  );
+}
+
+// Live wiring for the hosted server. Mutations POST to the hosted admin API and refresh live state.
+window.FX_TOKEN = '';
+async function loadHostedState() {
+  try {
+    const state = await fetch('/admin/state');
+    if (!state.ok) return null;
+    const d = await state.json();
+    if (d.groups && d.catalog) return d;
+    const [providers, usage] = await Promise.all([fetch('/admin/providers'), fetch('/admin/usage?limit=500')]);
+    if (!providers.ok || !usage.ok) return d;
+    const p = await providers.json(), u = await usage.json();
+    const accounts = (p.providers || []).map((x) => ({ provider: x.provider, label: x.label, status: x.ready ? 'healthy' : 'needs-login', loggedIn: x.loggedIn, web: String(x.provider).endsWith('_web'), quota: 0, used: 0, proxy: 'direct', key: !String(x.provider).endsWith('_web') }));
+    const groups = {}; accounts.forEach((a) => { const id = a.web ? 'web' : (['serper','tavily','exa','parallel'].includes(a.provider) ? 'search' : ['steel'].includes(a.provider) ? 'browser' : 'read'); (groups[id] ||= []).push({ name: a.provider, desc: a.provider, accounts: 1, used: 0, quota: 0, loggedIn: a.loggedIn, webSession: a.web, limits: [] }); });
+    const log = (u.rows || []).map((r) => ({ time: String(r.createdAt || '').split('T')[1]?.slice(0, 8) || '—', capability: r.capability || 'mcp', provider: r.provider || r.apiKeyId || 'router', status: r.status, latencyMs: r.latencyMs || 0 }));
+    return Object.assign({}, d, { accounts, groups: Object.entries(groups).map(([id, providers]) => ({ id, providers })), log, health: accounts.map((a) => ({ provider: a.label, state: a.status, lastSuccess: '—', lastError: a.status === 'needs-login' ? 'session expired — browser login required' : null })), summary: { accounts: accounts.length, healthy: accounts.filter((a) => a.status === 'healthy').length, needsLogin: accounts.filter((a) => a.status !== 'healthy').length, exhausted: 0 }, totalRemaining: 0, usage: [] });
+  } catch (_) { return null; }
+}
+
+window.apiPost = async function (path, body) {
+  const csrfPrefix = 'fetchira_csrf=';
+  const csrf = document.cookie.split(';').map((x) => x.trim()).find((x) => x.startsWith(csrfPrefix))?.slice(csrfPrefix.length) || '';
+  const hostedPath = path === '/api/account/add'
+    ? (body && body.key ? '/admin/providers/key' : (body && body.session ? '/admin/providers/session' : '/admin/login-challenges'))
+    : path === '/api/account/session' ? '/admin/providers/session'
+    : path === '/api/account/login' ? '/admin/login-challenges'
+    : path.startsWith('/api/debug') ? '/admin' + path.slice(4)
+    : path === '/api/account/remove' ? '/admin/account/remove'
+    : path === '/api/account/rename' ? '/admin/account/rename'
+    : path === '/api/account/proxy' ? '/admin/account/proxy'
+    : path === '/api/account/test' ? '/admin/account/test'
+    : path === '/api/priority' ? '/admin/priority'
+    : path === '/api/try' ? '/admin/try'
+    : path.startsWith('/api/') ? '/admin' + path.slice(4) : path;
+  try {
+    const r = await fetch(hostedPath, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf }, body: JSON.stringify(body || {}) });
+    let data = null; let raw = '';
+    try { raw = await r.text(); data = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (!r.ok) throw new Error((data && data.error) || (raw && raw.trim()) || `request failed (${r.status})`);
+    if (window.fxSetOffline) window.fxSetOffline(false);
+    return data;
+  } catch (e) {
+    if (e instanceof TypeError) {
+      if (window.fxSetOffline) window.fxSetOffline(true);
+    }
+    throw e;
+  }
+};
+window.hostedAdminJSON = async function (path, options = {}) {
+  const prefix = 'fetchira_csrf=';
+  const csrf = document.cookie.split(';').map((x) => x.trim()).find((x) => x.startsWith(prefix))?.slice(prefix.length) || '';
+  const headers = { accept: 'application/json', ...(options.headers || {}) };
+  if (options.body && typeof options.body !== 'string') { headers['content-type'] = 'application/json'; options.body = JSON.stringify(options.body); }
+  if (options.method && options.method !== 'GET') headers['x-csrf-token'] = csrf;
+  const response = await fetch(path, { credentials: 'same-origin', ...options, headers });
+  let data = null; try { data = await response.json(); } catch (_) {}
+  if (!response.ok) throw new Error((data && data.error) || data || `request failed (${response.status})`);
+  return data;
+};
+window.apiGet = async function (path) {
+  const hostedPath = path === '/api/state' ? '/admin/state' : path.startsWith('/api/debug') ? '/admin' + path.slice(4) : path;
+  const r = await fetch(hostedPath, { credentials: 'same-origin' });
+  if (!r.ok) throw new Error(`request failed (${r.status})`);
+  return r.json();
+};
+
+async function loadFX() {
+  try {
+    const d = await loadHostedState();
+    if (d) { window.FX = Object.assign({}, window.FX, d); window.__fxLive = true; }
+  } catch (e) { /* the hosted shell handles connection state */ }
+}
+
+let __root;
+window.fxRefresh = async function () { await loadFX(); __root.render(<App />); };
+
+// Paint the shell immediately; App's poll loads live state and swaps it in. A cold /api/state
+// fan-out can take seconds — don't hold the first paint hostage to it.
+__root = ReactDOM.createRoot(document.getElementById('root'));
+__root.render(<App />);
+</script>
+</body>
+</html>

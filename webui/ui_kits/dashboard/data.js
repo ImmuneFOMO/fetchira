@@ -31,9 +31,9 @@ window.FX = (function () {
   // Accounts table rows.
   const accounts = [
     { provider: 'serper', label: 'serper-1', used: 423, quota: 2500, resetWindow: 'lifetime', proxy: 'direct', status: 'healthy', key: true, web: false },
-    { provider: 'tavily', label: 'tavily-1', used: 36, quota: 1000, resetWindow: 'monthly', proxy: '45.38.78.x:6184', status: 'healthy', key: true, web: false },
+    { provider: 'tavily', label: 'tavily-1', used: 36, quota: 1000, resetWindow: 'monthly', proxy: '192.0.2.x:6184', status: 'healthy', key: true, web: false },
     { provider: 'exa', label: 'exa-1', used: 46, quota: 1000, resetWindow: 'monthly', proxy: 'direct', status: 'healthy', key: true, web: false },
-    { provider: 'exa', label: 'exa-2', used: 46, quota: 1000, resetWindow: 'monthly', proxy: '45.38.91.x:6184', status: 'healthy', key: true, web: false },
+    { provider: 'exa', label: 'exa-2', used: 46, quota: 1000, resetWindow: 'monthly', proxy: '198.51.100.x:6184', status: 'healthy', key: true, web: false },
     { provider: 'firecrawl', label: 'firecrawl-1', used: 6, quota: 1000, resetWindow: 'monthly', proxy: 'direct', status: 'healthy', key: true, web: false },
     { provider: 'parallel', label: 'parallel-1', used: 0, quota: 16000, resetWindow: 'monthly', proxy: 'direct', status: 'healthy', key: true, web: false },
     { provider: 'steel', label: 'steel-1', used: 0, quota: 360000, resetWindow: 'monthly', proxy: 'pool', status: 'healthy', key: true, web: false },

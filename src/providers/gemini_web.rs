@@ -71,7 +71,10 @@ pub async fn call(
         return Err(Error::Provider {
             provider: "gemini_web",
             status: 0,
-            body: "no session token; run `fetchira login gemini_web`".into(),
+            body: format!(
+                "no session token; {}",
+                crate::usage::provider_login_hint("gemini_web")
+            ),
         });
     }
     let at = scrape(&page, "SNlM0e").unwrap_or_default();
@@ -87,7 +90,10 @@ pub async fn call(
         return Err(Error::Provider {
             provider: "gemini_web",
             status: 0,
-            body: "gemini session can't attach files; run `fetchira login gemini_web`".into(),
+            body: format!(
+                "gemini session can't attach files; {}",
+                crate::usage::provider_login_hint("gemini_web")
+            ),
         });
     }
 
@@ -164,7 +170,10 @@ pub async fn call(
             return Err(Error::Provider {
                 provider: "gemini_web",
                 status,
-                body: "session may be expired; run `fetchira login gemini_web`".into(),
+                body: format!(
+                    "session may be expired; {}",
+                    crate::usage::provider_login_hint("gemini_web")
+                ),
             })
         }
         429 => return Err(Error::RateLimit("gemini_web: rate limited".into())),
@@ -486,7 +495,10 @@ fn parse(body: &str) -> Result<Outcome> {
             return Err(Error::Provider {
                 provider: "gemini_web",
                 status: 1100,
-                body: "gemini rejected the attachment; run `fetchira login gemini_web`".into(),
+                body: format!(
+                    "gemini rejected the attachment; {}",
+                    crate::usage::provider_login_hint("gemini_web")
+                ),
             });
         }
         return Err(Error::BadResponse("gemini_web"));
@@ -634,7 +646,10 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimi
         return Err(Error::Provider {
             provider: "gemini_web",
             status: 0,
-            body: "no session token; run `fetchira login gemini_web`".into(),
+            body: format!(
+                "no session token; {}",
+                crate::usage::provider_login_hint("gemini_web")
+            ),
         });
     }
     let at = scrape(&page, "SNlM0e").unwrap_or_default();

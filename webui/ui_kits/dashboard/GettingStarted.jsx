@@ -1,10 +1,8 @@
-/* Dismissible getting-started checklist (Overview top). Done-states derive from live data;
-   the MCP-registration step drives /api/install. Dismiss persists in localStorage. */
+/* Dismissible getting-started checklist for the local dashboard; hosted uses the key bridge below. */
 const { Card, Button, Badge, StatusDot } = window.FetchiraDesignSystem_6526df;
 
 function apiGet(path) {
-  return fetch(path, { headers: { 'x-fetchira-token': window.FX_TOKEN } })
-    .then((r) => (r.ok ? r.json() : null))
+  return (window.apiGet ? window.apiGet(path) : fetch(path, { headers: { 'x-fetchira-token': window.FX_TOKEN } }).then((r) => (r.ok ? r.json() : null)))
     .catch(() => null);
 }
 
@@ -102,6 +100,10 @@ function InstallPanel({ onClose }) {
 }
 
 function GettingStarted() {
+  return window.fxHosted ? <HostedGettingStarted /> : <LocalGettingStarted />;
+}
+
+function LocalGettingStarted() {
   const [hidden, setHidden] = React.useState(() => localStorage.getItem('fx-gs-dismissed') === '1');
   const [installOpen, setInstallOpen] = React.useState(false);
   const [modalProv, setModalProv] = React.useState(null);
@@ -151,7 +153,7 @@ function GettingStarted() {
         <span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)' }}>Getting started</span>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{doneCount}/{items.length}</span>
         <span style={{ flex: 1 }} />
-        <button onClick={dismiss} title="dismiss" style={{ background: 'transparent', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 2 }}>✕</button>
+        <button aria-label="Dismiss getting started" onClick={dismiss} title="dismiss" style={{ background: 'transparent', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 2 }}>✕</button>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         {items.map((it, i) => (
@@ -173,6 +175,59 @@ function GettingStarted() {
       )}
     </Card>
   );
+}
+
+function HostedGettingStarted() {
+  const [hidden, setHidden] = React.useState(() => localStorage.getItem('fx-hosted-gs-dismissed') === '1');
+  const [visibility, setVisibility] = React.useState('checking');
+  const [key, setKey] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [copied, setCopied] = React.useState('');
+
+  React.useEffect(() => {
+    let cancelled = false;
+    window.hostedAdminJSON('/admin/keys')
+      .then((data) => {
+        if (cancelled) return;
+        const hasActiveKey = (data.keys || []).some((candidate) => {
+          if (candidate.revoked) return false;
+          return (candidate.scopes || []).includes('accounts:manage') && (!candidate.expiresAt || new Date(candidate.expiresAt).getTime() > Date.now());
+        });
+        setVisibility(hasActiveKey ? 'hidden' : 'show');
+      })
+      .catch(() => { if (!cancelled) setVisibility('show'); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (hidden || visibility !== 'show') return null;
+
+  const endpoint = `${location.origin}/mcp`;
+  const createKey = async () => {
+    setBusy(true); setError('');
+    try {
+      const id = `local-${Math.random().toString(36).slice(2, 8)}`;
+      const result = await window.hostedAdminJSON('/admin/keys', { method: 'POST', body: { id, name: 'Local Fetchira', scopes: ['mcp', 'usage:read', 'accounts:manage'], rpm: 60, daily_limit: 0, monthly_limit: 0, concurrency_limit: 4, expires_at: null } });
+      setKey(result.key);
+    } catch (e) { setError(e.message || 'Unable to create API key'); }
+    finally { setBusy(false); }
+  };
+  const command = `fetchira remote set ${endpoint} --key '${key || 'your-key'}'`;
+  const copy = async (value, name) => { try { await navigator.clipboard.writeText(value); setCopied(name); setTimeout(() => setCopied(''), 1600); } catch (_) {} };
+  const dismiss = () => { localStorage.setItem('fx-hosted-gs-dismissed', '1'); setHidden(true); };
+  return <Card pad={0} style={{ overflow: 'hidden' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--border-faint)' }}>
+      <StatusDot tone="accent" size={7} /><span style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)' }}>Connect a local Fetchira</span><span style={{ flex: 1 }} />
+      <button aria-label="Dismiss getting started" onClick={dismiss} title="dismiss" style={{ background: 'transparent', border: 0, color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14 }}>✕</button>
+    </div>
+    <div style={{ display: 'grid', gap: 14, padding: 14 }}>
+      <div style={{ color: 'var(--text-lo)', fontSize: 12, lineHeight: 1.5 }}>Install Fetchira locally, generate a scoped key, then run the command below. Your local MCP tools will route through this hosted server.</div>
+      <div style={{ display: 'grid', gap: 7 }}><div style={{ color: 'var(--text-faint)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>HOSTED ENDPOINT</div><div className="secret-row"><code>{endpoint}</code><Button variant="secondary" size="sm" onClick={() => copy(endpoint, 'endpoint')}>{copied === 'endpoint' ? 'Copied' : 'Copy'}</Button></div></div>
+      <div style={{ display: 'grid', gap: 7 }}><div style={{ color: 'var(--text-faint)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>RUN THIS LOCALLY</div><div className="secret-row"><code>{command}</code><Button variant="secondary" size="sm" onClick={() => copy(command, 'command')}>{copied === 'command' ? 'Copied' : 'Copy'}</Button></div><div style={{ color: 'var(--text-faint)', font: '11px var(--font-mono)' }}>Run it in your terminal, then use <code>fetchira remote check</code> to verify version, schema and access.</div></div>
+      {!key && <Button variant="primary" onClick={createKey} disabled={busy}>{busy ? 'Generating…' : 'Generate API key'}</Button>}
+      {error && <div role="alert" style={{ color: 'var(--red-500)', font: '12px var(--font-mono)' }}>{error}</div>}
+    </div>
+  </Card>;
 }
 
 window.GettingStarted = GettingStarted;

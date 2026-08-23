@@ -1,6 +1,6 @@
 /* Add-account modal + guided browser-login flow.
-   Key providers → POST the key. Web providers → POST add (the server opens Chrome, you sign
-   in, it captures the session). On success the dashboard refreshes. */
+   Key providers → POST the key. Web providers use the local CLI when hosted and the local
+   browser flow otherwise. On success the dashboard refreshes. */
 const { Card, Button, Input, Select, Badge, StatusDot } = window.FetchiraDesignSystem_6526df;
 
 const PROVIDER_CATALOG = [
@@ -43,9 +43,9 @@ function catalogNow() {
   return live.map((c) => ({ id: c.id, kind: c.web ? 'web' : 'key', note: c.blurb, signup: c.signup }));
 }
 
-function AddAccountModal({ onClose, initialProvider }) {
+function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnly = false }) {
   const [providerId, setProviderId] = React.useState(initialProvider || 'serper');
-  const [label, setLabel] = React.useState('');
+  const [label, setLabel] = React.useState(initialLabel);
   const [apiKey, setApiKey] = React.useState('');
   const [proxy, setProxy] = React.useState('');
   const [sessionJson, setSessionJson] = React.useState('');
@@ -55,6 +55,24 @@ function AddAccountModal({ onClose, initialProvider }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [addedLabel, setAddedLabel] = React.useState('');
+  const [loginChallenge, setLoginChallenge] = React.useState(null);
+  const hosted = !!window.fxHosted;
+  React.useEffect(() => {
+    if (!loginChallenge || !window.fxHosted) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const r = await fetch(`/admin/login-challenges/${loginChallenge.challenge}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!stopped && (d.status === 'complete' || d.consumed)) {
+          setLoginChallenge(null); setPhase('success'); if (window.fxRefresh) window.fxRefresh();
+        }
+      } catch (_) {}
+    };
+    poll(); const id = setInterval(poll, 1500);
+    return () => { stopped = true; clearInterval(id); };
+  }, [loginChallenge]);
 
   const catalog = catalogNow();
   const provider = catalog.find((p) => p.id === providerId) || catalog[0];
@@ -78,8 +96,9 @@ function AddAccountModal({ onClose, initialProvider }) {
     if (busy) return;
     setError(null); setPhase('logging-in');
     try {
-      const res = await window.apiPost('/api/account/add', { provider: providerId, label: label.trim(), proxy: proxy.trim(), browser });
+      const res = await window.apiPost(loginOnly ? '/api/account/login' : '/api/account/add', { provider: providerId, label: label.trim(), proxy: proxy.trim(), browser });
       setAddedLabel((res && res.label) || (label.trim() || provider.id));
+      if (res && res.challenge) { setLoginChallenge(res); setPhase('logging-in'); return; }
       setPhase('success');
       if (window.fxRefresh) window.fxRefresh();
     } catch (e) { setError(String(e.message || e)); setPhase('form'); }
@@ -90,7 +109,7 @@ function AddAccountModal({ onClose, initialProvider }) {
     if (busy || !sessionJson.trim()) return;
     setError(null); setBusy(true);
     try {
-      const res = await window.apiPost('/api/account/add', { provider: providerId, label: label.trim(), proxy: proxy.trim(), session: sessionJson });
+      const res = await window.apiPost(loginOnly ? '/api/account/session' : '/api/account/add', { provider: providerId, label: label.trim(), proxy: proxy.trim(), session: sessionJson });
       setAddedLabel((res && res.label) || (label.trim() || provider.id));
       setPhase('success');
       if (window.fxRefresh) window.fxRefresh();
@@ -105,9 +124,9 @@ function AddAccountModal({ onClose, initialProvider }) {
         <Card raised pad={0} style={{ borderRadius: 'var(--r-lg)' }}>
           <div style={{ padding: '36px 28px', textAlign: 'center' }}>
             <div style={{ width: 52, height: 52, margin: '0 auto 16px', borderRadius: '50%', background: 'var(--green-dim)', border: '1px solid rgba(70,209,122,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--green-500)', fontSize: 24 }}>✓</div>
-            <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600, color: 'var(--text-hi)', marginBottom: 6 }}>Account added</div>
+            <div style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600, color: 'var(--text-hi)', marginBottom: 6 }}>{loginOnly ? 'Session updated' : 'Account added'}</div>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-mid)' }}>
-              <span style={{ color: 'var(--lime-500)' }}>{addedLabel}</span> is live in the router rotation.
+              <span style={{ color: 'var(--lime-500)' }}>{addedLabel}</span> is {loginOnly ? 'ready in' : 'live in'} the router rotation.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border-hairline)', justifyContent: 'flex-end' }}>
@@ -129,7 +148,13 @@ function AddAccountModal({ onClose, initialProvider }) {
               <span style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 600, color: 'var(--text-hi)' }}>Guided login</span>
             </div>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-mid)', lineHeight: 1.5 }}>
-              A {browser === 'firefox' ? 'Firefox' : 'Chrome'} window is opening for <span style={{ color: 'var(--lime-500)' }}>{provider.id}</span>. Sign in there — fetchira captures the session automatically and this closes when it's done.
+              {loginChallenge ? <React.Fragment>
+                {window.fxHosted
+                  ? <>Copy this command to a terminal on your computer. Your local Fetchira will open {browser === 'firefox' ? 'Firefox' : 'Chrome'}, capture the login, and upload the encrypted session to this server.</>
+                  : <>A {browser === 'firefox' ? 'Firefox' : 'Chrome'} window is opening for <span style={{ color: 'var(--lime-500)' }}>{provider.id}</span>. Sign in there — fetchira captures the session automatically.</>}
+                <div style={{ marginTop: 12, padding: 10, background: 'var(--surface-inset)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', color: 'var(--lime-500)', wordBreak: 'break-all' }}><code>fetchira remote login {loginChallenge.challenge}{hosted && browser === 'firefox' ? ' --browser firefox' : ''}</code></div>
+                <div style={{ marginTop: 10, color: 'var(--text-lo)' }}>This one-time challenge expires in 10 minutes. Keep this window open; the account appears after upload.</div>
+              </React.Fragment> : <>Preparing the {browser === 'firefox' ? 'Firefox' : 'Chrome'} login for <span style={{ color: 'var(--lime-500)' }}>{provider.id}</span>…</>}
             </div>
           </div>
         </Card>
@@ -142,13 +167,13 @@ function AddAccountModal({ onClose, initialProvider }) {
     <Overlay onClose={onClose}>
       <Card raised pad={0} style={{ borderRadius: 'var(--r-lg)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
-          <span style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>Add account</span>
-          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }}>✕</button>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>{loginOnly ? 'Re-login account' : 'Add account'}</span>
+          <button aria-label="Close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-lo)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }}>✕</button>
         </div>
 
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Field label="Provider">
-            <Select value={providerId} onChange={(e) => { setProviderId(e.target.value); setTouched(false); setError(null); }}>
+            <Select value={providerId} disabled={loginOnly} onChange={(e) => { setProviderId(e.target.value); setTouched(false); setError(null); }}>
               {catalog.map((p) => <option key={p.id} value={p.id}>{p.id}</option>)}
             </Select>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
@@ -160,8 +185,9 @@ function AddAccountModal({ onClose, initialProvider }) {
             </div>
           </Field>
 
-          <Input label="Label · optional" placeholder={`${provider.id.replace(/_web$/, '')}-1 (auto)`} value={label} mono
+          {!loginOnly && <Input label="Label · optional" placeholder={`${provider.id.replace(/_web$/, '')}-1 (auto)`} value={label} mono
             onChange={(e) => setLabel(e.target.value)} hint="Leave blank to auto-name" />
+          }
 
           {!isWeb ? (
             <Input label="API key" placeholder="paste secret key" value={apiKey} mono
@@ -184,7 +210,7 @@ function AddAccountModal({ onClose, initialProvider }) {
               </div>
               <Button variant="secondary" onClick={startLogin} style={{ width: '100%', justifyContent: 'center' }}
                 iconLeft={<span style={{ fontSize: 13 }}>◧</span>}>Log in with browser</Button>
-              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>Opens the chosen browser so you can sign in. The session is captured locally — no password is stored.</span>
+              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{hosted ? 'Copy the command shown next and run it on your computer. Your local Fetchira opens the browser and uploads the encrypted session here.' : 'Opens the chosen browser so you can sign in. The session is captured locally — no password is stored.'}</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 2px' }}>
                 <div style={{ flex: 1, height: 1, background: 'var(--border-hairline)' }} />
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>or paste a session</span>
@@ -194,7 +220,7 @@ function AddAccountModal({ onClose, initialProvider }) {
                 placeholder={'[{"name":"sso","value":"…","domain":".grok.com"}]'}
                 style={{ width: '100%', minHeight: 76, resize: 'vertical', boxSizing: 'border-box', padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', background: 'var(--surface-sunken, rgba(255,255,255,0.03))', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)' }} />
               <Button variant="ghost" onClick={submitSession} disabled={busy || !sessionJson.trim()} style={{ width: '100%', justifyContent: 'center' }}>{busy ? 'Saving…' : 'Use pasted session'}</Button>
-              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>Export cookies from any logged-in browser (e.g. a “Cookie Editor” extension → JSON). Works on headless servers.</span>
+              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{hosted ? 'Fallback: paste an exported session if the local browser is unavailable.' : 'Export cookies from any logged-in browser (e.g. a “Cookie Editor” extension → JSON). Works on headless servers.'}</span>
             </Field>
           )}
 
@@ -206,7 +232,7 @@ function AddAccountModal({ onClose, initialProvider }) {
 
         <div style={{ display: 'flex', gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border-hairline)', justifyContent: 'flex-end' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          {!isWeb && <Button variant="primary" onClick={submitKey}>{busy ? 'Adding…' : 'Add account'}</Button>}
+          {!isWeb && !loginOnly && <Button variant="primary" onClick={submitKey}>{busy ? 'Adding…' : 'Add account'}</Button>}
         </div>
       </Card>
     </Overlay>

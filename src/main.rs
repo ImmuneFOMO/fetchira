@@ -53,7 +53,95 @@ async fn main() -> anyhow::Result<()> {
         Some("proxy") => return cli::proxy(&home, args).await,
         Some("priority") => return cli::priority(&home, args),
         Some("ui") => return fetchira::ui::run(&home).await,
+        Some("server") => {
+            let sub = args.next();
+            if sub.as_deref() == Some("password") && args.next().as_deref() == Some("hash") {
+                use std::io::{IsTerminal, Read};
+                let mut password = String::new();
+                if std::io::stdin().is_terminal() {
+                    anyhow::bail!("pipe the admin password on stdin; interactive echo is unsafe");
+                }
+                std::io::stdin().read_to_string(&mut password)?;
+                let password = password.trim_end_matches(['\r', '\n']);
+                if password.len() < 12 {
+                    anyhow::bail!("admin password must be at least 12 characters");
+                }
+                println!("{}", fetchira::auth::hash_password(password)?);
+                return Ok(());
+            }
+            if sub.as_deref() == Some("healthcheck") {
+                let bind = std::env::var("FETCHIRA_HEALTH_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:7879/readyz".into());
+                let response = reqwest::Client::new().get(bind).send().await?;
+                if !response.status().is_success() {
+                    anyhow::bail!("hosted server is not ready: HTTP {}", response.status());
+                }
+                return Ok(());
+            }
+            if sub.as_deref() == Some("key") && args.next().as_deref() == Some("create") {
+                let id = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing key id"))?;
+                let name = args.next().unwrap_or_else(|| id.clone());
+                return fetchira::hosted::create_key(&home, id, name).await;
+            }
+            let bind = std::env::var("FETCHIRA_BIND").unwrap_or_else(|_| "127.0.0.1:7879".into());
+            return fetchira::hosted::run(&home, &bind).await;
+        }
+        Some("serve-http") => {
+            let bind = std::env::var("FETCHIRA_BIND").unwrap_or_else(|_| "127.0.0.1:7879".into());
+            return fetchira::hosted::run(&home, &bind).await;
+        }
         Some("update") => return fetchira::update::run(&home, args).await,
+        Some("remote") => match args.next().as_deref() {
+            Some("set") => {
+                let endpoint = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing endpoint"))?;
+                let mut api_key = None;
+                while let Some(flag) = args.next() {
+                    match flag.as_str() {
+                        "--key" => api_key = args.next(),
+                        _ => anyhow::bail!("usage: fetchira remote set URL [--key API_KEY]"),
+                    }
+                }
+                return fetchira::remote::set(&home, endpoint, api_key);
+            }
+            Some("check") => return fetchira::remote::check(&home).await,
+            Some("login") => {
+                let challenge = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("missing login challenge"))?;
+                let mut file = None;
+                let mut browser = None;
+                while let Some(flag) = args.next() {
+                    match flag.as_str() {
+                        "--file" | "-f" => file = args.next(),
+                        "--browser" => browser = args.next(),
+                        _ => anyhow::bail!(
+                            "usage: fetchira remote login CHALLENGE [--browser chrome|firefox] [--file session.json]"
+                        ),
+                    }
+                }
+                if browser
+                    .as_deref()
+                    .is_some_and(|b| !matches!(b, "chrome" | "chromium" | "firefox" | "ff"))
+                {
+                    anyhow::bail!("--browser must be chrome or firefox");
+                }
+                return fetchira::remote::login(
+                    &home,
+                    &challenge,
+                    file.as_deref(),
+                    browser.as_deref(),
+                )
+                .await;
+            }
+            Some("disconnect") => return fetchira::remote::disconnect(&home),
+            _ => anyhow::bail!(
+                "usage: fetchira remote <set URL [--key API_KEY]|check|login CHALLENGE [--file session.json]|disconnect>"
+            ),
+        },
         Some("--version") | Some("-V") | Some("version") => {
             println!("fetchira {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -77,6 +165,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg_path = home.join("fetchira.toml");
     let mut cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
         .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira` in a terminal to set up."))?;
+    if cfg.remote.endpoint.is_some() {
+        tracing::info!("{}", fetchira::remote::verify(&cfg).await?);
+        fetchira::remote::serve_stdio(&cfg).await?;
+        return Ok(());
+    }
     cfg.db_path = config::resolve_db(&home, &cfg.db_path);
     let store = Store::open(&cfg.db_path).await?;
     let router = Router::build(cfg, store).await?;
