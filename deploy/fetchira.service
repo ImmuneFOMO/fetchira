@@ -1,0 +1,36 @@
+[Unit]
+Description=Fetchira hosted MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/var/lib/fetchira/fetchira server
+EnvironmentFile=/etc/fetchira/hosted.env
+Environment=FETCHIRA_HOME=/var/lib/fetchira
+Environment=FETCHIRA_BIND=127.0.0.1:7879
+StateDirectory=fetchira
+StateDirectoryMode=0700
+User=fetchira
+Group=fetchira
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=330
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/fetchira
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,81 @@
+services:
+  fetchira:
+    image: ${FETCHIRA_IMAGE:-fetchira:hosted}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["server"]
+    environment:
+      FETCHIRA_BIND: 0.0.0.0:7879
+      FETCHIRA_HOME: /data
+      FETCHIRA_CONTAINER: "1"
+      FETCHIRA_BROWSER: chrome
+      FETCHIRA_CHROMIUM_BIN: /usr/bin/google-chrome-stable
+      FETCHIRA_BROWSER_HEADFUL: "1"
+      FETCHIRA_REQUIRE_BROWSER: "1"
+      FETCHIRA_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      FETCHIRA_MASTER_KEY_FILE: /run/secrets/master_key
+      RUST_LOG: ${RUST_LOG:-fetchira=info}
+    secrets:
+      - source: admin_password
+        target: admin_password
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      - source: master_key
+        target: master_key
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+    volumes:
+      - ${FETCHIRA_DATA_DIR:-fetchira-data}:/data
+    ports:
+      - "${FETCHIRA_PORT:-127.0.0.1:7879}:7879"
+    healthcheck:
+      test: ["CMD", "/data/fetchira", "server", "healthcheck"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      # Chrome per-request profiles plus the Xvfb socket; barely grows in normal operation.
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    image: caddy:2.10-alpine
+    profiles: ["caddy"]
+    depends_on:
+      fetchira:
+        condition: service_healthy
+    environment:
+      FETCHIRA_HOST: ${FETCHIRA_HOST:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  fetchira-data:
+  caddy-data:
+  caddy-config:
+secrets:
+  admin_password:
+    file: ./secrets/admin-password
+  master_key:
+    file: ./secrets/master-key

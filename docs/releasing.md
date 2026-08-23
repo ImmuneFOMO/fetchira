@@ -57,9 +57,8 @@ for the platform it builds from source (from a checkout).
 ## Notes
 
 - **License**: `Apache-2.0` (`Cargo.toml` + `LICENSE` file). Used in the Homebrew formula.
-- **Targets**: macOS arm64/x64 + Linux x64 (glibc). `musl` and `aarch64-linux` are deferred —
-  `wreq` pulls BoringSSL, which makes those cross-builds fiddly. Add a triple to `targets`
-  in `dist-workspace.toml` later when needed.
+- **Targets**: macOS arm64/x64 + Linux arm64/x64 (glibc). `musl` is still deferred —
+  `wreq` pulls BoringSSL, which makes those cross-builds fiddly.
 - **macOS signing**: ad-hoc only (no Apple Developer account). brew and `curl|sh` don't set
   the quarantine flag, so Gatekeeper doesn't block; only a manual browser download does.
 - **Regenerate CI** after editing `dist-workspace.toml`: `dist init --yes` (or `dist generate`).

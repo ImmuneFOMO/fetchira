@@ -1,0 +1,6 @@
+services:
+  fetchira:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fetchira:local

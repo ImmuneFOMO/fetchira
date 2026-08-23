@@ -2,6 +2,9 @@
 research/
 CLAUDE.local.md
 .env
+.playwright-mcp/
+secrets/
+.env.hosted
 fetchira.toml
 usage.db
 usage.db-shm

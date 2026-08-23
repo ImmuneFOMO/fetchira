@@ -49,6 +49,8 @@ The details: [picking providers](#picking-providers),
 [registering tools](#register-with-your-coding-tools), [web sessions](#web-sessions),
 [configuration](#configuration).
 
+**Host it.** Same router on a private VPS, with keys for friends: [docs/hosted.md](docs/hosted.md).
+
 ### Or let your agent set it up
 
 Don't want to touch a terminal? Paste this into Claude Code (or any coding agent with
@@ -150,8 +152,8 @@ optionally pin a proxy:
 
 ![Add account](docs/add-account.png)
 
-The whole dashboard is **self-contained and offline**: the assets (including React) are embedded
-in the binary, so there is no Node, no build step and no CDN. It binds to `127.0.0.1` only and
+The whole dashboard is **self-contained and offline**: the compiled assets (including React) are embedded
+in the binary, so the runtime needs no Node, no Babel and no frontend build step. It binds to `127.0.0.1` only and
 is gated by a per-session token in the URL plus `Host`/`Origin` checks.
 
 ## How it works
@@ -195,8 +197,7 @@ brew install ImmuneFOMO/tap/fetchira
 curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
 ```
 
-Prebuilt Linux binaries are **x86_64** (macOS ships both Intel and Apple Silicon). On arm64
-Linux, use **Cargo** (below) to build from source.
+Prebuilt binaries ship for **macOS arm64/x86_64** and **Linux arm64/x86_64**.
 
 **With Cargo** — builds from source, works on any platform Rust targets (incl. arm64 Linux):
 

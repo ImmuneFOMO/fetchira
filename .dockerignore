@@ -1,0 +1,13 @@
+target
+.git
+.playwright-mcp
+.claude
+.env*
+fetchira.toml
+usage.db*
+backups
+secrets
+research
+scratchpad
+docs/*.png
+docs/*.html
