@@ -592,6 +592,9 @@ pub struct LiveLimits {
     /// not part of the serialized view.
     #[serde(skip)]
     pub cookie_updates: Vec<(String, String)>,
+    /// Account email captured while reading limits (JWT / session). Internal — the router persists it.
+    #[serde(skip)]
+    pub identity: Option<String>,
 }
 
 impl LiveLimits {
@@ -692,17 +695,40 @@ impl Provider {
     ) -> Option<LiveLimits> {
         match self.kind {
             // chatgpt keys its bearer cache (and the rotated-cookie capture) by account label.
-            ProviderKind::ChatgptWeb => match chatgpt_web::limits(&self.base, client, acct).await {
-                Ok(v) => Some(v),
-                Err(e) => {
+            ProviderKind::ChatgptWeb => {
+                let http = chatgpt_web::limits(&self.base, client, acct).await;
+                if let Err(e) = &http {
                     tracing::warn!(provider = "chatgpt_web", account = %acct, error = %e, "live limits failed");
-                    if browser_fallback {
-                        chatgpt_browser::limits(cookies).await.ok()
-                    } else {
-                        None
-                    }
                 }
-            },
+                let http = http.ok();
+                let thin = http
+                    .as_ref()
+                    .is_none_or(|v| v.features.is_empty() && v.models.is_empty());
+                if thin && browser_fallback {
+                    match chatgpt_browser::limits(cookies).await {
+                        Ok(mut b) => {
+                            if let Some(h) = http {
+                                if b.tier.is_none() && h.tier.as_deref() != Some("free") {
+                                    b.tier = h.tier;
+                                }
+                                if b.identity.is_none() {
+                                    b.identity = h.identity;
+                                }
+                                if b.features.is_empty() {
+                                    b.features = h.features;
+                                }
+                                if b.models.is_empty() {
+                                    b.models = h.models;
+                                }
+                            }
+                            Some(b)
+                        }
+                        Err(_) => http,
+                    }
+                } else {
+                    http
+                }
+            }
             ProviderKind::GrokWeb => grok_web::limits(&self.base, client).await.ok(),
             ProviderKind::GeminiWeb => gemini_web::limits(&self.base, client).await.ok(),
             _ => None,

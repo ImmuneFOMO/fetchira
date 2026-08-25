@@ -677,9 +677,11 @@ impl Router {
     }
 
     /// Refresh every live cache (called on a timer by the dashboard) so cached snapshots stay fresh
-    /// without any request blocking on a cold provider fan-out.
+    /// without any request blocking on a cold provider fan-out. Includes ChatGPT's CDP fallback:
+    /// HTTP-only misses are not cached, so a hosted VPS that 403s `conversation/init` would
+    /// otherwise leave Accounts on `pending` forever.
     pub async fn warm(&self) {
-        let _ = self.snapshot(true, false).await;
+        let _ = self.snapshot(true, true).await;
     }
 
     async fn bucket_views(
@@ -899,6 +901,9 @@ impl Router {
         if let Some(ll) = &fresh {
             if !ll.cookie_updates.is_empty() {
                 self.refresh_session(b, &ll.cookie_updates).await;
+            }
+            if let Some(id) = ll.identity.as_deref().filter(|s| !s.is_empty()) {
+                let _ = self.store.set_identity(&b.label, id).await;
             }
         }
         // An HTTP-only miss must not hide the browser fallback from a later full snapshot or

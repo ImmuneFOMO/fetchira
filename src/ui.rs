@@ -85,7 +85,13 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
 
     // Best-effort: fill in account emails for already-logged-in accounts (otherwise missing until
     // their next login) so the dashboard shows them. Background — doesn't delay the first paint.
-    tokio::spawn(backfill_identities(home.to_path_buf(), state.store.clone()));
+    {
+        let home = home.to_path_buf();
+        let store = state.store.clone();
+        tokio::spawn(async move {
+            cli::backfill_identities(&home, &store).await;
+        });
+    }
 
     // Fresh update check at launch, then every 15 min while the UI runs — the daily throttle
     // would otherwise hide a release published after the last passive check.
@@ -180,35 +186,6 @@ async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
 async fn rebuild(st: &AppState) {
     if let Ok(inner) = build_inner(&st.home, &st.store).await {
         *st.inner.write().await = inner;
-    }
-}
-
-/// One-shot best-effort: capture the account email for every logged-in web/dashboard account that
-/// doesn't have one yet, so upgraded configs show emails without a forced re-login.
-async fn backfill_identities(home: PathBuf, store: Store) {
-    let Ok(cfg) = config::load(home.join("fetchira.toml").to_str().unwrap_or("")) else {
-        return;
-    };
-    for a in &cfg.accounts {
-        if !(a.provider.is_web() || a.provider.balance_session()) {
-            continue;
-        }
-        if matches!(store.load_identity(&a.label).await, Ok(Some(_))) {
-            continue;
-        }
-        let Ok(Some(raw)) = store.load_session(&a.label).await else {
-            continue;
-        };
-        let session = crate::web::parse_session(&raw);
-        let proxy = a.proxy.as_deref().filter(|p| p.starts_with("http"));
-        if let Ok(client) = crate::web::build_client(&session.cookies, &session.headers, proxy) {
-            if let Some(id) = crate::providers::Provider::new(a.provider)
-                .account_identity(&client)
-                .await
-            {
-                let _ = store.set_identity(&a.label, &id).await;
-            }
-        }
     }
 }
 

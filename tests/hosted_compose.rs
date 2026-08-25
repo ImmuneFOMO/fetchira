@@ -24,4 +24,8 @@ fn hosted_docs_describe_both_install_tracks() {
     assert!(docs.contains("--profile caddy"));
     assert!(docs.contains("Google Chrome"));
     assert!(!docs.contains("${FETCHIRA_HOST:?"));
+    assert!(
+        docs.contains("first-visit setup") && docs.contains(": > secrets/admin-password"),
+        "docs must describe empty admin-password and browser first-visit setup"
+    );
 }

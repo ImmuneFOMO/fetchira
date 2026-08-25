@@ -439,6 +439,8 @@ pub struct LoginChallenge {
 #[derive(Serialize)]
 struct LoginUpload<'a> {
     session: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<&'a str>,
 }
 
 pub async fn login(
@@ -492,13 +494,25 @@ pub async fn login(
             serde_json::to_string(&captured)?
         }
     };
-    if crate::web::parse_session(&session).cookies.is_empty() {
+    let parsed = crate::web::parse_session(&session);
+    if parsed.cookies.is_empty() {
         bail!("session contains no cookies");
     }
+    let identity =
+        if let Ok(http) = crate::web::build_client(&parsed.cookies, &parsed.headers, None) {
+            crate::providers::Provider::new(target.provider)
+                .account_identity(&http)
+                .await
+        } else {
+            None
+        };
     let response = client
         .post(url)
         .bearer_auth(key)
-        .json(&LoginUpload { session: &session })
+        .json(&LoginUpload {
+            session: &session,
+            identity: identity.as_deref(),
+        })
         .send()
         .await?;
     if !response.status().is_success() {

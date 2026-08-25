@@ -354,15 +354,27 @@ async fn build_ctx(
     ))
 }
 
-fn account_from_jwt(bearer: &str) -> Option<String> {
+fn jwt_payload(bearer: &str) -> Option<Value> {
     let payload = bearer.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;
-    let v: Value = serde_json::from_slice(&bytes).ok()?;
-    v.get("https://api.openai.com/auth")
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn account_from_jwt(bearer: &str) -> Option<String> {
+    jwt_payload(bearer)?
+        .get("https://api.openai.com/auth")
         .and_then(|a| a.get("chatgpt_account_id"))
-        .and_then(|x| x.as_str())
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn plan_from_jwt(bearer: &str) -> Option<String> {
+    jwt_payload(bearer)?
+        .get("https://api.openai.com/auth")
+        .and_then(|a| a.get("chatgpt_plan_type"))
+        .and_then(Value::as_str)
         .map(str::to_string)
 }
 
@@ -385,15 +397,22 @@ fn jwt_exp_in(bearer: &str) -> i64 {
 }
 
 fn email_from_jwt(bearer: &str) -> Option<String> {
-    let payload = bearer.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let v: Value = serde_json::from_slice(&bytes).ok()?;
-    v.get("https://api.openai.com/profile")
+    jwt_payload(bearer)?
+        .get("https://api.openai.com/profile")
         .and_then(|p| p.get("email"))
-        .and_then(|x| x.as_str())
+        .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+fn identity_from_session(v: &Value) -> Option<String> {
+    v.pointer("/user/email")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            v.get("accessToken")
+                .and_then(Value::as_str)
+                .and_then(email_from_jwt)
+        })
 }
 
 fn message_node(query: &str, hints: &[&str], dr: bool) -> Value {
@@ -626,7 +645,7 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client, acct: &str) -> Res
     // Shares the bearer cache with the turn path, so polling limits doesn't re-hit
     // `/api/auth/session` (which rotates the session cookie); the captured `Set-Cookie` updates are
     // handed back for the router to persist.
-    let (bearer, _account_id, updates) = ensure_bearer(base, client, acct).await?;
+    let (bearer, account_id, updates) = ensure_bearer(base, client, acct).await?;
     let auth = format!("Bearer {bearer}");
 
     let init: Value = {
@@ -645,13 +664,19 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client, acct: &str) -> Res
         serde_json::from_str(&body).unwrap_or(Value::Null)
     };
 
-    let tier = friendly_plan(account_tier(base, client, &auth).await);
+    let tier = friendly_plan(account_tier(base, client, &auth, &account_id).await);
     let models = model_catalog(base, client, &auth).await;
     let mut payload = json!({"init": init, "models": Value::Null, "tier": tier});
     payload["models"] = serde_json::to_value(&models).unwrap_or(Value::Null);
     let mut out = parse_limits_json(&payload)?;
     out.models = models;
     out.cookie_updates = updates;
+    if out.identity.is_none() {
+        out.identity = email_from_jwt(&bearer);
+    }
+    if out.tier.is_none() {
+        out.tier = plan_from_jwt(&bearer).and_then(|p| friendly_plan(Some(p)));
+    }
     Ok(out)
 }
 
@@ -686,14 +711,23 @@ pub(crate) fn parse_limits_json(payload: &Value) -> Result<LiveLimits> {
         }));
     }
 
+    let session = parsed("session");
     Ok(LiveLimits {
         tier: tier_json.as_str().map(str::to_string).or_else(|| {
             account_tier_value(&tier_json)
-                .map(|v| friendly_plan(Some(v)).unwrap_or_else(|| "free".into()))
+                .or_else(|| account_tier_value(&init))
+                .or_else(|| {
+                    session
+                        .get("accessToken")
+                        .and_then(Value::as_str)
+                        .and_then(plan_from_jwt)
+                })
+                .and_then(|v| friendly_plan(Some(v)))
         }),
         features,
         models: model_catalog_value(&model_json),
         cookie_updates: Vec::new(),
+        identity: identity_from_session(&session),
     })
 }
 
@@ -868,13 +902,19 @@ fn composer_model(cat: &str) -> Option<(String, Vec<&'static str>)> {
     Some((format!("gpt-5.{n}"), levels))
 }
 
-async fn account_tier(base: &str, client: &wreq::Client, auth: &str) -> Option<String> {
-    let resp = client
+async fn account_tier(
+    base: &str,
+    client: &wreq::Client,
+    auth: &str,
+    account_id: &str,
+) -> Option<String> {
+    let mut req = client
         .get(format!("{base}/backend-api/accounts/check/v4-2023-04-27"))
-        .header("authorization", auth)
-        .send()
-        .await
-        .ok()?;
+        .header("authorization", auth);
+    if !account_id.is_empty() {
+        req = req.header("chatgpt-account-id", account_id);
+    }
+    let resp = req.send().await.ok()?;
     let status = resp.status();
     let body = resp.text().await.ok()?;
     if !status.is_success() {
@@ -1110,5 +1150,43 @@ data: {"v":{"conversation_id":"6a43081a-099c-83eb-b23b-092573129b5e","message":{
         assert_eq!(friendly_plan(Some("pro".into())).as_deref(), Some("Pro"));
         assert_eq!(friendly_plan(Some("max".into())).as_deref(), Some("Max"));
         assert_eq!(friendly_plan(Some("team".into())).as_deref(), Some("Team"));
+    }
+
+    #[test]
+    fn parse_limits_reads_plan_and_email_from_browser_payload() {
+        let payload = json!({
+            "init": json!({"limits_progress":[{"feature_name":"image_gen","remaining":2}]}).to_string(),
+            "models": "{}",
+            "tier": json!({"accounts":{"default":{"account":{"plan_type":"plus"}}}}).to_string(),
+            "session": {"user":{"email":"a@t.org"}},
+        });
+        let ll = parse_limits_json(&payload).unwrap();
+        assert_eq!(ll.tier.as_deref(), Some("Plus"));
+        assert_eq!(ll.identity.as_deref(), Some("a@t.org"));
+        assert_eq!(ll.features[0].feature, "image_gen");
+    }
+
+    #[test]
+    fn parse_limits_reads_plan_from_session_jwt_when_check_fails() {
+        let claims = json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc",
+                "chatgpt_plan_type": "plus"
+            },
+            "https://api.openai.com/profile": {"email": "a@t.org"}
+        });
+        let jwt = format!(
+            "eyJhbGciOiJub25lIn0.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let payload = json!({
+            "init": json!({"limits_progress":[{"feature_name":"image_gen","remaining":2}]}).to_string(),
+            "models": "{}",
+            "tier": "<html>denied</html>",
+            "session": {"accessToken": jwt, "user":{"email":"a@t.org"}},
+        });
+        let ll = parse_limits_json(&payload).unwrap();
+        assert_eq!(ll.tier.as_deref(), Some("Plus"));
+        assert_eq!(ll.identity.as_deref(), Some("a@t.org"));
     }
 }

@@ -534,6 +534,45 @@ pub async fn identity_dup(
         .map(|other| (other, id)))
 }
 
+/// Best-effort: record the account email (dashboard display + dup detection). Direct egress is
+/// fine for this one-off identity read; the router uses the sticky proxy for real calls.
+pub async fn record_identity(
+    store: &Store,
+    kind: ProviderKind,
+    label: &str,
+    raw_session: &str,
+    proxy: Option<&str>,
+) {
+    let session = web::parse_session(raw_session);
+    let proxy = proxy.filter(|p| p.starts_with("http"));
+    if let Ok(client) = web::build_client(&session.cookies, &session.headers, proxy) {
+        if let Some(id) = crate::providers::Provider::new(kind)
+            .account_identity(&client)
+            .await
+        {
+            let _ = store.set_identity(label, &id).await;
+        }
+    }
+}
+
+/// Fill in missing emails for already-logged-in web/dashboard accounts so the UI shows them
+/// without a forced re-login.
+pub async fn backfill_identities(home: &Path, store: &Store) {
+    let cfg = load_or_empty(home);
+    for a in &cfg.accounts {
+        if !(a.provider.is_web() || a.provider.balance_session()) {
+            continue;
+        }
+        if matches!(store.load_identity(&a.label).await, Ok(Some(_))) {
+            continue;
+        }
+        let Ok(Some(raw)) = store.load_session(&a.label).await else {
+            continue;
+        };
+        record_identity(store, a.provider, &a.label, &raw, a.proxy.as_deref()).await;
+    }
+}
+
 /// Capture (or re-capture) a web session for an existing account. Shared by CLI + web UI.
 pub async fn capture_login(
     home: &Path,
@@ -642,25 +681,14 @@ async fn do_login(
     );
     let session = web::login(home, kind, label, browser).await?;
     let store = open_store(home, cfg).await?;
-    store
-        .save_session(label, kind.as_str(), &serde_json::to_string(&session)?)
-        .await?;
-    // Best-effort: record the account email (dashboard display + dup detection). Direct egress is
-    // fine for this one-off identity read; the router uses the sticky proxy for real calls.
+    let raw = serde_json::to_string(&session)?;
+    store.save_session(label, kind.as_str(), &raw).await?;
     let proxy = cfg
         .accounts
         .iter()
         .find(|a| a.label == label)
-        .and_then(|a| a.proxy.as_deref())
-        .filter(|p| p.starts_with("http"));
-    if let Ok(client) = web::build_client(&session.cookies, &session.headers, proxy) {
-        if let Some(id) = crate::providers::Provider::new(kind)
-            .account_identity(&client)
-            .await
-        {
-            let _ = store.set_identity(label, &id).await;
-        }
-    }
+        .and_then(|a| a.proxy.as_deref());
+    record_identity(&store, kind, label, &raw, proxy).await;
     println!(
         "captured {} cookies; session '{label}' ready",
         session.cookies.len()

@@ -127,12 +127,17 @@ function HostedUnavailable() {
     onClick: () => location.reload()
   }, "Reload dashboard")));
 }
-function HostedLogin({
-  onLogin
+function HostedGate({
+  title,
+  copy,
+  onSubmit,
+  submitLabel,
+  busyLabel,
+  extra,
+  error,
+  busy,
+  children
 }) {
-  const [password, setPassword] = React.useState('');
-  const [error, setError] = React.useState('');
-  const [busy, setBusy] = React.useState(false);
   return /*#__PURE__*/React.createElement("main", {
     style: {
       minHeight: '100vh',
@@ -184,74 +189,354 @@ function HostedLogin({
       color: 'var(--text-hi)',
       margin: '6px 0 10px'
     }
-  }, "Unlock the router"), /*#__PURE__*/React.createElement("p", {
+  }, title), /*#__PURE__*/React.createElement("p", {
     style: {
       color: 'var(--text-lo)',
       lineHeight: 1.5
     }
-  }, "Provider sessions, friend keys and request history stay behind this administrator session."), /*#__PURE__*/React.createElement("form", {
+  }, copy), /*#__PURE__*/React.createElement("form", {
+    noValidate: true,
+    onSubmit: onSubmit,
+    style: {
+      display: 'grid',
+      gap: 16,
+      marginTop: 26
+    }
+  }, children, /*#__PURE__*/React.createElement("button", {
+    className: "primary",
+    disabled: busy,
+    style: {
+      minHeight: 40
+    }
+  }, busy ? busyLabel : submitLabel), extra, error && /*#__PURE__*/React.createElement("div", {
+    role: "alert",
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 12,
+      color: 'var(--red-500)',
+      background: 'var(--red-dim)',
+      border: '1px solid rgba(242,85,90,0.3)',
+      borderRadius: 'var(--r-sm)',
+      padding: '8px 10px'
+    }
+  }, error))));
+}
+const fieldStyle = {
+  width: '100%',
+  boxSizing: 'border-box',
+  background: 'var(--surface-inset)',
+  color: 'var(--text-hi)',
+  border: '1px solid var(--border-hairline)',
+  borderRadius: 'var(--r-sm)',
+  padding: 11
+};
+function PasswordField({
+  id,
+  label,
+  value,
+  onChange,
+  onBlur,
+  autoFocus,
+  error,
+  hint,
+  autoComplete,
+  inputRef
+}) {
+  const [show, setShow] = React.useState(false);
+  const hintId = `${id}-hint`;
+  const errId = `${id}-err`;
+  const described = error ? errId : hint ? hintId : undefined;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    htmlFor: id,
+    style: {
+      color: 'var(--text-mid)',
+      font: '600 12px var(--font-mono)'
+    }
+  }, label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'relative',
+      display: 'block'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    id: id,
+    ref: inputRef,
+    type: show ? 'text' : 'password',
+    autoFocus: autoFocus,
+    value: value,
+    onChange: onChange,
+    onBlur: onBlur,
+    autoComplete: autoComplete,
+    spellCheck: "false",
+    "aria-invalid": error ? 'true' : 'false',
+    "aria-describedby": described,
+    style: _objectSpread(_objectSpread({}, fieldStyle), {}, {
+      paddingRight: 40,
+      borderColor: error ? 'var(--red-500)' : undefined
+    })
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    "aria-label": show ? 'Hide password' : 'Show password',
+    onClick: () => setShow(s => !s),
+    style: {
+      position: 'absolute',
+      right: 6,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      width: 28,
+      height: 28,
+      border: 0,
+      background: 'transparent',
+      color: 'var(--text-lo)',
+      padding: 0,
+      display: 'grid',
+      placeItems: 'center'
+    }
+  }, show ? /*#__PURE__*/React.createElement("svg", {
+    width: "16",
+    height: "16",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    "aria-hidden": "true"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M3 3l18 18"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M10.6 10.6A3 3 0 0013.4 13.4"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M9.9 5.1A11 11 0 0121 12a11 11 0 01-3.1 4.3M6.1 6.1A11 11 0 003 12a11 11 0 0014.1 6.2"
+  })) : /*#__PURE__*/React.createElement("svg", {
+    width: "16",
+    height: "16",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    "aria-hidden": "true"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: "12",
+    cy: "12",
+    r: "3"
+  })))), error ? /*#__PURE__*/React.createElement("div", {
+    id: errId,
+    role: "alert",
+    style: {
+      color: 'var(--red-500)',
+      font: '11px/1.4 var(--font-mono)'
+    }
+  }, error) : hint ? /*#__PURE__*/React.createElement("div", {
+    id: hintId,
+    style: {
+      color: 'var(--text-faint)',
+      font: '11px/1.4 var(--font-mono)'
+    }
+  }, hint) : null);
+}
+function RememberMe({
+  checked,
+  onChange
+}) {
+  return /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      color: 'var(--text-mid)',
+      font: '12px var(--font-ui)',
+      cursor: 'pointer',
+      userSelect: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: checked,
+    onChange: e => onChange(e.target.checked),
+    style: {
+      width: 14,
+      height: 14,
+      accentColor: 'var(--lime-500)'
+    }
+  }), "Remember me on this browser");
+}
+function HostedLogin({
+  onLogin
+}) {
+  const [password, setPassword] = React.useState('');
+  const [remember, setRemember] = React.useState(true);
+  const [fieldError, setFieldError] = React.useState('');
+  const [error, setError] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const inputRef = React.useRef(null);
+  return /*#__PURE__*/React.createElement(HostedGate, {
+    title: "Unlock the router",
+    copy: "Provider sessions, friend keys and request history stay behind this administrator session.",
+    submitLabel: "Log in",
+    busyLabel: "Unlocking\u2026",
+    error: error,
+    busy: busy,
     onSubmit: async e => {
       e.preventDefault();
       if (busy) return;
+      if (!password) {
+        setFieldError('Enter the admin password');
+        setError('');
+        inputRef.current && inputRef.current.focus();
+        return;
+      }
       setBusy(true);
       setError('');
+      setFieldError('');
       try {
         const r = await fetch('/admin/login', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'content-type': 'application/json'
           },
           body: JSON.stringify({
-            password
+            password,
+            remember
           })
         });
-        if (!r.ok) throw new Error((await r.text()) || 'login failed');
+        if (!r.ok) {
+          const msg = (await r.text()) || 'login failed';
+          if (r.status === 401) {
+            setFieldError('Wrong password');
+          } else {
+            setError(msg);
+          }
+          inputRef.current && inputRef.current.focus();
+          return;
+        }
         onLogin();
       } catch (x) {
         setError(x.message);
       } finally {
         setBusy(false);
       }
+    }
+  }, /*#__PURE__*/React.createElement(PasswordField, {
+    id: "admin-password",
+    label: "ADMIN PASSWORD",
+    value: password,
+    onChange: e => {
+      setPassword(e.target.value);
+      if (fieldError) setFieldError('');
     },
-    style: {
-      display: 'grid',
-      gap: 16,
-      marginTop: 26
-    }
-  }, /*#__PURE__*/React.createElement("label", {
-    style: {
-      display: 'grid',
-      gap: 7,
-      color: 'var(--text-mid)',
-      font: '600 12px var(--font-mono)'
-    }
-  }, "ADMIN PASSWORD", /*#__PURE__*/React.createElement("input", {
-    type: "password",
     autoFocus: true,
-    required: true,
+    autoComplete: "current-password",
+    error: fieldError,
+    inputRef: inputRef
+  }), /*#__PURE__*/React.createElement(RememberMe, {
+    checked: remember,
+    onChange: setRemember
+  }));
+}
+function HostedSetup({
+  onLogin
+}) {
+  const [password, setPassword] = React.useState('');
+  const [confirm, setConfirm] = React.useState('');
+  const [touched, setTouched] = React.useState({
+    password: false,
+    confirm: false
+  });
+  const [submitted, setSubmitted] = React.useState(false);
+  const [remember, setRemember] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const passwordRef = React.useRef(null);
+  const confirmRef = React.useRef(null);
+  const show = name => submitted || touched[name];
+  const passwordError = !show('password') ? '' : !password ? 'Enter a password' : password.length < 12 ? `At least 12 characters (${password.length}/12)` : '';
+  const confirmError = !show('confirm') ? '' : !confirm ? 'Confirm the password' : password !== confirm ? 'Passwords do not match' : '';
+  const passwordHint = password.length >= 12 ? '' : password.length === 0 ? 'At least 12 characters' : `${password.length}/12`;
+  return /*#__PURE__*/React.createElement(HostedGate, {
+    title: "Set the admin password",
+    copy: "No password was configured at deploy time. Choose one here \u2014 it is hashed on the server and never shown again.",
+    submitLabel: "Set password",
+    busyLabel: "Saving\u2026",
+    error: error,
+    busy: busy,
+    onSubmit: async e => {
+      e.preventDefault();
+      if (busy) return;
+      setSubmitted(true);
+      setError('');
+      if (!password || password.length < 12) {
+        passwordRef.current && passwordRef.current.focus();
+        return;
+      }
+      if (!confirm || password !== confirm) {
+        confirmRef.current && confirmRef.current.focus();
+        return;
+      }
+      setBusy(true);
+      try {
+        const r = await fetch('/admin/setup', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({
+            password,
+            remember
+          })
+        });
+        if (!r.ok) {
+          const msg = (await r.text()) || 'setup failed';
+          if (msg.includes('12')) {
+            setTouched(t => _objectSpread(_objectSpread({}, t), {}, {
+              password: true
+            }));
+            passwordRef.current && passwordRef.current.focus();
+          } else {
+            setError(msg === 'admin password already set' ? 'Password already set. Reload the page to sign in.' : msg);
+          }
+          return;
+        }
+        onLogin();
+      } catch (x) {
+        setError(x.message);
+      } finally {
+        setBusy(false);
+      }
+    }
+  }, /*#__PURE__*/React.createElement(PasswordField, {
+    id: "setup-password",
+    label: "NEW PASSWORD",
     value: password,
     onChange: e => setPassword(e.target.value),
-    style: {
-      width: '100%',
-      boxSizing: 'border-box',
-      background: 'var(--surface-inset)',
-      color: 'var(--text-hi)',
-      border: '1px solid var(--border-hairline)',
-      borderRadius: 'var(--r-sm)',
-      padding: 11
-    }
-  })), /*#__PURE__*/React.createElement("button", {
-    className: "primary",
-    disabled: busy,
-    style: {
-      minHeight: 40
-    }
-  }, busy ? 'Unlocking…' : 'Log in'), error && /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: 'var(--red-500)',
-      font: '12px var(--font-mono)'
-    }
-  }, error))));
+    onBlur: () => setTouched(t => _objectSpread(_objectSpread({}, t), {}, {
+      password: true
+    })),
+    autoFocus: true,
+    autoComplete: "new-password",
+    error: passwordError,
+    hint: passwordError ? '' : passwordHint,
+    inputRef: passwordRef
+  }), /*#__PURE__*/React.createElement(PasswordField, {
+    id: "setup-confirm",
+    label: "CONFIRM",
+    value: confirm,
+    onChange: e => setConfirm(e.target.value),
+    onBlur: () => setTouched(t => _objectSpread(_objectSpread({}, t), {}, {
+      confirm: true
+    })),
+    autoComplete: "new-password",
+    error: confirmError,
+    inputRef: confirmRef
+  }), /*#__PURE__*/React.createElement(RememberMe, {
+    checked: remember,
+    onChange: setRemember
+  }));
 }
 function HostedMenu({
   onSelect,
@@ -446,6 +731,7 @@ function App() {
     return aliases[hash] || ['overview', 'accounts', 'activity', 'keys', 'audit', 'update'].includes(hash) ? aliases[hash] || hash : 'overview';
   });
   const [authenticated, setAuthenticated] = React.useState(false);
+  const [gate, setGate] = React.useState('loading');
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   // null until the first live state answers; a fresh install (zero accounts) opens the
   // onboarding flow, which sticks until the user leaves it (adds keep it on screen).
@@ -460,6 +746,34 @@ function App() {
   const [, bump] = React.useState(0); // re-render with the freshly polled state
   const everOnline = React.useRef(false); // only nag once the server has actually been reached
 
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const setup = await fetch('/admin/setup', {
+          credentials: 'same-origin'
+        }).then(r => r.json());
+        if (setup && setup.configured === false) {
+          setGate('setup');
+          return;
+        }
+        const state = await fetch('/admin/state', {
+          credentials: 'same-origin'
+        });
+        if (state.ok) {
+          const d = await state.json();
+          if (d && d.groups && d.catalog) {
+            window.FX = Object.assign({}, window.FX, d);
+            setAuthenticated(true);
+            setPhase('live');
+            setOnboard((d.accounts || []).length === 0);
+            setGate('login');
+            return;
+          }
+        }
+      } catch (_) {/* fall through to login */}
+      setGate('login');
+    })();
+  }, []);
   React.useEffect(() => {
     if (!authenticated) return undefined;
     window.fxSetOffline = v => setOnline(!v);
@@ -490,12 +804,18 @@ function App() {
     const id = setInterval(ping, 5000);
     return () => clearInterval(id);
   }, [authenticated]);
-  if (!authenticated) return /*#__PURE__*/React.createElement(HostedLogin, {
-    onLogin: () => {
+  if (!authenticated) {
+    if (gate === 'loading') return /*#__PURE__*/React.createElement(Loading, null);
+    const onLogin = () => {
       setAuthenticated(true);
       setPhase('loading');
-    }
-  });
+    };
+    return gate === 'setup' ? /*#__PURE__*/React.createElement(HostedSetup, {
+      onLogin: onLogin
+    }) : /*#__PURE__*/React.createElement(HostedLogin, {
+      onLogin: onLogin
+    });
+  }
   if (phase === 'offline' && !everOnline.current) return /*#__PURE__*/React.createElement(HostedUnavailable, null);
   if (onboard) {
     return /*#__PURE__*/React.createElement(React.Fragment, null, stale ? /*#__PURE__*/React.createElement(OfflineToast, {
@@ -536,7 +856,9 @@ function App() {
 window.FX_TOKEN = '';
 async function loadHostedState() {
   try {
-    const state = await fetch('/admin/state');
+    const state = await fetch('/admin/state', {
+      credentials: 'same-origin'
+    });
     if (!state.ok) return null;
     const d = await state.json();
     if (d.groups && d.catalog) return d;

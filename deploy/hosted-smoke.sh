@@ -38,6 +38,9 @@ if grep -Eq 'text/babel|vendor/babel|min\.jsx|\.jsx"' "$work/index.html"; then
   exit 1
 fi
 
+expect 200 "$url/admin/setup"
+grep -q '"configured"' "$work/body" || { echo 'GET /admin/setup must report configured' >&2; exit 1; }
+
 expect 401 "$url/admin/keys"
 expect 401 -X POST -H 'content-type: application/json' --data '{"id":"must-not-exist","name":"csrf-check"}' "$url/admin/keys"
 

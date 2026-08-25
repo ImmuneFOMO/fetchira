@@ -10,10 +10,9 @@ Default `docker compose up -d` starts only Fetchira, published on loopback (`127
 
 ```sh
 git clone https://github.com/ImmuneFOMO/fetchira.git && cd fetchira
-read -rsp 'Fetchira admin password: ' FETCHIRA_PASSWORD; printf '\n'
-export FETCHIRA_PASSWORD
 install -d -m 700 secrets
 head -c 48 /dev/urandom | base64 | tr -d '\n' > secrets/master-key
+: > secrets/admin-password
 ```
 
 Write `.env.hosted` (track A or B), then build once.
@@ -39,14 +38,10 @@ FETCHIRA_PORT=127.0.0.1:7879
 EOF
 ```
 
-Then, for either track (the master key must already exist so Compose can mount `secrets/`):
+Then, for either track (the empty admin-password file and master key must already exist so Compose can mount `secrets/`):
 
 ```sh
 docker compose --env-file .env.hosted -f docker-compose.hosted.yml build fetchira
-printf '%s' "$FETCHIRA_PASSWORD" | docker compose --env-file .env.hosted \
-  -f docker-compose.hosted.yml run --rm --no-deps --entrypoint fetchira fetchira \
-  server password hash > secrets/admin-password
-unset FETCHIRA_PASSWORD
 chmod 600 .env.hosted secrets/admin-password secrets/master-key
 ```
 
@@ -99,9 +94,9 @@ docker compose --env-file .env.hosted \
 
 Add `--profile caddy` to that `up -d` when using bundled Caddy.
 
-The admin password file contains an Argon2id encoded hash, not the password itself. The commands above generate the hash through the same image and do not place the password in shell history. Fetchira also accepts the direct `FETCHIRA_ADMIN_PASSWORD` and `FETCHIRA_MASTER_KEY` environment variables outside Compose; the `_FILE` variants avoid Compose treating Argon2 `$` characters as interpolation syntax.
+Leave `secrets/admin-password` empty for a first-visit setup: open `/admin` and set the password in the browser. The server stores an Argon2id hash on the data volume; the plaintext never sits in compose files, shell history, or agent logs. To pre-seed a hash instead, pipe it into that file with `fetchira server password hash` before `up`. Fetchira also accepts the direct `FETCHIRA_ADMIN_PASSWORD` and `FETCHIRA_MASTER_KEY` environment variables outside Compose; the `_FILE` variants avoid Compose treating Argon2 `$` characters as interpolation syntax.
 
-The image is built reproducibly from the current checkout with `Cargo.lock`; it runs as uid `10001`, read-only except for the named `/data` volume. With `--profile caddy`, Caddy obtains and renews TLS. Open `https://fetchira.example.com/admin` to log in.
+The image is built reproducibly from the current checkout with `Cargo.lock`; it runs as uid `10001`, read-only except for the named `/data` volume. With `--profile caddy`, Caddy obtains and renews TLS. Open `https://fetchira.example.com/admin` to set the admin password (first visit) or log in.
 
 Create the first key either in that UI or on the server; its plaintext is printed only once:
 

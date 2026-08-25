@@ -3,8 +3,10 @@
 //! authentication and quota middleware are layered here as the hosted control plane grows.
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::State,
@@ -51,6 +53,13 @@ pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
     let store = Store::open(&db_path).await?;
     let router = Arc::new(Router::build(cfg, store.clone()).await?);
     let shared_router = Arc::new(tokio::sync::RwLock::new(router.clone()));
+    {
+        let home = home.to_path_buf();
+        let store = store.clone();
+        tokio::spawn(async move {
+            cli::backfill_identities(&home, &store).await;
+        });
+    }
     let state = HostedState {
         router: shared_router.clone(),
         store: store.clone(),
@@ -96,6 +105,7 @@ pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
             Json(json!({"server_version": version, "protocol_version": PROTOCOL_VERSION, "schema_version": crate::usage::SCHEMA, "min_client_schema_version": 1, "max_client_schema_version": crate::usage::SCHEMA}))
         }))
         .route("/admin/login", axum::routing::post(admin_login))
+        .route("/admin/setup", get(admin_setup_status).post(admin_setup))
         .route("/auth/check", get(auth_check))
         .route("/remote/check", get(remote_check))
         .route("/admin/keys", get(admin_keys).post(admin_create_key))
@@ -156,7 +166,11 @@ async fn rebuild_router(st: &HostedState) {
         return;
     };
     if let Ok(router) = Router::build(cfg, st.store.clone()).await {
-        *st.router.write().await = Arc::new(router);
+        let router = Arc::new(router);
+        *st.router.write().await = router.clone();
+        tokio::spawn(async move {
+            router.warm().await;
+        });
     }
 }
 
@@ -186,16 +200,24 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             }
         }
     }
+    let idents = st.store.all_identities().await.unwrap_or_default();
     let mains: Vec<_> = views.iter().filter(|v| !v.label.ends_with("#dr")).collect();
     let account_json = |v: &&crate::router::UsageView| {
         let kind = provider_kind(v.provider);
         let web = kind.is_some_and(|p| p.is_web());
         let ready = logged.contains(&v.label);
+        let proxy = cfg
+            .as_ref()
+            .and_then(|c| c.accounts.iter().find(|a| a.label == v.label))
+            .and_then(|a| a.proxy.as_deref())
+            .unwrap_or("direct");
         json!({
             "provider": v.provider, "label": v.label, "used": v.used, "quota": v.quota,
-            "remaining": v.remaining, "resetWindow": v.period, "proxy": v.proxy,
+            "remaining": v.remaining, "resetWindow": window_or_period(v.window_secs, &v.period),
+            "proxy": mask_proxy(proxy),
             "status": if v.exhausted { "exhausted" } else if !ready { "needs-login" } else { "healthy" },
             "key": !web, "web": web, "loggedIn": ready, "pending": v.pending,
+            "email": idents.get(v.label.as_str()),
             "limits": v.limits.as_ref().map(limits_json), "usd": v.usd
         })
     };
@@ -209,10 +231,10 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             if account.provider.is_web() && !seen_labels.contains(account.label.as_str()) {
                 accounts.push(json!({
                     "provider": account.provider.as_str(), "label": account.label,
-                    "used": 0, "quota": 0, "remaining": 0, "resetWindow": null,
-                    "proxy": account.proxy.as_deref().unwrap_or("direct"),
+                    "used": 0, "quota": 0, "remaining": 0, "resetWindow": "monthly",
+                    "proxy": mask_proxy(account.proxy.as_deref().unwrap_or("direct")),
                     "status": "needs-login", "key": false, "web": true,
-                    "loggedIn": false, "pending": false, "limits": null, "usd": null
+                    "loggedIn": false, "pending": false, "email": null, "limits": null, "usd": null
                 }));
             }
         }
@@ -240,7 +262,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
                 existing["pending"] =
                     json!(existing["pending"].as_bool().unwrap_or(false) || v.pending);
             } else {
-                providers.push(json!({"name":v.provider,"desc":provider_desc(v.provider),"used":v.used,"quota":v.quota,"accounts":1,"resetWindow":v.period,"pending":v.pending,"key":!web,"webSession":web,"loggedIn":logged.contains(&v.label),"limits":provider_limit_rows(v),"features":provider_feature_rows(v),"catalog":provider_catalog(v)}));
+                providers.push(json!({"name":v.provider,"desc":provider_desc(v.provider),"used":v.used,"quota":v.quota,"accounts":1,"resetWindow":window_or_period(v.window_secs, &v.period),"pending":v.pending,"key":!web,"webSession":web,"loggedIn":logged.contains(&v.label),"limits":provider_limit_rows(v),"features":provider_feature_rows(v),"catalog":provider_catalog(v)}));
             }
         }
         if let Some(cfg) = &cfg {
@@ -384,7 +406,75 @@ fn provider_desc(name: &str) -> &'static str {
     }
 }
 fn limits_json(l: &crate::providers::LiveLimits) -> serde_json::Value {
-    json!({"tier":l.tier,"features":l.features,"models":l.models})
+    json!({
+        "tier": l.tier,
+        "features": l.features.iter().map(|f| json!({
+            "feature": f.feature,
+            "remaining": f.remaining,
+            "total": f.total,
+            "windowSecs": f.window_secs,
+            "resetAfter": f.reset_after,
+        })).collect::<Vec<_>>(),
+        "models": l.models.iter().map(|m| json!({
+            "id": m.id,
+            "name": m.name,
+            "levels": m.levels,
+            "remaining": m.remaining,
+            "total": m.total,
+            "windowSecs": m.window_secs,
+            "resetAfter": m.reset_after,
+            "locked": m.locked,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn reset_window(period: &str) -> &'static str {
+    if period == "lifetime" {
+        "lifetime"
+    } else if period.len() == 10 {
+        "daily"
+    } else {
+        "monthly"
+    }
+}
+
+fn window_or_period(window_secs: Option<i64>, period: &str) -> String {
+    match window_secs {
+        Some(s) => window_label(s),
+        None => reset_window(period).to_string(),
+    }
+}
+
+fn window_label(secs: i64) -> String {
+    if secs % 3600 == 0 {
+        format!("{}h", secs / 3600)
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn mask_proxy(proxy: &str) -> String {
+    if proxy == "direct" || proxy == "pool" {
+        return proxy.to_string();
+    }
+    let after_scheme = proxy.split_once("://").map(|(_, r)| r).unwrap_or(proxy);
+    let host_port = after_scheme.rsplit('@').next().unwrap_or(after_scheme);
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (host_port, None),
+    };
+    let octets: Vec<&str> = host.split('.').collect();
+    let host = if octets.len() == 4 {
+        format!("{}.{}.{}.x", octets[0], octets[1], octets[2])
+    } else {
+        host.to_string()
+    };
+    match port {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    }
 }
 fn provider_limit_rows(v: &crate::router::UsageView) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
@@ -697,6 +787,12 @@ async fn admin_provider_session(
     {
         Ok(()) => {
             rebuild_router(&st).await;
+            let store = st.store.clone();
+            let raw = req.session.clone();
+            let lab = label.clone();
+            tokio::spawn(async move {
+                cli::record_identity(&store, provider, &lab, &raw, None).await;
+            });
             let _ = st
                 .store
                 .log_audit("admin", "provider.session", Some(&label), None)
@@ -1061,6 +1157,7 @@ async fn challenge_response(st: &HostedState, id: &str, key_id: &str) -> Respons
 #[derive(serde::Deserialize)]
 struct ChallengeUpload {
     session: String,
+    identity: Option<String>,
 }
 
 async fn challenge_upload(
@@ -1093,6 +1190,16 @@ async fn challenge_upload(
     {
         Ok(true) => {
             rebuild_router(&st).await;
+            if let Some(id) = req.identity.as_deref().filter(|s| !s.is_empty()) {
+                let _ = st.store.set_identity(&label, id).await;
+            } else if let Some(kind) = provider_kind(&provider) {
+                let store = st.store.clone();
+                let raw = req.session.clone();
+                let lab = label.clone();
+                tokio::spawn(async move {
+                    cli::record_identity(&store, kind, &lab, &raw, None).await;
+                });
+            }
             let _ = st
                 .store
                 .log_audit(&key_id, "provider.session", Some(&label), None)
@@ -1139,6 +1246,8 @@ async fn key_usage(State(st): State<HostedState>, headers: axum::http::HeaderMap
 #[derive(serde::Deserialize)]
 struct LoginRequest {
     password: String,
+    #[serde(default)]
+    remember: bool,
 }
 #[derive(serde::Deserialize)]
 struct CreateKeyRequest {
@@ -1177,20 +1286,56 @@ fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
 fn admin_token(headers: &axum::http::HeaderMap) -> Option<String> {
     cookie_value(headers, "fetchira_admin")
 }
-async fn admin_login(State(st): State<HostedState>, Json(req): Json<LoginRequest>) -> Response {
-    let expected = std::env::var("FETCHIRA_ADMIN_PASSWORD")
+
+fn nonempty_hash(raw: impl AsRef<str>) -> Option<String> {
+    let trimmed = raw.as_ref().trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn env_admin_hash() -> Option<String> {
+    std::env::var("FETCHIRA_ADMIN_PASSWORD")
         .ok()
+        .and_then(nonempty_hash)
         .or_else(|| {
             std::env::var("FETCHIRA_ADMIN_PASSWORD_FILE")
                 .ok()
                 .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(nonempty_hash)
         })
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if expected.is_empty() || !auth::verify_password(&req.password, &expected) {
-        return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+}
+
+fn stored_admin_hash(home: &Path) -> Option<String> {
+    std::fs::read_to_string(home.join("admin-password"))
+        .ok()
+        .and_then(nonempty_hash)
+}
+
+fn admin_hash(home: &Path) -> Option<String> {
+    env_admin_hash().or_else(|| stored_admin_hash(home))
+}
+
+fn write_bootstrap_hash(home: &Path, hash: &str) -> std::io::Result<()> {
+    let path = home.join("admin-password");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(hash.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = file.metadata()?.permissions();
+        perms.set_mode(0o600);
+        file.set_permissions(perms)?;
     }
+    Ok(())
+}
+
+async fn issue_admin_session(st: &HostedState, audit: &'static str, remember: bool) -> Response {
     let mut raw = [0u8; 32];
     OsRng.fill_bytes(&mut raw);
     let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
@@ -1198,23 +1343,64 @@ async fn admin_login(State(st): State<HostedState>, Json(req): Json<LoginRequest
     let csrf = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
     let hash =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()));
-    let expires = (Utc::now() + chrono::Duration::hours(12)).to_rfc3339();
+    let max_age = if remember { 30 * 24 * 3600 } else { 12 * 3600 };
+    let expires = (Utc::now() + chrono::Duration::seconds(max_age)).to_rfc3339();
     let _ = st.store.save_admin_session(&hash, &expires).await;
-    let mut out = Json(json!({"ok":true})).into_response();
+    let mut out = Json(json!({"ok": true})).into_response();
     out.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        format!("fetchira_admin={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200")
-            .parse()
-            .unwrap(),
+        format!(
+            "fetchira_admin={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age}"
+        )
+        .parse()
+        .unwrap(),
     );
     out.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        format!("fetchira_csrf={csrf}; Secure; SameSite=Lax; Path=/; Max-Age=43200")
+        format!("fetchira_csrf={csrf}; Secure; SameSite=Lax; Path=/; Max-Age={max_age}")
             .parse()
             .unwrap(),
     );
-    let _ = st.store.log_audit("admin", "login", None, None).await;
+    let _ = st.store.log_audit("admin", audit, None, None).await;
     out
+}
+
+async fn admin_setup_status(State(st): State<HostedState>) -> Response {
+    Json(json!({"configured": admin_hash(&st.home).is_some()})).into_response()
+}
+
+async fn admin_setup(State(st): State<HostedState>, Json(req): Json<LoginRequest>) -> Response {
+    if admin_hash(&st.home).is_some() {
+        return (StatusCode::CONFLICT, "admin password already set").into_response();
+    }
+    if req.password.len() < 12 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "admin password must be at least 12 characters",
+        )
+            .into_response();
+    }
+    let hash = match auth::hash_password(&req.password) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match write_bootstrap_hash(&st.home, &hash) {
+        Ok(()) => issue_admin_session(&st, "setup", req.remember).await,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            (StatusCode::CONFLICT, "admin password already set").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn admin_login(State(st): State<HostedState>, Json(req): Json<LoginRequest>) -> Response {
+    let Some(expected) = admin_hash(&st.home) else {
+        return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+    };
+    if !auth::verify_password(&req.password, &expected) {
+        return (StatusCode::UNAUTHORIZED, "invalid credentials").into_response();
+    }
+    issue_admin_session(&st, "login", req.remember).await
 }
 async fn require_admin(st: &HostedState, headers: &axum::http::HeaderMap) -> bool {
     let Some(t) = admin_token(headers) else {
@@ -1730,6 +1916,20 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION, "1");
     }
 
+    #[test]
+    fn account_window_matches_local_ui() {
+        assert_eq!(reset_window("lifetime"), "lifetime");
+        assert_eq!(reset_window("2026-08-30"), "daily");
+        assert_eq!(reset_window("2026-08"), "monthly");
+        assert_eq!(window_or_period(None, "2026-08"), "monthly");
+        assert_eq!(window_or_period(Some(7200), "2026-08"), "2h");
+        assert_eq!(mask_proxy("direct"), "direct");
+        assert_eq!(
+            mask_proxy("http://user:pass@192.0.2.123:6184"),
+            "192.0.2.x:6184"
+        );
+    }
+
     #[tokio::test]
     async fn key_concurrency_rejection_does_not_consume_quota() {
         let store = fresh_store("key_concurrency").await;
@@ -1879,5 +2079,126 @@ mod tests {
         assert_eq!(auth_forbidden.status(), StatusCode::FORBIDDEN);
         assert_eq!(remote_forbidden.status(), StatusCode::FORBIDDEN);
         assert_eq!(usage_ok.status(), StatusCode::OK);
+    }
+
+    fn unique_home(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("home");
+        path
+    }
+
+    #[test]
+    fn stored_admin_hash_round_trips_once() {
+        let home = unique_home("admin_hash");
+        assert!(stored_admin_hash(&home).is_none());
+        write_bootstrap_hash(&home, "$argon2id$test").expect("write");
+        assert_eq!(stored_admin_hash(&home).as_deref(), Some("$argon2id$test"));
+        assert!(write_bootstrap_hash(&home, "other").is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn first_visit_sets_admin_password() {
+        if env_admin_hash().is_some() {
+            return;
+        }
+        let home = unique_home("admin_setup");
+        let store = fresh_store("admin_setup").await;
+        let state = HostedState {
+            router: Arc::new(tokio::sync::RwLock::new(Arc::new(Router::from_parts(
+                vec![],
+                store.clone(),
+            )))),
+            store,
+            active: Arc::new(tokio::sync::Semaphore::new(64)),
+            key_active: Default::default(),
+            updates: Default::default(),
+            home: home.clone(),
+            db_path: String::new(),
+        };
+        let app = axum::Router::new()
+            .route("/admin/setup", get(admin_setup_status).post(admin_setup))
+            .route("/admin/login", axum::routing::post(admin_login))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        let client = reqwest::Client::new();
+        let setup = format!("http://{addr}/admin/setup");
+        let login = format!("http://{addr}/admin/login");
+
+        let status = client.get(&setup).send().await.expect("status");
+        assert_eq!(status.status(), StatusCode::OK);
+        let body: serde_json::Value = status.json().await.expect("json");
+        assert_eq!(body["configured"], false);
+
+        let too_short = client
+            .post(&setup)
+            .json(&json!({"password": "short"}))
+            .send()
+            .await
+            .expect("short");
+        assert_eq!(too_short.status(), StatusCode::BAD_REQUEST);
+
+        let created = client
+            .post(&setup)
+            .json(&json!({"password": "twelve chars"}))
+            .send()
+            .await
+            .expect("setup");
+        assert_eq!(created.status(), StatusCode::OK);
+        let cookies: Vec<_> = created.headers().get_all("set-cookie").iter().collect();
+        assert!(cookies.len() >= 2, "setup must mint admin and csrf cookies");
+
+        let again = client
+            .post(&setup)
+            .json(&json!({"password": "twelve chars"}))
+            .send()
+            .await
+            .expect("again");
+        assert_eq!(again.status(), StatusCode::CONFLICT);
+
+        let configured = client.get(&setup).send().await.expect("configured");
+        let body: serde_json::Value = configured.json().await.expect("json");
+        assert_eq!(body["configured"], true);
+
+        let signed_in = client
+            .post(&login)
+            .json(&json!({"password": "twelve chars"}))
+            .send()
+            .await
+            .expect("login");
+        assert_eq!(signed_in.status(), StatusCode::OK);
+        let remembered = client
+            .post(&login)
+            .json(&json!({"password": "twelve chars", "remember": true}))
+            .send()
+            .await
+            .expect("remember");
+        assert_eq!(remembered.status(), StatusCode::OK);
+        let cookies: Vec<_> = remembered
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap_or(""))
+            .collect();
+        assert!(
+            cookies.iter().any(|c| c.contains("Max-Age=2592000")),
+            "remember me lasts 30 days: {cookies:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

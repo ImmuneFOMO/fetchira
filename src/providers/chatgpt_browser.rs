@@ -242,11 +242,12 @@ pub async fn limits(cookies: &[Cookie]) -> Result<super::LiveLimits> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let result = timeout(Duration::from_secs(30), async {
+    let result = timeout(Duration::from_secs(45), async {
         let ws_url = wait_for_page(port).await?;
         let (mut ws, _) = connect_async(ws_url.as_str()).await?;
         cmd(&mut ws, "Network.enable", json!({})).await?;
         cmd(&mut ws, "Page.enable", json!({})).await?;
+        let _ = cmd(&mut ws, "Runtime.enable", json!({})).await;
         cmd(&mut ws, "Page.navigate", json!({"url":"https://chatgpt.com/"})).await?;
         sleep(Duration::from_millis(300)).await;
         let result = cmd(&mut ws, "Network.setCookies", json!({"cookies": cdp_cookies(cookies)})).await?;
@@ -258,19 +259,34 @@ pub async fn limits(cookies: &[Cookie]) -> Result<super::LiveLimits> {
         // The backend endpoints return a Guest view unless the browser also supplies the
         // short-lived access token from `/api/auth/session`. The UI does this same exchange.
         // Keep the token browser-side; it never leaves the page or appears in logs.
-        let js = r#"(async()=>{const s=async(r)=>({status:r.status,text:await r.text()});const sig=()=>AbortSignal.timeout(10000);let auth={};try{const a=await fetch('/api/auth/session',{credentials:'include',signal:sig()});const v=await a.json();if(v.accessToken)auth={'Authorization':'Bearer '+v.accessToken};}catch(_){}const get=(url,options={})=>fetch(url,{...options,credentials:'include',headers:{...auth,...(options.headers||{})},signal:sig()}).then(s).catch(e=>({status:0,text:String(e)}));const [i,m,t]=await Promise.all([get('/backend-api/conversation/init',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),get('/backend-api/models?history_and_training_disabled=false'),get('/backend-api/accounts/check/v4-2023-04-27')]);return JSON.stringify({init:i,models:m,tier:t});})()"#;
-        let body = eval(&mut ws, js).await?.as_str().unwrap_or_default().to_string();
-        let v: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|_| Error::BadResponse("chatgpt_web: limits browser response"))?;
-        if !v["init"]["status"].as_u64().is_some_and(|s| (200..300).contains(&s)) {
-            return Err(Error::BadResponse("chatgpt_web: limits endpoint rejected session"));
+        let js = r#"(async()=>{const s=async(r)=>({status:r.status,text:await r.text()});const sig=()=>AbortSignal.timeout(15000);let auth={},sess=null;try{const a=await fetch('/api/auth/session',{credentials:'include',signal:sig()});sess=await a.json();if(sess.accessToken){auth={'Authorization':'Bearer '+sess.accessToken};try{let b=sess.accessToken.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');while(b.length%4)b+='=';const p=JSON.parse(atob(b));const id=p['https://api.openai.com/auth']&&p['https://api.openai.com/auth'].chatgpt_account_id;if(id)auth['ChatGPT-Account-ID']=id;}catch(_){}}}catch(_){}const get=(url,options={})=>fetch(url,{...options,credentials:'include',headers:{...auth,...(options.headers||{})},signal:sig()}).then(s).catch(e=>({status:0,text:String(e)}));const [i,m,t]=await Promise.all([get('/backend-api/conversation/init',{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),get('/backend-api/models?history_and_training_disabled=false'),get('/backend-api/accounts/check/v4-2023-04-27')]);return JSON.stringify({init:i,models:m,tier:t,session:sess});})()"#;
+        // Cookie injection reloads chatgpt.com; the inspected context can vanish for a beat.
+        for _ in 0..4 {
+            let Ok(raw) = eval(&mut ws, js).await else {
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            };
+            let Some(body) = raw.as_str() else {
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            };
+            if !v["init"]["status"].as_u64().is_some_and(|s| (200..300).contains(&s)) {
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            let payload = json!({
+                "init": v["init"]["text"],
+                "models": v["models"]["text"],
+                "tier": v["tier"]["text"],
+                "session": v["session"],
+            });
+            return chatgpt_web::parse_limits_json(&payload);
         }
-        let payload = serde_json::json!({
-            "init": v["init"]["text"],
-            "models": v["models"]["text"],
-            "tier": v["tier"]["text"],
-        });
-        chatgpt_web::parse_limits_json(&payload)
+        Err(Error::BadResponse("chatgpt_web: limits endpoint rejected session"))
     }).await.map_err(|_| Error::Timeout("chatgpt_web: limits browser"));
     let _ = child.kill().await;
     let _ = child.wait().await;

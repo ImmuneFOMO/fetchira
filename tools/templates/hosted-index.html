@@ -63,11 +63,101 @@ function HostedUnavailable() {
   return <main className="login-shell" role="alert"><section className="login-panel"><div className="brand"><img src="/admin/assets/assets/logo-mark.svg" alt="" width="27" height="27" /> fetchira <code>hosted</code></div><div className="not-found-code mono">CONNECTION <span>·</span> unavailable</div><h1>Hosted server is unavailable.</h1><p className="muted">The admin session is valid, but the server did not answer. Check the service and reload this page.</p><button className="primary" onClick={() => location.reload()}>Reload dashboard</button></section></main>;
 }
 
+function HostedGate({ title, copy, onSubmit, submitLabel, busyLabel, extra, error, busy, children }) {
+  return (
+    <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}>
+      <section style={{ width: 'min(430px,100%)', background: 'var(--surface-1)', border: '1px solid var(--border-hairline)', borderTop: '2px solid var(--lime-500)', borderRadius: 'var(--r-md)', padding: 32 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600 }}>
+          <img src="/admin/assets/assets/logo-mark.svg" alt="" style={{ width: 27 }} /> fetchira <code style={{ color: 'var(--lime-500)', font: '10px var(--font-mono)', border: '1px solid var(--border-accent)', padding: '2px 6px' }}>hosted</code>
+        </div>
+        <div style={{ marginTop: 48, font: '600 10px var(--font-mono)', letterSpacing: '.12em', color: 'var(--text-lo)' }}>PRIVATE CONTROL PLANE</div>
+        <h1 style={{ fontFamily: 'var(--font-display)', color: 'var(--text-hi)', margin: '6px 0 10px' }}>{title}</h1>
+        <p style={{ color: 'var(--text-lo)', lineHeight: 1.5 }}>{copy}</p>
+        <form noValidate onSubmit={onSubmit} style={{ display: 'grid', gap: 16, marginTop: 26 }}>
+          {children}
+          <button className="primary" disabled={busy} style={{ minHeight: 40 }}>{busy ? busyLabel : submitLabel}</button>
+          {extra}
+          {error && <div role="alert" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.3)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>{error}</div>}
+        </form>
+      </section>
+    </main>
+  );
+}
+
+const fieldStyle = { width: '100%', boxSizing: 'border-box', background: 'var(--surface-inset)', color: 'var(--text-hi)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', padding: 11 };
+
+function PasswordField({ id, label, value, onChange, onBlur, autoFocus, error, hint, autoComplete, inputRef }) {
+  const [show, setShow] = React.useState(false);
+  const hintId = `${id}-hint`;
+  const errId = `${id}-err`;
+  const described = error ? errId : hint ? hintId : undefined;
+  return (
+    <div style={{ display: 'grid', gap: 7 }}>
+      <label htmlFor={id} style={{ color: 'var(--text-mid)', font: '600 12px var(--font-mono)' }}>{label}</label>
+      <span style={{ position: 'relative', display: 'block' }}>
+        <input id={id} ref={inputRef} type={show ? 'text' : 'password'} autoFocus={autoFocus} value={value} onChange={onChange} onBlur={onBlur} autoComplete={autoComplete} spellCheck="false" aria-invalid={error ? 'true' : 'false'} aria-describedby={described} style={{ ...fieldStyle, paddingRight: 40, borderColor: error ? 'var(--red-500)' : undefined }} />
+        <button type="button" aria-label={show ? 'Hide password' : 'Show password'} onClick={() => setShow((s) => !s)} style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', width: 28, height: 28, border: 0, background: 'transparent', color: 'var(--text-lo)', padding: 0, display: 'grid', placeItems: 'center' }}>
+          {show ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M3 3l18 18" /><path d="M10.6 10.6A3 3 0 0013.4 13.4" /><path d="M9.9 5.1A11 11 0 0121 12a11 11 0 01-3.1 4.3M6.1 6.1A11 11 0 003 12a11 11 0 0014.1 6.2" /></svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>
+          )}
+        </button>
+      </span>
+      {error
+        ? <div id={errId} role="alert" style={{ color: 'var(--red-500)', font: '11px/1.4 var(--font-mono)' }}>{error}</div>
+        : hint
+          ? <div id={hintId} style={{ color: 'var(--text-faint)', font: '11px/1.4 var(--font-mono)' }}>{hint}</div>
+          : null}
+    </div>
+  );
+}
+
+function RememberMe({ checked, onChange }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-mid)', font: '12px var(--font-ui)', cursor: 'pointer', userSelect: 'none' }}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} style={{ width: 14, height: 14, accentColor: 'var(--lime-500)' }} />
+      Remember me on this browser
+    </label>
+  );
+}
+
 function HostedLogin({ onLogin }) {
   const [password, setPassword] = React.useState('');
+  const [remember, setRemember] = React.useState(true);
+  const [fieldError, setFieldError] = React.useState('');
   const [error, setError] = React.useState('');
   const [busy, setBusy] = React.useState(false);
-  return <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24 }}><section style={{ width: 'min(430px,100%)', background: 'var(--surface-1)', border: '1px solid var(--border-hairline)', borderTop: '2px solid var(--lime-500)', borderRadius: 'var(--r-md)', padding: 32 }}><div style={{ display: 'flex', alignItems: 'center', gap: 9, fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600 }}><img src="/admin/assets/assets/logo-mark.svg" alt="" style={{ width: 27 }} /> fetchira <code style={{ color: 'var(--lime-500)', font: '10px var(--font-mono)', border: '1px solid var(--border-accent)', padding: '2px 6px' }}>hosted</code></div><div style={{ marginTop: 48, font: '600 10px var(--font-mono)', letterSpacing: '.12em', color: 'var(--text-lo)' }}>PRIVATE CONTROL PLANE</div><h1 style={{ fontFamily: 'var(--font-display)', color: 'var(--text-hi)', margin: '6px 0 10px' }}>Unlock the router</h1><p style={{ color: 'var(--text-lo)', lineHeight: 1.5 }}>Provider sessions, friend keys and request history stay behind this administrator session.</p><form onSubmit={async (e) => { e.preventDefault(); if (busy) return; setBusy(true); setError(''); try { const r = await fetch('/admin/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }); if (!r.ok) throw new Error((await r.text()) || 'login failed'); onLogin(); } catch (x) { setError(x.message); } finally { setBusy(false); } }} style={{ display: 'grid', gap: 16, marginTop: 26 }}><label style={{ display: 'grid', gap: 7, color: 'var(--text-mid)', font: '600 12px var(--font-mono)' }}>ADMIN PASSWORD<input type="password" autoFocus required value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: '100%', boxSizing: 'border-box', background: 'var(--surface-inset)', color: 'var(--text-hi)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)', padding: 11 }} /></label><button className="primary" disabled={busy} style={{ minHeight: 40 }}>{busy ? 'Unlocking…' : 'Log in'}</button>{error && <div style={{ color: 'var(--red-500)', font: '12px var(--font-mono)' }}>{error}</div>}</form></section></main>;
+  const inputRef = React.useRef(null);
+  return (
+    <HostedGate title="Unlock the router" copy="Provider sessions, friend keys and request history stay behind this administrator session." submitLabel="Log in" busyLabel="Unlocking…" error={error} busy={busy} onSubmit={async (e) => { e.preventDefault(); if (busy) return; if (!password) { setFieldError('Enter the admin password'); setError(''); inputRef.current && inputRef.current.focus(); return; } setBusy(true); setError(''); setFieldError(''); try { const r = await fetch('/admin/login', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password, remember }) }); if (!r.ok) { const msg = (await r.text()) || 'login failed'; if (r.status === 401) { setFieldError('Wrong password'); } else { setError(msg); } inputRef.current && inputRef.current.focus(); return; } onLogin(); } catch (x) { setError(x.message); } finally { setBusy(false); } }}>
+      <PasswordField id="admin-password" label="ADMIN PASSWORD" value={password} onChange={(e) => { setPassword(e.target.value); if (fieldError) setFieldError(''); }} autoFocus autoComplete="current-password" error={fieldError} inputRef={inputRef} />
+      <RememberMe checked={remember} onChange={setRemember} />
+    </HostedGate>
+  );
+}
+
+function HostedSetup({ onLogin }) {
+  const [password, setPassword] = React.useState('');
+  const [confirm, setConfirm] = React.useState('');
+  const [touched, setTouched] = React.useState({ password: false, confirm: false });
+  const [submitted, setSubmitted] = React.useState(false);
+  const [remember, setRemember] = React.useState(true);
+  const [error, setError] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const passwordRef = React.useRef(null);
+  const confirmRef = React.useRef(null);
+  const show = (name) => submitted || touched[name];
+  const passwordError = !show('password') ? '' : !password ? 'Enter a password' : password.length < 12 ? `At least 12 characters (${password.length}/12)` : '';
+  const confirmError = !show('confirm') ? '' : !confirm ? 'Confirm the password' : password !== confirm ? 'Passwords do not match' : '';
+  const passwordHint = password.length >= 12 ? '' : password.length === 0 ? 'At least 12 characters' : `${password.length}/12`;
+  return (
+    <HostedGate title="Set the admin password" copy="No password was configured at deploy time. Choose one here — it is hashed on the server and never shown again." submitLabel="Set password" busyLabel="Saving…" error={error} busy={busy} onSubmit={async (e) => { e.preventDefault(); if (busy) return; setSubmitted(true); setError(''); if (!password || password.length < 12) { passwordRef.current && passwordRef.current.focus(); return; } if (!confirm || password !== confirm) { confirmRef.current && confirmRef.current.focus(); return; } setBusy(true); try { const r = await fetch('/admin/setup', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password, remember }) }); if (!r.ok) { const msg = (await r.text()) || 'setup failed'; if (msg.includes('12')) { setTouched((t) => ({ ...t, password: true })); passwordRef.current && passwordRef.current.focus(); } else { setError(msg === 'admin password already set' ? 'Password already set. Reload the page to sign in.' : msg); } return; } onLogin(); } catch (x) { setError(x.message); } finally { setBusy(false); } }}>
+      <PasswordField id="setup-password" label="NEW PASSWORD" value={password} onChange={(e) => setPassword(e.target.value)} onBlur={() => setTouched((t) => ({ ...t, password: true }))} autoFocus autoComplete="new-password" error={passwordError} hint={passwordError ? '' : passwordHint} inputRef={passwordRef} />
+      <PasswordField id="setup-confirm" label="CONFIRM" value={confirm} onChange={(e) => setConfirm(e.target.value)} onBlur={() => setTouched((t) => ({ ...t, confirm: true }))} autoComplete="new-password" error={confirmError} inputRef={confirmRef} />
+      <RememberMe checked={remember} onChange={setRemember} />
+    </HostedGate>
+  );
 }
 
 function HostedMenu({ onSelect, active }) {
@@ -172,6 +262,7 @@ function App() {
     return aliases[hash] || ['overview', 'accounts', 'activity', 'keys', 'audit', 'update'].includes(hash) ? (aliases[hash] || hash) : 'overview';
   });
   const [authenticated, setAuthenticated] = React.useState(false);
+  const [gate, setGate] = React.useState('loading');
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   // null until the first live state answers; a fresh install (zero accounts) opens the
   // onboarding flow, which sticks until the user leaves it (adds keep it on screen).
@@ -185,6 +276,28 @@ function App() {
   const [phase, setPhase] = React.useState('loading');
   const [, bump] = React.useState(0); // re-render with the freshly polled state
   const everOnline = React.useRef(false); // only nag once the server has actually been reached
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const setup = await fetch('/admin/setup', { credentials: 'same-origin' }).then((r) => r.json());
+        if (setup && setup.configured === false) { setGate('setup'); return; }
+        const state = await fetch('/admin/state', { credentials: 'same-origin' });
+        if (state.ok) {
+          const d = await state.json();
+          if (d && d.groups && d.catalog) {
+            window.FX = Object.assign({}, window.FX, d);
+            setAuthenticated(true);
+            setPhase('live');
+            setOnboard((d.accounts || []).length === 0);
+            setGate('login');
+            return;
+          }
+        }
+      } catch (_) { /* fall through to login */ }
+      setGate('login');
+    })();
+  }, []);
 
   React.useEffect(() => {
     if (!authenticated) return undefined;
@@ -212,7 +325,11 @@ function App() {
     return () => clearInterval(id);
   }, [authenticated]);
 
-  if (!authenticated) return <HostedLogin onLogin={() => { setAuthenticated(true); setPhase('loading'); }} />;
+  if (!authenticated) {
+    if (gate === 'loading') return <Loading />;
+    const onLogin = () => { setAuthenticated(true); setPhase('loading'); };
+    return gate === 'setup' ? <HostedSetup onLogin={onLogin} /> : <HostedLogin onLogin={onLogin} />;
+  }
 
   if (phase === 'offline' && !everOnline.current) return <HostedUnavailable />;
 
@@ -251,7 +368,7 @@ function App() {
 window.FX_TOKEN = '';
 async function loadHostedState() {
   try {
-    const state = await fetch('/admin/state');
+    const state = await fetch('/admin/state', { credentials: 'same-origin' });
     if (!state.ok) return null;
     const d = await state.json();
     if (d.groups && d.catalog) return d;
