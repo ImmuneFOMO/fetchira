@@ -129,13 +129,13 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             .and_then(|v| v.limits.as_ref())
             .and_then(|l| l.tier.as_deref())
             .unwrap_or("-");
-        let remaining = main
-            .map(|v| v.remaining.to_string())
-            .unwrap_or_else(|| "-".into());
-        let research = match (a.provider.is_web().then_some(()), drs.get(a.label.as_str())) {
-            (Some(_), Some(v)) => format!("{}/{}/day", v.remaining, v.quota),
-            _ => "-".to_string(),
-        };
+        let live = main.and_then(|v| v.limits.as_ref()).is_some();
+        let remaining = list_remaining(a.provider.is_web(), live, main.map(|v| v.remaining));
+        let research = list_research(
+            a.provider.is_web(),
+            live,
+            drs.get(a.label.as_str()).map(|v| (v.remaining, v.quota)),
+        );
         println!(
             "{:15} {:14} {:12} {:10} {:>10} {:>13}  {}",
             a.provider.as_str(),
@@ -195,6 +195,25 @@ fn dur(secs: i64) -> String {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")
+    }
+}
+
+fn list_remaining(web: bool, live: bool, remaining: Option<i64>) -> String {
+    if web && !live {
+        return "-".into();
+    }
+    remaining
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn list_research(web: bool, live: bool, dr: Option<(i64, i64)>) -> String {
+    if !web || !live {
+        return "-".into();
+    }
+    match dr {
+        Some((rem, quota)) => format!("{rem}/{quota}/day"),
+        None => "-".into(),
     }
 }
 
@@ -546,11 +565,19 @@ pub async fn record_identity(
     let session = web::parse_session(raw_session);
     let proxy = proxy.filter(|p| p.starts_with("http"));
     if let Ok(client) = web::build_client(&session.cookies, &session.headers, proxy) {
-        if let Some(id) = crate::providers::Provider::new(kind)
-            .account_identity(&client)
-            .await
-        {
+        let p = crate::providers::Provider::new(kind);
+        if let Some(id) = p.account_identity(&client).await {
             let _ = store.set_identity(label, &id).await;
+        }
+        if let Some(ll) = p.live_limits(&client, label, &session.cookies, false).await {
+            if let Some(tier) = ll.tier.as_deref().filter(|t| *t != "free") {
+                let _ = store.set_plan(label, tier).await;
+            }
+            if ll.has_quotas() {
+                if let Ok(raw) = serde_json::to_string(&ll) {
+                    let _ = store.set_limits(label, &raw).await;
+                }
+            }
         }
     }
 }
@@ -1265,5 +1292,14 @@ mod tests {
         assert_eq!(v["mcpServers"]["other"]["command"], "x"); // untouched
         assert_eq!(v["theme"], "dark"); // untouched
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn list_hides_soft_web_quota_when_live_poll_misses() {
+        assert_eq!(list_remaining(true, false, Some(100)), "-");
+        assert_eq!(list_research(true, false, Some((3, 3))), "-");
+        assert_eq!(list_remaining(true, true, Some(12)), "12");
+        assert_eq!(list_research(true, true, Some((3, 3))), "3/3/day");
+        assert_eq!(list_remaining(false, false, Some(2500)), "2500");
     }
 }

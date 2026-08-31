@@ -92,7 +92,7 @@ pub struct Router {
     chatgpt_backoff: Mutex<HashMap<String, ChatgptBackoff>>,
 }
 
-const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(300);
+const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(30);
 const CHATGPT_BACKOFF_INITIAL: Duration = Duration::from_secs(5);
 const CHATGPT_BACKOFF_MAX: Duration = Duration::from_secs(300);
 const CHATGPT_RETRY_ATTEMPTS: u8 = 5;
@@ -854,7 +854,7 @@ impl Router {
         }
     }
 
-    /// Live per-tier limits for a web bucket, cached 5m. Browser misses are cached so an
+    /// Live per-tier limits for a web bucket, cached briefly. Browser misses are cached so an
     /// unsupported provider isn't re-polled, but HTTP-only misses stay uncached for fallback.
     async fn live_limits_for(
         &self,
@@ -891,19 +891,30 @@ impl Router {
                 return value;
             }
         }
-        let fresh = bounded_browser(
-            b.provider
-                .live_limits(c, &b.label, cookies, browser_fallback),
-        )
-        .await;
+        let mut fresh =
+            bounded_browser(
+                b.provider
+                    .live_limits(c, &b.label, cookies, browser_fallback),
+            )
+            .await;
         // Persist any rotated session cookies captured on a bearer cache-miss, so the next process
         // starts from the freshest token instead of rotating from a stale one.
-        if let Some(ll) = &fresh {
+        if let Some(ll) = &mut fresh {
             if !ll.cookie_updates.is_empty() {
                 self.refresh_session(b, &ll.cookie_updates).await;
             }
             if let Some(id) = ll.identity.as_deref().filter(|s| !s.is_empty()) {
                 let _ = self.store.set_identity(&b.label, id).await;
+            }
+            // Persist a successful live read for later sessions; never overlay stored plan/quotas
+            // onto a miss — the dashboard must not show last-seen numbers as current.
+            if let Some(tier) = ll.tier.as_deref().filter(|t| !t.is_empty()) {
+                let _ = self.store.set_plan(&b.label, tier).await;
+            }
+            if ll.has_quotas() {
+                if let Ok(raw) = serde_json::to_string(ll) {
+                    let _ = self.store.set_limits(&b.label, &raw).await;
+                }
             }
         }
         // An HTTP-only miss must not hide the browser fallback from a later full snapshot or

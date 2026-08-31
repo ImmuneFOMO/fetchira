@@ -664,7 +664,10 @@ pub(crate) async fn limits(base: &str, client: &wreq::Client, acct: &str) -> Res
         serde_json::from_str(&body).unwrap_or(Value::Null)
     };
 
-    let tier = friendly_plan(account_tier(base, client, &auth, &account_id).await);
+    let tier = account_tier(base, client, &auth, &account_id)
+        .await
+        .and_then(|p| friendly_plan(Some(p)))
+        .or_else(|| plan_from_jwt(&bearer).and_then(|p| friendly_plan(Some(p))));
     let models = model_catalog(base, client, &auth).await;
     let mut payload = json!({"init": init, "models": Value::Null, "tier": tier});
     payload["models"] = serde_json::to_value(&models).unwrap_or(Value::Null);
@@ -689,15 +692,15 @@ pub(crate) fn parse_limits_json(payload: &Value) -> Result<LiveLimits> {
     let model_json = parsed("models");
     let tier_json = parsed("tier");
     let feat = |v: &Value, name_key: &str| {
-        FeatureLimit::simple(
-            v[name_key].as_str().unwrap_or_default(),
-            v["remaining"].as_i64().unwrap_or(-1),
+        Some(FeatureLimit::simple(
+            v[name_key].as_str().filter(|s| !s.is_empty())?,
+            v["remaining"].as_i64()?,
             v["reset_after"].as_str().map(str::to_string),
-        )
+        ))
     };
     let mut features: Vec<FeatureLimit> = Vec::new();
     if let Some(arr) = init["limits_progress"].as_array() {
-        features.extend(arr.iter().map(|v| feat(v, "feature_name")));
+        features.extend(arr.iter().filter_map(|v| feat(v, "feature_name")));
     }
     // Per-model message caps (usually empty on Plus until you near a cap — the "X messages left").
     if let Some(arr) = init["model_limits"].as_array() {
@@ -705,7 +708,7 @@ pub(crate) fn parse_limits_json(payload: &Value) -> Result<LiveLimits> {
             let slug = v["model_slug"].as_str()?;
             Some(FeatureLimit::simple(
                 format!("model:{slug}"),
-                v["remaining"].as_i64().unwrap_or(-1),
+                v["remaining"].as_i64()?,
                 v["reset_after"].as_str().map(str::to_string),
             ))
         }));
@@ -773,10 +776,6 @@ fn account_tier_value(v: &Value) -> Option<String> {
     v["accounts"].as_object()?.values().find_map(|a| {
         a.pointer("/account/plan_type")
             .and_then(Value::as_str)
-            .or_else(|| {
-                a.pointer("/entitlement/subscription_plan")
-                    .and_then(Value::as_str)
-            })
             .map(str::to_string)
     })
 }
@@ -922,26 +921,16 @@ async fn account_tier(
     }
     let v: Value = serde_json::from_str(&body).ok()?;
     v["accounts"].as_object()?.values().find_map(|a| {
-        // `account.plan_type` is the real current tier ("free"/"plus"/"pro"/"max"/"team").
-        // `entitlement.subscription_plan` is the upsell OFFER — it reads "chatgptplusplan" even on a
-        // free account — so it's only a fallback for shapes that lack `plan_type`.
         a.pointer("/account/plan_type")
             .and_then(|x| x.as_str())
-            .or_else(|| {
-                a.pointer("/entitlement/subscription_plan")
-                    .and_then(|x| x.as_str())
-            })
             .map(str::to_string)
     })
 }
 
-/// OpenAI's `subscription_plan` (`chatgptplusplan`, `chatgptmax20plan`, …) → a short badge
-/// (`Plus`, `Max 20×`, …) for the account listings. A logged-in account with no paid plan reads
-/// `free` (mirrors grok's `friendly_tier`), so free accounts still get a badge.
+/// OpenAI's `plan_type` / `subscription_plan` (`plus`, `chatgptplusplan`, …) → a short badge.
+/// Missing plan is `None` (don't invent free); an explicit `free` plan still badges as `free`.
 fn friendly_plan(raw: Option<String>) -> Option<String> {
-    let Some(raw) = raw else {
-        return Some("free".into());
-    };
+    let raw = raw?;
     let lower = raw.to_ascii_lowercase();
     let stripped = lower.strip_prefix("chatgpt").unwrap_or(&lower);
     let key = stripped.strip_suffix("plan").unwrap_or(stripped);
@@ -1115,7 +1104,7 @@ data: {"v":{"conversation_id":"6a43081a-099c-83eb-b23b-092573129b5e","message":{
 
     #[test]
     fn friendly_plan_badges() {
-        assert_eq!(friendly_plan(None).as_deref(), Some("free"));
+        assert_eq!(friendly_plan(None), None);
         assert_eq!(
             friendly_plan(Some("chatgptfreeplan".into())).as_deref(),
             Some("free")

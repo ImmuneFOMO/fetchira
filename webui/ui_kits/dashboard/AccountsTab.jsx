@@ -245,23 +245,62 @@ function RowActions({ r }) {
   );
 }
 
+function fmtResetIn(resetAfter, windowSecs) {
+  if (resetAfter) {
+    const d = new Date(resetAfter);
+    if (isNaN(d.getTime())) return null;
+    const s = Math.max(0, Math.round((d.getTime() - Date.now()) / 1000));
+    if (s < 60) return 'reset in ' + s + 's';
+    if (s < 3600) return 'reset in ' + Math.round(s / 60) + 'm';
+    if (s < 86400) {
+      const h = Math.floor(s / 3600);
+      const m = Math.round((s % 3600) / 60);
+      return 'reset in ' + (m ? h + 'h ' + m + 'm' : h + 'h');
+    }
+    return 'reset in ' + Math.round(s / 86400) + 'd';
+  }
+  if (!windowSecs) return null;
+  if (windowSecs % 3600 === 0) return 'every ' + (windowSecs / 3600) + 'h';
+  if (windowSecs % 60 === 0) return 'every ' + (windowSecs / 60) + 'm';
+  return 'every ' + windowSecs + 's';
+}
+
 // The variable-length detail — tier, per-feature limits, the model catalog — lives in a drawer
 // under the row, so every collapsed row keeps the same height.
 function LimitChips({ limits }) {
+  const chip = (key, label, value, reset, locked) => (
+    <span key={key} title={reset || (locked ? 'locked on this tier' : '')}
+      style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: locked ? 'var(--text-faint)' : 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px', opacity: locked ? 0.65 : 1 }}>
+      {label}{value != null ? <React.Fragment> <b style={{ color: locked ? 'var(--text-faint)' : 'var(--text-hi)' }}>{value}</b></React.Fragment> : null}
+      {reset && !locked ? <span style={{ color: 'var(--text-faint)' }}> · {reset}</span> : null}
+    </span>
+  );
+  const featVal = (f) => {
+    if (f.remaining == null) return null;
+    return f.total != null ? f.remaining + '/' + f.total : f.remaining;
+  };
+  const modelVal = (m) => {
+    if (m.locked) return '0/0';
+    if (m.total != null && m.remaining != null) return m.remaining + '/' + m.total;
+    if (m.remaining != null) return m.remaining;
+    return null;
+  };
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
       {limits.tier && <Badge tone="cyan" variant="outline">{limits.tier}</Badge>}
-      {(limits.features || []).map((f) => (
-        <span key={f.feature} title={f.resetAfter ? 'resets ' + f.resetAfter : ''}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px' }}>
-          {f.feature} <b style={{ color: 'var(--text-hi)' }}>{f.total != null ? f.remaining + '/' + f.total : f.remaining}</b>
-        </span>
+      {(limits.features || []).filter((f) => f.remaining != null).map((f) => chip(
+        f.feature,
+        f.feature,
+        featVal(f),
+        fmtResetIn(f.resetAfter, f.windowSecs),
+        false
       ))}
-      {(limits.models || []).map((m) => (
-        <span key={m.id} title={m.windowSecs ? 'rolling ' + Math.round(m.windowSecs / 3600) + 'h' : (m.resetAfter ? 'resets ' + m.resetAfter : (m.locked ? 'locked on this tier' : ''))}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: m.locked ? 'var(--text-faint)' : 'var(--text-lo)', border: '1px solid var(--border-faint)', borderRadius: 4, padding: '1px 5px', opacity: m.locked ? 0.65 : 1 }}>
-          {m.name}{m.levels && m.levels.length ? ' ·' + m.levels.join('/') : ''} <b style={{ color: m.locked ? 'var(--text-faint)' : 'var(--text-hi)' }}>{m.locked ? '0/0' : (m.total != null ? m.remaining + '/' + m.total : (m.remaining != null ? m.remaining : '—'))}</b>
-        </span>
+      {(limits.models || []).map((m) => chip(
+        m.id,
+        m.name + (m.levels && m.levels.length ? ' ·' + m.levels.join('/') : ''),
+        modelVal(m),
+        fmtResetIn(m.resetAfter, m.windowSecs),
+        m.locked
       ))}
     </div>
   );
@@ -305,7 +344,9 @@ function AccountRow({ r }) {
           </div>
         </td>
         <td style={{ ...td, width: 220 }}>
-          {r.pending ? spinner('loading…') : (
+          {r.pending ? spinner('loading…') : (r.web && !r.limits) ? (
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>—</span>
+          ) : (
             <React.Fragment>
               <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>

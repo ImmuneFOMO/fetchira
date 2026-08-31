@@ -7,10 +7,10 @@ use super::{
 };
 use crate::error::{Error, Result};
 
-/// grok's degraded-mode `x-statsig-id`: base64 of a thrown `TypeError`, which xAI accepts on the
-/// rate-limit poll when a real client's Statsig SDK fails to init. The chat-submit endpoint rejects
-/// it (it needs a real signed token — see `grok_statsig`), but `/rest/rate-limits` still takes it,
-/// so the quota poll skips the scrape. A *static* value gets fingerprinted, so randomize each call.
+/// grok's degraded-mode `x-statsig-id`: base64 of a thrown `TypeError`. Chat submit, rate-limits,
+/// and subscriptions reject it (they need a real signed token — see `grok_statsig`); `/rest/auth/get-user`
+/// still takes it, so the identity poll skips the scrape. A *static* value gets fingerprinted, so
+/// randomize each call.
 fn statsig_id() -> String {
     let props = [
         "childNodes",
@@ -411,29 +411,89 @@ fn mime_of(path: &str) -> &'static str {
 /// MODEL (grok-4 ~40/2h, grok-4-heavy ~20/2h, grok-3 ~140/2h), not by request kind, so DEFAULT is
 /// enough. The window is rolling (`windowSizeSeconds`).
 pub async fn rate_limit(base: &str, client: &wreq::Client, model: &str) -> Result<LiveQuota> {
-    let body = json!({ "requestKind": "DEFAULT", "modelName": model });
-    let resp = client
-        .post(format!("{base}/rest/rate-limits"))
-        .header("content-type", "application/json")
-        .header(
-            "baggage",
-            "sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c",
-        )
-        .header("x-statsig-id", statsig_id())
-        .header("x-xai-request-id", uuid4())
-        .body(body.to_string())
-        .send()
-        .await?;
-    if resp.status().as_u16() != 200 {
+    let body = json!({ "requestKind": "DEFAULT", "modelName": model }).to_string();
+    let (status, text) = grok_post(base, client, "/rest/rate-limits", body).await?;
+    if status != 200 {
+        tracing::warn!(provider = "grok_web", %status, body = %text.chars().take(240).collect::<String>(), "rate-limits request failed");
         return Err(Error::BadResponse("grok_web"));
     }
-    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
-        .map_err(|_| Error::BadResponse("grok_web"))?;
-    let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    let v: Value = serde_json::from_str(&text).map_err(|_| Error::BadResponse("grok_web"))?;
+    parse_rate_limit(&v)
+}
+
+async fn grok_get(base: &str, client: &wreq::Client, path: &str) -> Result<(u16, String)> {
+    let url = format!("{base}{path}");
+    let token = grok_statsig::current(base, client)
+        .await
+        .ok()
+        .map(|s| s.token("GET", path));
+    let build = |tok: Option<&str>| {
+        let mut req = client
+            .get(&url)
+            .header("origin", base)
+            .header("x-xai-request-id", uuid4());
+        if let Some(t) = tok {
+            req = req.header("x-statsig-id", t);
+        }
+        req
+    };
+    let mut resp = build(token.as_deref()).send().await?;
+    if resp.status().as_u16() == 403 {
+        grok_statsig::invalidate().await;
+        resp = build(None).send().await?;
+    }
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    Ok((status, text))
+}
+
+async fn grok_post(
+    base: &str,
+    client: &wreq::Client,
+    path: &str,
+    body: String,
+) -> Result<(u16, String)> {
+    let url = format!("{base}{path}");
+    let token = grok_statsig::current(base, client)
+        .await
+        .ok()
+        .map(|s| s.token("POST", path));
+    let build = |tok: Option<&str>| {
+        let mut req = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("origin", base)
+            .header("x-xai-request-id", uuid4())
+            .body(body.clone());
+        if let Some(t) = tok {
+            req = req.header("x-statsig-id", t);
+        }
+        req
+    };
+    let mut resp = build(token.as_deref()).send().await?;
+    if resp.status().as_u16() == 403 {
+        grok_statsig::invalidate().await;
+        resp = build(None).send().await?;
+    }
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    Ok((status, text))
+}
+
+pub(crate) fn parse_rate_limit(v: &Value) -> Result<LiveQuota> {
     Ok(LiveQuota {
-        remaining: n("remainingQueries"),
-        total: n("totalQueries"),
-        window_secs: n("windowSizeSeconds"),
+        remaining: v
+            .get("remainingQueries")
+            .and_then(Value::as_i64)
+            .ok_or(Error::BadResponse("grok_web"))?,
+        total: v
+            .get("totalQueries")
+            .and_then(Value::as_i64)
+            .ok_or(Error::BadResponse("grok_web"))?,
+        window_secs: v
+            .get("windowSizeSeconds")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
     })
 }
 
@@ -443,102 +503,236 @@ pub async fn rate_limit(base: &str, client: &wreq::Client, model: &str) -> Resul
 /// modes. Free/inactive → only Fast is real; Expert/Heavy/deep_research read 0/0. Fast/Auto share
 /// grok-4-auto, Expert = grok-4 (reasoning), Heavy = grok-4-heavy (a Heavy-capable tier only).
 pub(crate) async fn limits(base: &str, client: &wreq::Client) -> Result<LiveLimits> {
-    let (active, tier_raw) = subscription(base, client).await;
-    let heavy_ok = active
+    let sub = subscription(base, client).await;
+    let user_tier = if sub.is_none() {
+        plan_from_user(base, client).await.and_then(|(_, t)| t)
+    } else {
+        None
+    };
+    let fast_q = rate_limit(base, client, "grok-4-auto").await.ok();
+    let expert_q = rate_limit(base, client, "grok-4").await.ok();
+    let heavy_q = rate_limit(base, client, "grok-4-heavy").await.ok();
+    limits_from(sub, user_tier, fast_q, expert_q, heavy_q)
+}
+
+/// Build the dashboard catalog from live `/rest/subscriptions` + `/rest/rate-limits` only.
+/// A failed poll is `None`/`Err`, not free/0/0 — those numbers only appear when the endpoint said so.
+/// `user_tier` is a get-user label used only when subscriptions missed; it never locks modes.
+pub(crate) fn limits_from(
+    sub: Option<(bool, Option<String>)>,
+    user_tier: Option<String>,
+    fast_q: Option<LiveQuota>,
+    expert_q: Option<LiveQuota>,
+    heavy_q: Option<LiveQuota>,
+) -> Result<LiveLimits> {
+    let (known, active, tier_raw) = match sub {
+        Some((active, tier_raw)) => (true, active, tier_raw),
+        None => (false, false, user_tier),
+    };
+    if !known && tier_raw.is_none() && fast_q.is_none() && expert_q.is_none() && heavy_q.is_none() {
+        return Err(Error::BadResponse("grok_web"));
+    }
+    let heavy_ok = known
+        && active
         && tier_raw
             .as_deref()
             .is_some_and(|t| t.to_ascii_uppercase().contains("HEAVY"));
+    let expert_ok = known && active;
 
-    let fast_q = rate_limit(base, client, "grok-4-auto").await.ok();
-    let expert_q = if active {
-        rate_limit(base, client, "grok-4").await.ok()
-    } else {
-        None
-    };
-    let heavy_q = if heavy_ok {
-        rate_limit(base, client, "grok-4-heavy").await.ok()
-    } else {
-        None
-    };
-
-    let mk = |id: &str, name: &str, q: Option<LiveQuota>, available: bool| ModelInfo {
-        id: id.to_string(),
-        name: name.to_string(),
-        levels: Vec::new(),
-        remaining: if available {
-            q.map(|x| x.remaining)
-        } else {
-            Some(0)
-        },
-        total: if available {
-            q.map(|x| x.total)
-        } else {
-            Some(0)
-        },
-        window_secs: if available {
-            q.map(|x| x.window_secs)
+    let mk = |id: &str, name: &str, q: Option<LiveQuota>, available: bool| -> Option<ModelInfo> {
+        if available {
+            let q = q?;
+            Some(ModelInfo {
+                id: id.to_string(),
+                name: name.to_string(),
+                levels: Vec::new(),
+                remaining: Some(q.remaining),
+                total: Some(q.total),
+                window_secs: (q.window_secs > 0).then_some(q.window_secs),
+                reset_after: None,
+                locked: false,
+            })
+        } else if known {
+            Some(ModelInfo {
+                id: id.to_string(),
+                name: name.to_string(),
+                levels: Vec::new(),
+                remaining: Some(0),
+                total: Some(0),
+                window_secs: None,
+                reset_after: None,
+                locked: true,
+            })
         } else {
             None
-        },
-        reset_after: None,
-        locked: !available,
-    };
-    let models = vec![
-        mk("fast", "Fast", fast_q, true),
-        mk("auto", "Auto", fast_q, true),
-        mk("expert", "Expert", expert_q, active),
-        mk("heavy", "Heavy", heavy_q, heavy_ok),
-    ];
-
-    // Deep search runs as Expert (grok-4 reasoning); locked to 0/0 when the sub is inactive.
-    let dr = if active {
-        FeatureLimit {
-            feature: "deep_research".into(),
-            remaining: expert_q.map(|x| x.remaining).unwrap_or(0),
-            total: expert_q.map(|x| x.total),
-            window_secs: expert_q.map(|x| x.window_secs),
-            reset_after: None,
         }
-    } else {
-        FeatureLimit {
+    };
+    let mut models = Vec::new();
+    models.extend(mk("fast", "Fast", fast_q, true));
+    models.extend(mk("auto", "Auto", fast_q, true));
+    models.extend(mk("expert", "Expert", expert_q, expert_ok));
+    models.extend(mk("heavy", "Heavy", heavy_q, heavy_ok));
+
+    let features = if expert_ok {
+        expert_q
+            .map(|q| FeatureLimit {
+                feature: "deep_research".into(),
+                remaining: q.remaining,
+                total: Some(q.total),
+                window_secs: (q.window_secs > 0).then_some(q.window_secs),
+                reset_after: None,
+            })
+            .into_iter()
+            .collect()
+    } else if known {
+        vec![FeatureLimit {
             feature: "deep_research".into(),
             remaining: 0,
             total: Some(0),
             window_secs: None,
             reset_after: None,
-        }
+        }]
+    } else {
+        Vec::new()
     };
 
     Ok(LiveLimits {
-        tier: friendly_tier(tier_raw, active),
-        features: vec![dr],
+        tier: if known {
+            friendly_tier(tier_raw, active)
+        } else {
+            tier_raw.and_then(|t| friendly_tier(Some(t), true))
+        },
+        features,
         models,
         ..Default::default()
     })
 }
 
-/// Read the account's subscription state: `(is_active, raw_tier)`. `/rest/subscriptions` takes the
-/// degraded statsig like the rate-limit poll. No record (or any non-`ACTIVE` status) = free tier.
-async fn subscription(base: &str, client: &wreq::Client) -> (bool, Option<String>) {
+/// Read the account's subscription state: `(is_active, raw_tier)`. Cookie session is enough on
+/// grok.com (the browser sends no statsig). A real signed token is used when the scrape works;
+/// the degraded TypeError token is rejected and would look like free. No ACTIVE row = free.
+async fn subscription(base: &str, client: &wreq::Client) -> Option<(bool, Option<String>)> {
+    let (status, body) = match grok_get(base, client, "/rest/subscriptions").await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(provider = "grok_web", error = %e, "subscriptions request failed");
+            return None;
+        }
+    };
+    if status != 200 {
+        tracing::warn!(provider = "grok_web", %status, body = %body.chars().take(240).collect::<String>(), "subscriptions request failed");
+        return None;
+    }
+    let v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(provider = "grok_web", %status, body = %body.chars().take(120).collect::<String>(), "subscriptions response was not JSON");
+            return None;
+        }
+    };
+    Some(parse_subscriptions(&v))
+}
+
+/// `/rest/auth/get-user` still works from datacenter IPs when `/rest/subscriptions` comes back empty.
+/// Numeric `sessionTierId` only tells paid vs free — Pro vs Heavy comes from the store product id.
+async fn plan_from_user(base: &str, client: &wreq::Client) -> Option<(bool, Option<String>)> {
     let resp = client
-        .get(format!("{base}/rest/subscriptions"))
+        .get(format!("{base}/rest/auth/get-user"))
+        .header("origin", base)
         .header("x-statsig-id", statsig_id())
         .header("x-xai-request-id", uuid4())
         .send()
-        .await;
-    let Ok(resp) = resp else { return (false, None) };
+        .await
+        .ok()?;
     if resp.status().as_u16() != 200 {
-        return (false, None);
+        return None;
     }
-    let v: Value = match serde_json::from_str(&resp.text().await.unwrap_or_default()) {
-        Ok(v) => v,
-        Err(_) => return (false, None),
-    };
-    let Some(sub) = v["subscriptions"].as_array().and_then(|a| a.first()) else {
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default()).ok()?;
+    let tier = plan_from_user_json(&v)?;
+    Some((true, Some(tier)))
+}
+
+fn plan_from_user_json(v: &Value) -> Option<String> {
+    if let Some(t) = v["xSubscriptionType"].as_str().filter(|s| !s.is_empty()) {
+        return Some(if t.starts_with("SUBSCRIPTION_TIER_") {
+            t.to_string()
+        } else {
+            format!("SUBSCRIPTION_TIER_{}", t.to_ascii_uppercase())
+        });
+    }
+    // Numeric sessionTierId is paid-vs-free only — it cannot tell Pro from Heavy.
+    let id = v["sessionTierId"].as_str()?.to_ascii_uppercase();
+    if id.contains("HEAVY") {
+        Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY".into())
+    } else if id.contains("PRO") {
+        Some("SUBSCRIPTION_TIER_SUPER_GROK_PRO".into())
+    } else if id.contains("LITE") {
+        Some("SUBSCRIPTION_TIER_SUPER_GROK_LITE".into())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn parse_subscriptions(v: &Value) -> (bool, Option<String>) {
+    let Some(arr) = v["subscriptions"].as_array() else {
         return (false, None);
     };
-    let active = sub["status"].as_str() == Some("SUBSCRIPTION_STATUS_ACTIVE");
-    (active, sub["tier"].as_str().map(str::to_string))
+    let active = |s: &&Value| {
+        matches!(
+            s["status"]
+                .as_str()
+                .map(|x| x.to_ascii_uppercase())
+                .as_deref(),
+            Some("SUBSCRIPTION_STATUS_ACTIVE" | "ACTIVE")
+        )
+    };
+    let free = |s: &&Value| {
+        let Some(t) = s["tier"].as_str() else {
+            return true;
+        };
+        let key = t
+            .strip_prefix("SUBSCRIPTION_TIER_")
+            .unwrap_or(t)
+            .to_ascii_uppercase();
+        matches!(key.as_str(), "GROK" | "FREE" | "NONE" | "")
+    };
+    let sub = arr
+        .iter()
+        .find(|s| active(s) && !free(s))
+        .or_else(|| arr.iter().find(active))
+        .or_else(|| arr.first());
+    let Some(sub) = sub else {
+        return (false, None);
+    };
+    (active(&sub), sub_tier(sub))
+}
+
+/// Play/App Store product id wins over `tier`: Google Play SuperGrok Heavy is `grok.ultra` while
+/// `/rest/subscriptions` still reports `SUBSCRIPTION_TIER_SUPER_GROK_PRO`.
+fn sub_tier(s: &Value) -> Option<String> {
+    product_tier(s).or_else(|| s["tier"].as_str().map(str::to_string))
+}
+
+fn product_tier(s: &Value) -> Option<String> {
+    let ids = [
+        s.pointer("/google/productId").and_then(Value::as_str),
+        s.pointer("/apple/productId").and_then(Value::as_str),
+        s.pointer("/stripe/productId").and_then(Value::as_str),
+        s.pointer("/web/productId").and_then(Value::as_str),
+    ];
+    for id in ids.into_iter().flatten() {
+        let u = id.to_ascii_lowercase();
+        if u.contains("ultra") || u.contains("heavy") {
+            return Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY".into());
+        }
+        if u.contains("lite") {
+            return Some("SUBSCRIPTION_TIER_SUPER_GROK_LITE".into());
+        }
+        if u.contains("pro") || u.contains("plus") {
+            return Some("SUBSCRIPTION_TIER_SUPER_GROK_PRO".into());
+        }
+    }
+    None
 }
 
 /// The signed-in account's email, for the dashboard's masked display and duplicate-account
@@ -562,17 +756,25 @@ pub(crate) async fn identity(base: &str, client: &wreq::Client) -> Result<Option
         .or_else(|| s("googleEmail")))
 }
 
-/// `SUBSCRIPTION_TIER_GROK_PRO` -> `"grok pro"`, suffixed `(inactive)` when lapsed. No record = free.
+/// `SUBSCRIPTION_TIER_SUPER_GROK_PRO` -> `"SuperGrok Pro"`, suffixed `(inactive)` when lapsed.
+/// No record = free. Legacy `GROK_PRO` is the pre-rebrand SuperGrok plan.
 fn friendly_tier(raw: Option<String>, active: bool) -> Option<String> {
-    let name = match raw {
-        None => return Some("free".into()),
-        Some(t) => t
-            .strip_prefix("SUBSCRIPTION_TIER_")
-            .unwrap_or(&t)
-            .replace('_', " ")
-            .to_ascii_lowercase(),
+    let Some(t) = raw else {
+        return Some("free".into());
     };
-    Some(if active {
+    let key = t
+        .strip_prefix("SUBSCRIPTION_TIER_")
+        .unwrap_or(&t)
+        .to_ascii_uppercase();
+    let name = match key.as_str() {
+        "GROK" | "FREE" | "NONE" | "" => "free".to_string(),
+        "GROK_PRO" | "SUPER_GROK" => "SuperGrok".into(),
+        "SUPER_GROK_LITE" => "SuperGrok Lite".into(),
+        "SUPER_GROK_PRO" => "SuperGrok Pro".into(),
+        "SUPER_GROK_HEAVY" => "SuperGrok Heavy".into(),
+        other => other.replace('_', " ").to_ascii_lowercase(),
+    };
+    Some(if active || name == "free" {
         name
     } else {
         format!("{name} (inactive)")
@@ -828,13 +1030,157 @@ mod tests {
     fn friendly_tier_marks_inactive() {
         assert_eq!(
             friendly_tier(Some("SUBSCRIPTION_TIER_GROK_PRO".into()), false).as_deref(),
-            Some("grok pro (inactive)")
+            Some("SuperGrok (inactive)")
         );
         assert_eq!(
             friendly_tier(Some("SUBSCRIPTION_TIER_GROK_PRO".into()), true).as_deref(),
-            Some("grok pro")
+            Some("SuperGrok")
+        );
+        assert_eq!(
+            friendly_tier(Some("SUBSCRIPTION_TIER_SUPER_GROK_PRO".into()), true).as_deref(),
+            Some("SuperGrok Pro")
+        );
+        assert_eq!(
+            friendly_tier(Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY".into()), true).as_deref(),
+            Some("SuperGrok Heavy")
         );
         assert_eq!(friendly_tier(None, false).as_deref(), Some("free"));
+    }
+
+    #[test]
+    fn parse_subscriptions_prefers_active_paid() {
+        let v = json!({"subscriptions":[
+            {"status":"SUBSCRIPTION_STATUS_CANCELED","tier":"SUBSCRIPTION_TIER_GROK"},
+            {"status":"SUBSCRIPTION_STATUS_ACTIVE","tier":"SUBSCRIPTION_TIER_SUPER_GROK_PRO"}
+        ]});
+        let (active, tier) = parse_subscriptions(&v);
+        assert!(active);
+        assert_eq!(tier.as_deref(), Some("SUBSCRIPTION_TIER_SUPER_GROK_PRO"));
+    }
+
+    #[test]
+    fn play_ultra_product_is_heavy() {
+        let v = json!({"subscriptions":[{
+            "status":"SUBSCRIPTION_STATUS_ACTIVE",
+            "tier":"SUBSCRIPTION_TIER_SUPER_GROK_PRO",
+            "google":{"productId":"grok.ultra","basePlanId":"p1m"}
+        }]});
+        let (active, tier) = parse_subscriptions(&v);
+        assert!(active);
+        assert_eq!(tier.as_deref(), Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY"));
+        assert_eq!(
+            friendly_tier(tier, true).as_deref(),
+            Some("SuperGrok Heavy")
+        );
+    }
+
+    #[test]
+    fn plan_from_user_session_tier() {
+        assert_eq!(plan_from_user_json(&json!({"sessionTierId":"1"})), None);
+        assert_eq!(plan_from_user_json(&json!({"sessionTierId":"2"})), None);
+        assert_eq!(
+            plan_from_user_json(&json!({"xSubscriptionType":"SUPER_GROK_HEAVY"})).as_deref(),
+            Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY")
+        );
+    }
+
+    #[test]
+    fn user_tier_without_subscriptions_does_not_lock_modes() {
+        let ll = limits_from(
+            None,
+            Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY".into()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(ll.tier.as_deref(), Some("SuperGrok Heavy"));
+        assert!(ll.models.is_empty());
+        assert!(ll.features.is_empty());
+    }
+
+    #[test]
+    fn limits_from_miss_is_error_not_free() {
+        assert!(limits_from(None, None, None, None, None).is_err());
+    }
+
+    #[test]
+    fn limits_from_rate_limits_without_plan_has_no_fake_tier() {
+        let q = LiveQuota {
+            remaining: 12,
+            total: 20,
+            window_secs: 7200,
+        };
+        let ll = limits_from(None, None, Some(q), None, None).unwrap();
+        assert_eq!(ll.tier, None);
+        assert_eq!(ll.models.len(), 2);
+        assert_eq!(ll.models[0].name, "Fast");
+        assert_eq!(ll.models[0].remaining, Some(12));
+        assert_eq!(ll.models[0].total, Some(20));
+        assert_eq!(ll.models[0].window_secs, Some(7200));
+        assert!(ll.features.is_empty());
+        assert!(!ll.models.iter().any(|m| m.id == "heavy"));
+    }
+
+    #[test]
+    fn limits_from_live_heavy_keeps_endpoint_counts() {
+        let fast = LiveQuota {
+            remaining: 140,
+            total: 150,
+            window_secs: 7200,
+        };
+        let expert = LiveQuota {
+            remaining: 130,
+            total: 140,
+            window_secs: 7200,
+        };
+        let heavy = LiveQuota {
+            remaining: 17,
+            total: 20,
+            window_secs: 7200,
+        };
+        let ll = limits_from(
+            Some((true, Some("SUBSCRIPTION_TIER_SUPER_GROK_HEAVY".into()))),
+            None,
+            Some(fast),
+            Some(expert),
+            Some(heavy),
+        )
+        .unwrap();
+        assert_eq!(ll.tier.as_deref(), Some("SuperGrok Heavy"));
+        let h = ll.models.iter().find(|m| m.id == "heavy").unwrap();
+        assert_eq!(h.remaining, Some(17));
+        assert_eq!(h.total, Some(20));
+        assert!(!h.locked);
+        assert_eq!(ll.feature("deep_research").unwrap().remaining, 130);
+    }
+
+    #[test]
+    fn limits_from_known_free_locks_paid_modes() {
+        let ll = limits_from(Some((false, None)), None, None, None, None).unwrap();
+        assert_eq!(ll.tier.as_deref(), Some("free"));
+        assert!(ll
+            .models
+            .iter()
+            .all(|m| m.locked || m.id == "fast" || m.id == "auto"));
+        let heavy = ll.models.iter().find(|m| m.id == "heavy").unwrap();
+        assert!(heavy.locked);
+        assert_eq!(heavy.remaining, Some(0));
+        assert_eq!(heavy.total, Some(0));
+    }
+
+    #[test]
+    fn parse_rate_limit_requires_live_fields() {
+        assert!(parse_rate_limit(&json!({})).is_err());
+        let q = parse_rate_limit(&json!({
+            "remainingQueries": 3,
+            "totalQueries": 20,
+            "windowSizeSeconds": 7200
+        }))
+        .unwrap();
+        assert_eq!(q.remaining, 3);
+        assert_eq!(q.total, 20);
+        assert_eq!(q.window_secs, 7200);
     }
 
     #[test]
@@ -843,5 +1189,91 @@ mod tests {
             .decode(statsig_id())
             .unwrap();
         assert!(String::from_utf8(raw).unwrap().starts_with("x1:TypeError"));
+    }
+
+    fn redact_grok_json(raw: &str) -> String {
+        let Ok(mut v) = serde_json::from_str::<Value>(raw) else {
+            return raw.chars().take(240).collect();
+        };
+        if let Some(arr) = v.get_mut("subscriptions").and_then(|x| x.as_array_mut()) {
+            for sub in arr {
+                if let Some(t) = sub.pointer_mut("/google/purchaseToken") {
+                    *t = json!("<redacted>");
+                }
+                if let Some(id) = sub.get_mut("xaiUserId") {
+                    *id = json!("<redacted>");
+                }
+            }
+        }
+        v.to_string()
+    }
+
+    async fn poll_live(label: &str, client: &wreq::Client) {
+        let base = "https://grok.com";
+        let (st, body) = grok_get(base, client, "/rest/subscriptions")
+            .await
+            .expect("subscriptions");
+        eprintln!(
+            "[{label}] GET /rest/subscriptions status={st} body={}",
+            redact_grok_json(&body)
+        );
+        for model in ["grok-4-auto", "grok-4", "grok-4-heavy"] {
+            let payload = json!({ "requestKind": "DEFAULT", "modelName": model }).to_string();
+            let (st, body) = grok_post(base, client, "/rest/rate-limits", payload)
+                .await
+                .expect("rate-limits");
+            eprintln!(
+                "[{label}] POST /rest/rate-limits {model} status={st} body={}",
+                redact_grok_json(&body)
+            );
+        }
+        match limits(base, client).await {
+            Ok(ll) => eprintln!(
+                "[{label}] limits tier={:?} models={}",
+                ll.tier,
+                ll.models
+                    .iter()
+                    .map(|m| format!("{}:{:?}/{:?}", m.name, m.remaining, m.total))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Err(e) => eprintln!("[{label}] limits err {e}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_subscriptions_and_rate_limits() {
+        let path = std::env::var("GROK_SESSION").expect("GROK_SESSION json path");
+        let raw = std::fs::read_to_string(&path).expect("session");
+        let sess = crate::web::parse_session(&raw);
+        let client = crate::web::build_client(&sess.cookies, &sess.headers, None).expect("client");
+        poll_live("grok-1", &client).await;
+        if let Ok(profile) = std::env::var("GROK_CHROME_PROFILE") {
+            let all = crate::web::chromium_profile_cookies(profile.as_ref())
+                .await
+                .expect("profile cookies");
+            let keep: Vec<_> = all
+                .into_iter()
+                .filter(|c| {
+                    let d = c.domain.trim_start_matches('.');
+                    d == "grok.com"
+                        || d.ends_with(".grok.com")
+                        || d == "x.ai"
+                        || d.ends_with(".x.ai")
+                })
+                .collect();
+            eprintln!(
+                "profile cookie hosts {}",
+                keep.iter()
+                    .filter(|c| c.name == "sso")
+                    .map(|c| c.domain.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            let client =
+                crate::web::build_client(&keep, &Default::default(), None).expect("profile client");
+            poll_live("xai-sso", &client).await;
+        }
     }
 }

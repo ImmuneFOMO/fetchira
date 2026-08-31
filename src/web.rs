@@ -194,6 +194,40 @@ pub(crate) fn detect_browser() -> Option<Browser> {
     browser_candidates(None).into_iter().next()
 }
 
+#[cfg(test)]
+pub(crate) async fn chromium_profile_cookies(profile: &Path) -> Result<Vec<Cookie>> {
+    let browser = detect_browser().ok_or_else(|| Error::Config("no Chrome/Chromium".into()))?;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(9222);
+    let mut child = tokio::process::Command::new(&browser.bin)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--remote-debugging-port={port}"))
+        .arg("--remote-allow-origins=*")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-logging")
+        .arg("--log-level=3")
+        .arg("--disable-features=DeviceBoundSessionCredentials,StandardDeviceBoundSessionCredentials")
+        .arg("--headless=new")
+        .arg("about:blank")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let out = async {
+        let ws_url = wait_for_page(port).await?;
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url.as_str()).await?;
+        send_cmd(&mut ws, 1, "Network.getAllCookies", Value::Null).await
+    }
+    .await;
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let res = out?;
+    Ok(serde_json::from_value(res["cookies"].clone()).unwrap_or_default())
+}
+
 pub(crate) fn require_browser() -> Result<()> {
     if std::env::var("FETCHIRA_REQUIRE_BROWSER").as_deref() == Ok("1") && detect_browser().is_none()
     {
@@ -256,6 +290,16 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
     })
 }
 
+/// Extra cookie hosts to keep after the primary auth cookie shows up. grok.com `sso` is enough
+/// for `/rest/auth/get-user`, but `/rest/subscriptions` and `/rest/rate-limits` require the
+/// accounts.x.ai MFA session (`sso` on `.x.ai`).
+fn companion_domains(kind: ProviderKind) -> &'static [&'static str] {
+    match kind {
+        ProviderKind::GrokWeb => &["x.ai", "accounts.x.ai"],
+        _ => &[],
+    }
+}
+
 /// One browser profile per account label, so multiple accounts of the same provider can each be
 /// logged into a different account (e.g. gemini-1 and gemini-2 as two different Google users).
 fn profile_dir(home: &Path, tag: &str, label: &str) -> PathBuf {
@@ -312,6 +356,7 @@ pub async fn login(
         ));
     }
     let (url, domain, auth, check) = login_target(kind)?;
+    let extra = companion_domains(kind);
     let mut last_err = None;
     for browser in candidates {
         // Always start from an empty profile so `login` means "sign in and we capture this account",
@@ -321,10 +366,10 @@ pub async fn login(
         let fut = async {
             match browser.kind {
                 BrowserKind::Chromium => {
-                    capture_chromium(&browser.bin, &profile, url, domain, auth, check).await
+                    capture_chromium(&browser.bin, &profile, url, domain, extra, auth, check).await
                 }
                 BrowserKind::Firefox => {
-                    capture_firefox(&browser.bin, &profile, url, domain, auth).await
+                    capture_firefox(&browser.bin, &profile, url, domain, extra, auth).await
                 }
             }
         };
@@ -347,6 +392,7 @@ async fn capture_chromium(
     profile: &Path,
     url: &str,
     domain: &str,
+    extra: &[&str],
     auth: &str,
     login_check: Option<&str>,
 ) -> Result<Session> {
@@ -374,7 +420,7 @@ async fn capture_chromium(
         .kill_on_drop(true)
         .spawn()?;
 
-    let session = capture_login(port, domain, auth, login_check).await;
+    let session = capture_login(port, domain, extra, auth, login_check).await;
     let _ = child.kill().await;
     session
 }
@@ -387,6 +433,7 @@ async fn capture_chromium(
 async fn capture_login(
     port: u16,
     domain: &str,
+    extra: &[&str],
     auth: &str,
     login_check: Option<&str>,
 ) -> Result<Session> {
@@ -424,7 +471,7 @@ async fn capture_login(
         }
         // Capture first (on the stable signed-in page), then swap the page for our confirmation so
         // the user isn't left staring at the provider UI while the window closes.
-        match capture(&mut src, domain, auth).await {
+        match capture(&mut src, domain, extra, auth).await {
             Ok(session) => {
                 show_done(&mut src).await;
                 // Let the success state register before Chrome closes; short enough to still feel
@@ -524,6 +571,7 @@ async fn capture_firefox(
     profile: &Path,
     url: &str,
     domain: &str,
+    extra: &[&str],
     auth: &str,
 ) -> Result<Session> {
     std::fs::create_dir_all(profile).ok();
@@ -541,7 +589,7 @@ async fn capture_firefox(
     let mut src = MozDb {
         path: profile.join("cookies.sqlite"),
     };
-    let session = capture(&mut src, domain, auth).await;
+    let session = capture(&mut src, domain, extra, auth).await;
     let _ = child.kill().await;
     session
 }
@@ -559,7 +607,12 @@ trait CookieSource {
 /// Two-phase capture shared by both backends: wait for the provider's auth cookie, then hold the
 /// fullest set until it stops growing (companions like Google's `__Secure-1PSIDTS` land a beat
 /// after the auth cookie). Caller wraps this in a timeout.
-async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Result<Session> {
+async fn capture<S: CookieSource>(
+    src: &mut S,
+    domain: &str,
+    extra: &[&str],
+    auth: &str,
+) -> Result<Session> {
     // NextAuth splits large session tokens into `<name>.0`/`.1`, so accept the first chunk too.
     let chunk = format!("{auth}.0");
     let mut best = loop {
@@ -596,6 +649,26 @@ async fn capture<S: CookieSource>(src: &mut S, domain: &str, auth: &str) -> Resu
     let scoped = src.fetch(domain).await?;
     if scoped.len() >= best.len() {
         best = scoped;
+    }
+    if extra.contains(&"x.ai") {
+        // grok.com `sso` lands before accounts.x.ai MFA; subscriptions 403 until `.x.ai` `sso` exists.
+        for _ in 0..90 {
+            let xai = src.fetch("x.ai").await?;
+            if xai.iter().any(|c| is_auth(c, "sso")) {
+                break;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    }
+    for d in extra {
+        for c in src.fetch(d).await? {
+            if !best
+                .iter()
+                .any(|b| b.name == c.name && b.domain == c.domain)
+            {
+                best.push(c);
+            }
+        }
     }
     Ok(Session {
         cookies: best,
@@ -802,6 +875,15 @@ fn now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_login_keeps_xai_sso_hosts() {
+        assert_eq!(
+            companion_domains(ProviderKind::GrokWeb),
+            &["x.ai", "accounts.x.ai"]
+        );
+        assert!(companion_domains(ProviderKind::ChatgptWeb).is_empty());
+    }
 
     #[test]
     fn find_bin_resolves_paths_and_path_names() {

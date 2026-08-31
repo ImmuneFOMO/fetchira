@@ -1158,6 +1158,8 @@ async fn challenge_response(st: &HostedState, id: &str, key_id: &str) -> Respons
 struct ChallengeUpload {
     session: String,
     identity: Option<String>,
+    plan: Option<String>,
+    limits: Option<serde_json::Value>,
 }
 
 async fn challenge_upload(
@@ -1192,13 +1194,28 @@ async fn challenge_upload(
             rebuild_router(&st).await;
             if let Some(id) = req.identity.as_deref().filter(|s| !s.is_empty()) {
                 let _ = st.store.set_identity(&label, id).await;
-            } else if let Some(kind) = provider_kind(&provider) {
-                let store = st.store.clone();
-                let raw = req.session.clone();
-                let lab = label.clone();
-                tokio::spawn(async move {
-                    cli::record_identity(&store, kind, &lab, &raw, None).await;
-                });
+            }
+            if let Some(plan) = req
+                .plan
+                .as_deref()
+                .filter(|s| !s.is_empty() && *s != "free")
+            {
+                let _ = st.store.set_plan(&label, plan).await;
+            }
+            if let Some(limits) = req.limits.as_ref().filter(|v| !v.is_null()) {
+                if let Ok(raw) = serde_json::to_string(limits) {
+                    let _ = st.store.set_limits(&label, &raw).await;
+                }
+            }
+            if req.identity.is_none() || req.plan.is_none() || req.limits.is_none() {
+                if let Some(kind) = provider_kind(&provider) {
+                    let store = st.store.clone();
+                    let raw = req.session.clone();
+                    let lab = label.clone();
+                    tokio::spawn(async move {
+                        cli::record_identity(&store, kind, &lab, &raw, None).await;
+                    });
+                }
             }
             let _ = st
                 .store

@@ -743,12 +743,62 @@ function RowActions({
     }
   }));
 }
+function fmtResetIn(resetAfter, windowSecs) {
+  if (resetAfter) {
+    const d = new Date(resetAfter);
+    if (isNaN(d.getTime())) return null;
+    const s = Math.max(0, Math.round((d.getTime() - Date.now()) / 1000));
+    if (s < 60) return 'reset in ' + s + 's';
+    if (s < 3600) return 'reset in ' + Math.round(s / 60) + 'm';
+    if (s < 86400) {
+      const h = Math.floor(s / 3600);
+      const m = Math.round(s % 3600 / 60);
+      return 'reset in ' + (m ? h + 'h ' + m + 'm' : h + 'h');
+    }
+    return 'reset in ' + Math.round(s / 86400) + 'd';
+  }
+  if (!windowSecs) return null;
+  if (windowSecs % 3600 === 0) return 'every ' + windowSecs / 3600 + 'h';
+  if (windowSecs % 60 === 0) return 'every ' + windowSecs / 60 + 'm';
+  return 'every ' + windowSecs + 's';
+}
 
 // The variable-length detail — tier, per-feature limits, the model catalog — lives in a drawer
 // under the row, so every collapsed row keeps the same height.
 function LimitChips({
   limits
 }) {
+  const chip = (key, label, value, reset, locked) => /*#__PURE__*/React.createElement("span", {
+    key: key,
+    title: reset || (locked ? 'locked on this tier' : ''),
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 10,
+      color: locked ? 'var(--text-faint)' : 'var(--text-lo)',
+      border: '1px solid var(--border-faint)',
+      borderRadius: 4,
+      padding: '1px 5px',
+      opacity: locked ? 0.65 : 1
+    }
+  }, label, value != null ? /*#__PURE__*/React.createElement(React.Fragment, null, " ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: locked ? 'var(--text-faint)' : 'var(--text-hi)'
+    }
+  }, value)) : null, reset && !locked ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-faint)'
+    }
+  }, " \xB7 ", reset) : null);
+  const featVal = f => {
+    if (f.remaining == null) return null;
+    return f.total != null ? f.remaining + '/' + f.total : f.remaining;
+  };
+  const modelVal = m => {
+    if (m.locked) return '0/0';
+    if (m.total != null && m.remaining != null) return m.remaining + '/' + m.total;
+    if (m.remaining != null) return m.remaining;
+    return null;
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
@@ -758,38 +808,7 @@ function LimitChips({
   }, limits.tier && /*#__PURE__*/React.createElement(Badge, {
     tone: "cyan",
     variant: "outline"
-  }, limits.tier), (limits.features || []).map(f => /*#__PURE__*/React.createElement("span", {
-    key: f.feature,
-    title: f.resetAfter ? 'resets ' + f.resetAfter : '',
-    style: {
-      fontFamily: 'var(--font-mono)',
-      fontSize: 10,
-      color: 'var(--text-lo)',
-      border: '1px solid var(--border-faint)',
-      borderRadius: 4,
-      padding: '1px 5px'
-    }
-  }, f.feature, " ", /*#__PURE__*/React.createElement("b", {
-    style: {
-      color: 'var(--text-hi)'
-    }
-  }, f.total != null ? f.remaining + '/' + f.total : f.remaining))), (limits.models || []).map(m => /*#__PURE__*/React.createElement("span", {
-    key: m.id,
-    title: m.windowSecs ? 'rolling ' + Math.round(m.windowSecs / 3600) + 'h' : m.resetAfter ? 'resets ' + m.resetAfter : m.locked ? 'locked on this tier' : '',
-    style: {
-      fontFamily: 'var(--font-mono)',
-      fontSize: 10,
-      color: m.locked ? 'var(--text-faint)' : 'var(--text-lo)',
-      border: '1px solid var(--border-faint)',
-      borderRadius: 4,
-      padding: '1px 5px',
-      opacity: m.locked ? 0.65 : 1
-    }
-  }, m.name, m.levels && m.levels.length ? ' ·' + m.levels.join('/') : '', " ", /*#__PURE__*/React.createElement("b", {
-    style: {
-      color: m.locked ? 'var(--text-faint)' : 'var(--text-hi)'
-    }
-  }, m.locked ? '0/0' : m.total != null ? m.remaining + '/' + m.total : m.remaining != null ? m.remaining : '—'))));
+  }, limits.tier), (limits.features || []).filter(f => f.remaining != null).map(f => chip(f.feature, f.feature, featVal(f), fmtResetIn(f.resetAfter, f.windowSecs), false)), (limits.models || []).map(m => chip(m.id, m.name + (m.levels && m.levels.length ? ' ·' + m.levels.join('/') : ''), modelVal(m), fmtResetIn(m.resetAfter, m.windowSecs), m.locked)));
 }
 
 // One fixed-height row; the tier/limits/models detail expands in a drawer row underneath so
@@ -895,7 +914,13 @@ function AccountRow({
     style: _objectSpread(_objectSpread({}, td), {}, {
       width: 220
     })
-  }, r.pending ? spinner('loading…') : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(QuotaMeter, {
+  }, r.pending ? spinner('loading…') : r.web && !r.limits ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: 'var(--text-faint)'
+    }
+  }, "\u2014") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(QuotaMeter, {
     used: r.used,
     quota: r.quota,
     variant: "bar",

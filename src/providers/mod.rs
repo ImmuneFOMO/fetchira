@@ -9,6 +9,8 @@ mod chatgpt_web;
 mod exa;
 mod firecrawl;
 mod gemini_web;
+#[cfg(test)]
+mod grok_browser;
 mod grok_statsig;
 mod grok_web;
 pub(crate) mod niche;
@@ -521,19 +523,19 @@ pub struct LiveBalance {
 }
 
 /// One tool/feature's live allowance for the account's tier (e.g. deep_research, image_gen).
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FeatureLimit {
     pub feature: String,
     pub remaining: i64,
     /// Ceiling for this window when the provider reports one (grok); `None` keeps the soft quota.
     /// `Some(0)` means the feature is locked on this tier — display as 0/0.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<i64>,
     /// Rolling-window length in seconds (grok's per-model windows); `None` for fixed resets.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_secs: Option<i64>,
     /// ISO-8601 instant the allowance resets (absolute, not a rolling window).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_after: Option<String>,
 }
 
@@ -552,41 +554,42 @@ impl FeatureLimit {
 
 /// One selectable model or mode in a provider's live catalog, with its per-entry allowance.
 /// `total == Some(0)` / `locked` marks an entry the current tier can't select (shown as 0/0).
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     /// The selector an agent passes back (a grok mode, a chatgpt slug, a gemini id).
     pub id: String,
     /// Display name ("Expert", "GPT-5.5", "3.1 Pro").
     pub name: String,
     /// Thinking levels for this model ("instant"/"medium"/"high", "standard"/"extended"); empty if none.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub levels: Vec<String>,
     /// Live remaining; `None` when the provider exposes no count (gemini).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<i64>,
     /// Ceiling; `Some(0)` = locked on this tier.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<i64>,
     /// Rolling-window length in seconds (grok), else `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_secs: Option<i64>,
     /// ISO-8601 reset instant (chatgpt), else `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_after: Option<String>,
     /// Not selectable on the current tier (entitlement-gated). Display as 0/0.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
 }
 
 /// The provider's live per-tier limits: a subscription label, per-feature remaining counts, and the
 /// selectable model/mode catalog. Generic across web providers (chatgpt/grok fill limits, gemini
 /// fills the catalog only — it exposes no live count).
-#[derive(Clone, Serialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct LiveLimits {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    #[serde(default)]
     pub features: Vec<FeatureLimit>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelInfo>,
     /// Rotated session cookies captured while reading limits; the router re-saves them. Internal —
     /// not part of the serialized view.
@@ -604,6 +607,13 @@ impl LiveLimits {
 
     pub fn feature(&self, feature: &str) -> Option<&FeatureLimit> {
         self.features.iter().find(|f| f.feature == feature)
+    }
+
+    /// True when at least one unlocked model reported a remaining count (grok Fast/Expert).
+    pub fn has_quotas(&self) -> bool {
+        self.models
+            .iter()
+            .any(|m| !m.locked && m.remaining.is_some())
     }
 }
 

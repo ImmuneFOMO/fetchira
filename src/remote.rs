@@ -441,6 +441,10 @@ struct LoginUpload<'a> {
     session: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limits: Option<serde_json::Value>,
 }
 
 pub async fn login(
@@ -498,13 +502,24 @@ pub async fn login(
     if parsed.cookies.is_empty() {
         bail!("session contains no cookies");
     }
-    let identity =
+    let (identity, plan, limits) =
         if let Ok(http) = crate::web::build_client(&parsed.cookies, &parsed.headers, None) {
-            crate::providers::Provider::new(target.provider)
-                .account_identity(&http)
-                .await
+            let p = crate::providers::Provider::new(target.provider);
+            let identity = p.account_identity(&http).await;
+            let ll = p
+                .live_limits(&http, &target.label, &parsed.cookies, false)
+                .await;
+            let plan = ll
+                .as_ref()
+                .and_then(|l| l.tier.clone())
+                .filter(|t| t != "free");
+            let limits = ll
+                .as_ref()
+                .filter(|l| l.has_quotas())
+                .and_then(|l| serde_json::to_value(l).ok());
+            (identity, plan, limits)
         } else {
-            None
+            (None, None, None)
         };
     let response = client
         .post(url)
@@ -512,6 +527,8 @@ pub async fn login(
         .json(&LoginUpload {
             session: &session,
             identity: identity.as_deref(),
+            plan: plan.as_deref(),
+            limits,
         })
         .send()
         .await?;

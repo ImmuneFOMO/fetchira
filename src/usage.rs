@@ -182,7 +182,9 @@ impl Store {
                 provider TEXT NOT NULL,
                 cookies  TEXT NOT NULL,
                 updated  TEXT NOT NULL,
-                identity TEXT
+                identity TEXT,
+                plan     TEXT,
+                limits   TEXT
             )",
         )
         .execute(&pool)
@@ -190,6 +192,14 @@ impl Store {
         // Existing DBs predate `identity` (account email, for the dashboard + dup detection);
         // add it idempotently (ignore "duplicate column name").
         sqlx::query("ALTER TABLE web_session ADD COLUMN identity TEXT")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE web_session ADD COLUMN plan TEXT")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE web_session ADD COLUMN limits TEXT")
             .execute(&pool)
             .await
             .ok();
@@ -827,6 +837,40 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| r.get("label")))
+    }
+
+    pub async fn set_plan(&self, label: &str, plan: &str) -> Result<()> {
+        sqlx::query("UPDATE web_session SET plan = ? WHERE label = ?")
+            .bind(plan)
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_plan(&self, label: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT plan FROM web_session WHERE label = ?")
+            .bind(label)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("plan")))
+    }
+
+    pub async fn set_limits(&self, label: &str, limits: &str) -> Result<()> {
+        sqlx::query("UPDATE web_session SET limits = ? WHERE label = ?")
+            .bind(limits)
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_limits(&self, label: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT limits FROM web_session WHERE label = ?")
+            .bind(label)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.get::<Option<String>, _>("limits")))
     }
 
     /// All captured account identities (label -> email), for the dashboard rows.

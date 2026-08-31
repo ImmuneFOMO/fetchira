@@ -8,6 +8,8 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use wreq_util::Emulation;
+
 use crate::error::{Error, Result};
 
 // grok's anti-bot `x-statsig-id`, reversed from its web bundle. A 70-byte token:
@@ -80,14 +82,28 @@ pub async fn invalidate() {
 async fn scrape(base: &str, client: &wreq::Client) -> Result<Statsig> {
     let bad = || Error::BadResponse("grok_web");
     let html = client.get(base).send().await?.text().await?;
-    let seed = STANDARD
-        .decode(extract_seed(&html).ok_or_else(bad)?)
+    if extract_seed(&html).is_some() && parse_curves(&html).is_some() {
+        return scrape_html(client, &html).await;
+    }
+    // A logged-in grok.com session 307s to accounts.x.ai/mfa; the public homepage still has the seed.
+    let anon = wreq::Client::builder()
+        .emulation(Emulation::Chrome137)
+        .build()
         .map_err(|_| bad())?;
-    let curves = parse_curves(&html).ok_or_else(bad)?;
+    let html = anon.get(base).send().await?.text().await?;
+    scrape_html(&anon, &html).await
+}
+
+async fn scrape_html(client: &wreq::Client, html: &str) -> Result<Statsig> {
+    let bad = || Error::BadResponse("grok_web");
+    let seed = STANDARD
+        .decode(extract_seed(html).ok_or_else(bad)?)
+        .map_err(|_| bad())?;
+    let curves = parse_curves(html).ok_or_else(bad)?;
     if seed.len() != 48 || curves.len() != 4 || curves.iter().any(|r| r.len() != 16) {
         return Err(bad());
     }
-    let idx = scrape_indices(&html, client).await.ok_or_else(bad)?;
+    let idx = scrape_indices(html, client).await.ok_or_else(bad)?;
     let l = compute_l(&seed, &curves, &idx);
     Ok(Statsig { seed, l })
 }
