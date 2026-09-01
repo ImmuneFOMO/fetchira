@@ -118,6 +118,12 @@ const DEBUG_MAX_ROWS: i64 = 4000;
 /// updater can refuse a breaking swap while old-version MCP servers are still running.
 pub const SCHEMA: i64 = 2;
 
+/// Additive `CREATE TABLE IF NOT EXISTS` is safe under older binaries. Only stamp `user_version`
+/// when no other fetchira process is using the file (or this is a brand-new db).
+fn should_bump_user_version(current: i64, peer_count: usize) -> bool {
+    current < SCHEMA && (current == 0 || peer_count == 0)
+}
+
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
@@ -136,24 +142,12 @@ impl Store {
                  restart this MCP server (or update this tool's fetchira) to pick up the new binary"
             )));
         }
-        if v < SCHEMA && v > 0 {
-            // Structural migration (dormant while SCHEMA == 1): refuse while old-version
-            // processes hold the DB — migrating under them breaks their queries mid-flight.
-            let alive = crate::instances::running(&crate::cli::home(), &[std::process::id()]);
-            if !alive.is_empty() {
-                return Err(Error::Schema(format!(
-                    "cannot migrate the database from schema v{v} to v{SCHEMA} while {} other \
-                     fetchira process(es) run — restart them first (pids: {})",
-                    alive.len(),
-                    alive
-                        .iter()
-                        .map(|i| i.pid.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-            // per-version migration steps go here when SCHEMA grows past 1
-        }
+        let peers = if v < SCHEMA && v > 0 {
+            crate::instances::running(&crate::cli::home(), &[std::process::id()]).len()
+        } else {
+            0
+        };
+        let bump = should_bump_user_version(v, peers);
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS usage (
                 provider  TEXT    NOT NULL,
@@ -316,7 +310,7 @@ impl Store {
         )
         .execute(&pool)
         .await?;
-        if v < SCHEMA {
+        if bump {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "PRAGMA user_version = {SCHEMA}"
             )))
@@ -1262,6 +1256,14 @@ mod tests {
     fn schema_version_asset_matches_const() {
         let file: i64 = include_str!("../schema-version").trim().parse().unwrap();
         assert_eq!(file, SCHEMA);
+    }
+
+    #[test]
+    fn old_schema_bumps_only_without_peers() {
+        assert!(should_bump_user_version(0, 5));
+        assert!(should_bump_user_version(1, 0));
+        assert!(!should_bump_user_version(1, 3));
+        assert!(!should_bump_user_version(SCHEMA, 0));
     }
 
     #[tokio::test]

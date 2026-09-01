@@ -1241,12 +1241,27 @@ mod tests {
         }
     }
 
+    async fn grok1_session() -> crate::web::Session {
+        if let Ok(path) = std::env::var("GROK_SESSION") {
+            let raw = std::fs::read_to_string(&path).expect("session");
+            return crate::web::parse_session(&raw);
+        }
+        let home = crate::cli::home();
+        let cfg = crate::cli::load_or_empty(&home);
+        let db = crate::config::resolve_db(&home, &cfg.db_path);
+        let store = crate::usage::Store::open(&db).await.expect("store");
+        let raw = store
+            .load_session("grok-1")
+            .await
+            .expect("load")
+            .expect("grok-1 session");
+        crate::web::parse_session(&raw)
+    }
+
     #[tokio::test]
     #[ignore]
     async fn live_subscriptions_and_rate_limits() {
-        let path = std::env::var("GROK_SESSION").expect("GROK_SESSION json path");
-        let raw = std::fs::read_to_string(&path).expect("session");
-        let sess = crate::web::parse_session(&raw);
+        let sess = grok1_session().await;
         let client = crate::web::build_client(&sess.cookies, &sess.headers, None).expect("client");
         poll_live("grok-1", &client).await;
         if let Ok(profile) = std::env::var("GROK_CHROME_PROFILE") {
