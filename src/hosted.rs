@@ -477,12 +477,38 @@ fn mask_proxy(proxy: &str) -> String {
     }
 }
 fn provider_limit_rows(v: &crate::router::UsageView) -> Vec<serde_json::Value> {
+    let web = provider_kind(v.provider).is_some_and(|p| p.is_web());
     let mut out = Vec::new();
-    if v.quota > 0 {
+    // Web account counters are a soft failover placeholder, not a live ceiling.
+    if v.quota > 0 && !web {
         out.push(json!({"label":"router quota","used":v.used,"quota":v.quota,"window":v.period,"locked":false,"usd":v.usd}));
     }
-    out.extend(v.limits.as_ref().map(|l| l.features.iter().filter_map(|f| f.total.map(|total| json!({"label":f.feature,"used":(total-f.remaining).max(0),"quota":total,"resetAt":f.reset_after,"locked":total == 0}))).collect::<Vec<_>>()).unwrap_or_default());
-    if out.is_empty() && !provider_kind(v.provider).is_some_and(|p| p.is_web()) {
+    if let Some(ll) = &v.limits {
+        for m in &ll.models {
+            if let (Some(remaining), Some(total)) = (m.remaining, m.total) {
+                out.push(json!({
+                    "label": m.name,
+                    "used": (total - remaining).max(0),
+                    "quota": total,
+                    "window": window_or_period(m.window_secs, &v.period),
+                    "resetAt": m.reset_after,
+                    "locked": m.locked || total == 0,
+                }));
+            }
+        }
+        out.extend(ll.features.iter().filter_map(|f| {
+            f.total.map(|total| {
+                json!({
+                    "label": f.feature,
+                    "used": (total - f.remaining).max(0),
+                    "quota": total,
+                    "resetAt": f.reset_after,
+                    "locked": total == 0,
+                })
+            })
+        }));
+    }
+    if out.is_empty() && !web {
         out.push(json!({"label":"quota","used":v.used,"quota":v.quota,"window":v.period,"locked":false,"usd":v.usd}));
     }
     out
@@ -2109,6 +2135,64 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("home");
         path
+    }
+
+    fn sample_view(
+        provider: &'static str,
+        quota: i64,
+        limits: Option<crate::providers::LiveLimits>,
+    ) -> crate::router::UsageView {
+        crate::router::UsageView {
+            provider,
+            label: "x".into(),
+            period: "monthly".into(),
+            quota,
+            used: 0,
+            remaining: quota,
+            exhausted: false,
+            proxy: "direct".into(),
+            window_secs: None,
+            limits,
+            usd: None,
+            pending: false,
+        }
+    }
+
+    #[test]
+    fn web_miss_omits_soft_router_quota() {
+        let rows = provider_limit_rows(&sample_view("grok_web", 100, None));
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn grok_live_models_are_limit_rows_not_router_quota() {
+        let ll = crate::providers::LiveLimits {
+            tier: Some("SuperGrok Heavy".into()),
+            models: vec![crate::providers::ModelInfo {
+                id: "grok-4".into(),
+                name: "grok-4".into(),
+                levels: vec![],
+                remaining: Some(12),
+                total: Some(20),
+                window_secs: Some(7200),
+                reset_after: None,
+                locked: false,
+            }],
+            ..Default::default()
+        };
+        let rows = provider_limit_rows(&sample_view("grok_web", 100, Some(ll)));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["label"], "grok-4");
+        assert_eq!(rows[0]["quota"], 20);
+        assert_eq!(rows[0]["used"], 8);
+        assert_eq!(rows[0]["window"], "2h");
+    }
+
+    #[test]
+    fn api_key_provider_keeps_router_quota() {
+        let rows = provider_limit_rows(&sample_view("serper", 2500, None));
+        assert_eq!(rows[0]["label"], "router quota");
+        assert_eq!(rows[0]["quota"], 2500);
     }
 
     #[test]

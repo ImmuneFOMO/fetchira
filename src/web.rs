@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -291,8 +291,8 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
 }
 
 /// Extra cookie hosts to keep after the primary auth cookie shows up. grok.com `sso` is enough
-/// for `/rest/auth/get-user`, but `/rest/subscriptions` and `/rest/rate-limits` require the
-/// accounts.x.ai MFA session (`sso` on `.x.ai`).
+/// for `/rest/auth/get-user`; subscriptions/rate-limits need the `.x.ai` `sso` too (same JWT is
+/// fine once Apple MFA has marked the session).
 fn companion_domains(kind: ProviderKind) -> &'static [&'static str] {
     match kind {
         ProviderKind::GrokWeb => &["x.ai", "accounts.x.ai"],
@@ -346,6 +346,7 @@ pub async fn login(
     kind: ProviderKind,
     label: &str,
     browser: Option<String>,
+    seed: Option<&[Cookie]>,
 ) -> Result<Session> {
     let candidates = browser_candidates(browser.as_deref());
     if candidates.is_empty() {
@@ -359,21 +360,38 @@ pub async fn login(
     let extra = companion_domains(kind);
     let mut last_err = None;
     for browser in candidates {
-        // Always start from an empty profile so `login` means "sign in and we capture this account",
-        // not "silently re-grab whoever was left signed in" — the user picks the account each time.
+        // Empty profile unless we are seeding cookies (grok MFA re-login). Wiping would drop
+        // Chrome's iCloud Keychain passkey permission from the previous attempt.
         let profile = profile_dir(home, browser.kind.tag(), label);
-        let _ = std::fs::remove_dir_all(&profile);
+        if seed.map(|c| c.is_empty()).unwrap_or(true) {
+            let _ = std::fs::remove_dir_all(&profile);
+        }
         let fut = async {
             match browser.kind {
                 BrowserKind::Chromium => {
-                    capture_chromium(&browser.bin, &profile, url, domain, extra, auth, check).await
+                    capture_chromium(
+                        &browser.bin,
+                        &profile,
+                        url,
+                        domain,
+                        extra,
+                        auth,
+                        check,
+                        seed,
+                    )
+                    .await
                 }
                 BrowserKind::Firefox => {
                     capture_firefox(&browser.bin, &profile, url, domain, extra, auth).await
                 }
             }
         };
-        match timeout(Duration::from_secs(300), fut).await {
+        // Apple passkey on grok needs wall-clock for Touch ID; other providers stay at 5 min.
+        let limit = std::env::var("FETCHIRA_LOGIN_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(if extra.contains(&"x.ai") { 600 } else { 300 });
+        match timeout(Duration::from_secs(limit), fut).await {
             Ok(Ok(session)) => return Ok(session),
             // A capture error (Chrome's DevTools socket resetting, a dead profile) — try the next
             // browser. A timeout means the user simply didn't finish, so don't switch on them.
@@ -387,6 +405,7 @@ pub async fn login(
     Err(last_err.unwrap_or(Error::Timeout("login")))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn capture_chromium(
     bin: &Path,
     profile: &Path,
@@ -395,6 +414,7 @@ async fn capture_chromium(
     extra: &[&str],
     auth: &str,
     login_check: Option<&str>,
+    seed: Option<&[Cookie]>,
 ) -> Result<Session> {
     // A free ephemeral port — 9222 collides with any other Chrome already exposing a debug port
     // (the user's main browser, an automation instance), which resets the CDP connection.
@@ -402,8 +422,16 @@ async fn capture_chromium(
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(9222);
-    let mut child = tokio::process::Command::new(bin)
-        .arg(format!("--user-data-dir={}", profile.display()))
+    let grok_mfa = extra.contains(&"x.ai");
+    let seeded = seed.is_some_and(|c| !c.is_empty());
+    // `--app` windows do not surface the platform authenticator, so Apple passkey never appears.
+    let launch_url = if grok_mfa && seeded {
+        "about:blank"
+    } else {
+        url
+    };
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg(format!("--user-data-dir={}", profile.display()))
         .arg(format!("--remote-debugging-port={port}"))
         .arg("--remote-allow-origins=*")
         .arg("--no-first-run")
@@ -412,17 +440,102 @@ async fn capture_chromium(
         .arg("--log-level=3")
         // Without this Chrome binds Google's session to the device TPM key (DBSC), so the exported
         // cookies can't be replayed over HTTP — /app comes back logged-out and RotateCookies 401s.
-        .arg("--disable-features=DeviceBoundSessionCredentials,StandardDeviceBoundSessionCredentials")
-        .arg(format!("--app={url}"))
-        // Chrome (and the GoogleUpdater it spawns) is noisy on stderr — keep it off the terminal.
+        .arg("--disable-features=DeviceBoundSessionCredentials,StandardDeviceBoundSessionCredentials");
+    if grok_mfa {
+        cmd.arg("--new-window").arg(launch_url);
+    } else {
+        cmd.arg(format!("--app={launch_url}"));
+    }
+    let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
 
+    if grok_mfa && seeded {
+        let _ = prime_cookies(port, seed.unwrap_or(&[]), GROK_MFA_URL).await;
+        macos_notify(
+            "fetchira grok login",
+            "Unlock this Mac and complete Touch ID in the Fetchira Chrome window",
+        );
+    }
     let session = capture_login(port, domain, extra, auth, login_check).await;
     let _ = child.kill().await;
     session
+}
+
+const GROK_MFA_URL: &str = "https://accounts.x.ai/mfa/verify?redirect=grok-com";
+
+/// Click Verify / Try again so a platform-authenticator request stays pending. The challenge
+/// times out in 5 minutes; without a refresh, Touch ID has nothing to attach to after unlock.
+const CLICK_GROK_VERIFY: &str = r#"( ()=>{
+    const click=()=>{
+      const t=(x)=>(x.innerText||'').trim();
+      const b=[...document.querySelectorAll('button')].find(x=>t(x)==='Verify'||t(x)==='Try again');
+      if(b){b.click();return true}
+      return false;
+    };
+    click();
+    setInterval(click, 50000);
+    document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="visible") click(); });
+    return false;
+})() "#;
+
+/// grok.com `sso` is not sent to accounts.x.ai by the browser (different site). Copy it onto
+/// `.x.ai` so `/mfa/verify` sees the session; capture still waits for a *distinct* post-MFA JWT.
+fn seed_cdp_cookies(cookies: &[Cookie]) -> Vec<Value> {
+    let mut jar: Vec<Value> = cookies.iter().map(cdp_cookie).collect();
+    for c in cookies {
+        if (c.name == "sso" || c.name == "sso-rw") && c.domain.contains("grok.com") {
+            for domain in [".x.ai", "accounts.x.ai"] {
+                let mut x = c.clone();
+                x.domain = domain.into();
+                jar.push(cdp_cookie(&x));
+            }
+        }
+    }
+    jar
+}
+
+fn cdp_cookie(c: &Cookie) -> Value {
+    let mut v = json!({
+        "name": c.name, "value": c.value,
+        "path": c.path, "secure": c.secure, "httpOnly": c.http_only,
+    });
+    if !c.name.starts_with("__Host-") {
+        v["domain"] = json!(c.domain);
+    } else {
+        v["url"] = json!("https://grok.com/");
+    }
+    if c.expires > 0.0 {
+        v["expires"] = json!(c.expires);
+    }
+    v
+}
+
+/// Drop stored grok.com cookies into a fresh profile and open the MFA page so re-login is
+/// passkey-only instead of email/password again.
+async fn prime_cookies(port: u16, cookies: &[Cookie], url: &str) -> Result<()> {
+    let ws_url = wait_for_page(port).await?;
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url.as_str()).await?;
+    send_cmd(&mut ws, 1, "Network.enable", Value::Null).await?;
+    let _ = send_cmd(&mut ws, 2, "Page.enable", Value::Null).await;
+    send_cmd(
+        &mut ws,
+        3,
+        "Network.setCookies",
+        json!({ "cookies": seed_cdp_cookies(cookies) }),
+    )
+    .await?;
+    let _ = send_cmd(
+        &mut ws,
+        4,
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": CLICK_GROK_VERIFY }),
+    )
+    .await;
+    send_cmd(&mut ws, 5, "Page.navigate", json!({ "url": url })).await?;
+    Ok(())
 }
 
 /// Connect to Chrome's page target and capture the signed-in session. Login pages redirect (e.g.
@@ -507,6 +620,25 @@ fn is_cdp_disconnect(e: &Error) -> bool {
 
 fn login_debug() -> bool {
     std::env::var("FETCHIRA_LOGIN_DEBUG").is_ok()
+}
+
+fn macos_notify(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
+            esc(body),
+            esc(title)
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (title, body);
 }
 
 /// Show login progress over the provider page without replacing it, so late network responses can
@@ -602,6 +734,14 @@ trait CookieSource {
     /// Best-effort visual feedback after the auth cookie appears. Only CDP-backed Chrome can
     /// render it; Firefox uses the default no-op while its cookie database is sampled.
     async fn auth_detected(&mut self) {}
+
+    /// After grok.com `sso` lands, send the page to accounts.x.ai MFA so Apple passkey can run.
+    async fn prompt_companion(&mut self) {}
+
+    /// Current page URL when the backend can see it (Chrome CDP). `None` for Firefox.
+    async fn page_url(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Two-phase capture shared by both backends: wait for the provider's auth cookie, then hold the
@@ -641,24 +781,46 @@ async fn capture<S: CookieSource>(
         sleep(Duration::from_secs(1)).await;
     };
     tracing::debug!(%domain, %auth, count = best.len(), "auth cookie present; capturing");
-    src.auth_detected().await;
-    // Give companion cookies one final beat to land, then close promptly. Waiting for two
-    // consecutive stable polls made a successful login look stuck for 2–3 seconds. Keep the
-    // latest snapshot when it is at least as complete, since cookie values may rotate in place.
-    sleep(Duration::from_secs(1)).await;
-    let scoped = src.fetch(domain).await?;
-    if scoped.len() >= best.len() {
-        best = scoped;
-    }
     if extra.contains(&"x.ai") {
-        // grok.com `sso` lands before accounts.x.ai MFA; subscriptions 403 until `.x.ai` `sso` exists.
-        for _ in 0..90 {
+        // Overlay would cover the MFA page. Wait until `.x.ai` sso exists and the tab is back on
+        // grok.com (Apple MFA does not rotate the JWT). Outer login timeout bounds this.
+        src.prompt_companion().await;
+        let started = Instant::now();
+        let mut left_grok = false;
+        loop {
             let xai = src.fetch("x.ai").await?;
-            if xai.iter().any(|c| is_auth(c, "sso")) {
-                break;
+            let has_xai = xai_has_sso(&xai);
+            match src.page_url().await {
+                None => {
+                    if has_xai {
+                        break;
+                    }
+                }
+                Some(url) => {
+                    if url.contains("accounts.x.ai") || url.contains("/mfa") {
+                        left_grok = true;
+                    }
+                    let on_grok = url.starts_with("https://grok.com");
+                    if has_xai
+                        && on_grok
+                        && (left_grok || started.elapsed() >= Duration::from_secs(2))
+                    {
+                        break;
+                    }
+                }
             }
             sleep(Duration::from_secs(1)).await;
         }
+    } else {
+        src.auth_detected().await;
+        // Give companion cookies one final beat to land, then close promptly. Waiting for two
+        // consecutive stable polls made a successful login look stuck for 2–3 seconds. Keep the
+        // latest snapshot when it is at least as complete, since cookie values may rotate in place.
+        sleep(Duration::from_secs(1)).await;
+    }
+    let scoped = src.fetch(domain).await?;
+    if scoped.len() >= best.len() {
+        best = scoped;
     }
     for d in extra {
         for c in src.fetch(d).await? {
@@ -669,6 +831,9 @@ async fn capture<S: CookieSource>(
                 best.push(c);
             }
         }
+    }
+    if extra.contains(&"x.ai") {
+        src.auth_detected().await;
     }
     Ok(Session {
         cookies: best,
@@ -709,6 +874,42 @@ impl CookieSource for Cdp {
 
     async fn auth_detected(&mut self) {
         show_verifying(self).await;
+    }
+
+    async fn prompt_companion(&mut self) {
+        self.id += 1;
+        let _ = send_cmd(&mut self.ws, self.id, "Page.enable", Value::Null).await;
+        self.id += 1;
+        let _ = send_cmd(
+            &mut self.ws,
+            self.id,
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": CLICK_GROK_VERIFY }),
+        )
+        .await;
+        self.id += 1;
+        let _ = send_cmd(
+            &mut self.ws,
+            self.id,
+            "Page.navigate",
+            json!({ "url": GROK_MFA_URL }),
+        )
+        .await;
+    }
+
+    async fn page_url(&mut self) -> Option<String> {
+        self.id += 1;
+        let res = send_cmd(
+            &mut self.ws,
+            self.id,
+            "Runtime.evaluate",
+            json!({ "expression": "location.href", "returnByValue": true }),
+        )
+        .await
+        .ok()?;
+        res.pointer("/result/value")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     }
 }
 
@@ -814,6 +1015,10 @@ fn is_auth(c: &Cookie, auth: &str) -> bool {
     c.name == auth && !c.value.is_empty() && (c.session || c.expires <= 0.0 || c.expires > now())
 }
 
+fn xai_has_sso(xai: &[Cookie]) -> bool {
+    xai.iter().any(|c| is_auth(c, "sso"))
+}
+
 /// Poll the DevTools HTTP endpoint for a page target and return its WebSocket URL.
 async fn wait_for_page(port: u16) -> Result<String> {
     let http = reqwest::Client::new();
@@ -883,6 +1088,103 @@ mod tests {
             &["x.ai", "accounts.x.ai"]
         );
         assert!(companion_domains(ProviderKind::ChatgptWeb).is_empty());
+    }
+
+    #[test]
+    fn grok_mfa_script_retries_try_again() {
+        assert!(CLICK_GROK_VERIFY.contains("Try again"));
+        assert!(CLICK_GROK_VERIFY.contains("setInterval"));
+        assert!(CLICK_GROK_VERIFY.contains("visibilitychange"));
+    }
+
+    fn ck(name: &str, value: &str, domain: &str) -> Cookie {
+        Cookie {
+            name: name.into(),
+            value: value.into(),
+            domain: domain.into(),
+            path: "/".into(),
+            expires: 9_999_999_999.0,
+            http_only: true,
+            secure: true,
+            session: false,
+        }
+    }
+
+    #[test]
+    fn seed_copies_grok_sso_onto_xai_for_mfa() {
+        let jar = seed_cdp_cookies(&[
+            ck("sso", "grok-jwt", ".grok.com"),
+            ck("sso-rw", "grok-jwt", ".grok.com"),
+        ]);
+        let hosts: Vec<_> = jar
+            .iter()
+            .filter(|c| c["name"] == "sso")
+            .map(|c| c["domain"].as_str().unwrap_or(""))
+            .collect();
+        assert!(hosts.contains(&".grok.com"));
+        assert!(hosts.contains(&".x.ai"));
+        assert!(hosts.contains(&"accounts.x.ai"));
+    }
+
+    #[test]
+    fn xai_sso_ready_when_present() {
+        let grok = "grok-jwt";
+        assert!(xai_has_sso(&[ck("sso", grok, ".x.ai")]));
+        assert!(xai_has_sso(&[ck("sso", "xai-jwt", ".x.ai")]));
+        assert!(!xai_has_sso(&[]));
+        assert!(!xai_has_sso(&[ck("sso-rw", grok, ".x.ai")]));
+    }
+
+    struct Script {
+        grok: Vec<Cookie>,
+        xai: Vec<Cookie>,
+    }
+
+    impl CookieSource for Script {
+        async fn fetch(&mut self, domain: &str) -> Result<Vec<Cookie>> {
+            if domain == "grok.com" {
+                Ok(self.grok.clone())
+            } else if domain == "x.ai" {
+                Ok(self.xai.clone())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_capture_keeps_distinct_xai_sso() {
+        let mut src = Script {
+            grok: vec![ck("sso", "grok-jwt", ".grok.com")],
+            xai: vec![ck("sso", "xai-jwt", ".x.ai")],
+        };
+        let sess = capture(&mut src, "grok.com", &["x.ai"], "sso")
+            .await
+            .unwrap();
+        assert!(sess
+            .cookies
+            .iter()
+            .any(|c| c.domain == ".x.ai" && c.value == "xai-jwt"));
+    }
+
+    #[tokio::test]
+    async fn grok_capture_accepts_mirrored_xai_sso() {
+        let tok = "same-jwt";
+        let mut src = Script {
+            grok: vec![ck("sso", tok, ".grok.com")],
+            xai: vec![ck("sso", tok, ".x.ai")],
+        };
+        let sess = timeout(
+            Duration::from_secs(2),
+            capture(&mut src, "grok.com", &["x.ai"], "sso"),
+        )
+        .await
+        .expect("mirrored x.ai sso must finish login")
+        .unwrap();
+        assert!(sess
+            .cookies
+            .iter()
+            .any(|c| c.domain == ".x.ai" && c.value == tok));
     }
 
     #[test]

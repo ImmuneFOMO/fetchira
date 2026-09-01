@@ -493,6 +493,7 @@ pub async fn login(
                 target.provider,
                 &target.label,
                 browser.map(str::to_string),
+                None,
             )
             .await?;
             serde_json::to_string(&captured)?

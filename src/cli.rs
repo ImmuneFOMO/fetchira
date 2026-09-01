@@ -702,12 +702,30 @@ async fn do_login(
     label: &str,
     browser: Option<String>,
 ) -> anyhow::Result<()> {
-    println!(
-        "opening a browser to log into {} ({label}) — finish login; the window closes itself once you're in…",
-        kind.as_str()
-    );
-    let session = web::login(home, kind, label, browser).await?;
     let store = open_store(home, cfg).await?;
+    let seed = match store.load_session(label).await {
+        Ok(Some(raw)) => Some(web::parse_session(&raw)),
+        _ => None,
+    };
+    if kind == ProviderKind::GrokWeb {
+        println!(
+            "opening a browser to log into {} ({label}) — complete Apple passkey/Touch ID; the window closes once the grok.com session is stored…",
+            kind.as_str()
+        );
+    } else {
+        println!(
+            "opening a browser to log into {} ({label}) — finish login; the window closes itself once you're in…",
+            kind.as_str()
+        );
+    }
+    let session = web::login(
+        home,
+        kind,
+        label,
+        browser,
+        seed.as_ref().map(|s| s.cookies.as_slice()),
+    )
+    .await?;
     let raw = serde_json::to_string(&session)?;
     store.save_session(label, kind.as_str(), &raw).await?;
     let proxy = cfg
