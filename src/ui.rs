@@ -996,12 +996,6 @@ fn models_json(models: &[crate::providers::ModelInfo]) -> Vec<Value> {
 async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
     let views = inner.router.usage_snapshot_cached().await?;
 
-    let mut dr: HashMap<&str, &crate::router::UsageView> = HashMap::new();
-    for v in &views {
-        if let Some(base) = v.label.strip_suffix("#dr") {
-            dr.insert(base, v);
-        }
-    }
     let mains: Vec<&crate::router::UsageView> =
         views.iter().filter(|v| !v.label.ends_with("#dr")).collect();
 
@@ -1088,22 +1082,15 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 e.logged |= m.logged_in;
             }
         }
-        if let Some(d) = dr.get(v.label.as_str()) {
-            e.has_dr = true;
-            e.dr_used += d.used;
-            e.dr_quota += d.quota;
-            e.dr_window_secs = e.dr_window_secs.or(d.window_secs);
-            if e.dr_period.is_empty() {
-                e.dr_period = d.period.clone();
+        if let Some(f) = v.limits.as_ref().and_then(|l| l.feature("deep_research")) {
+            if let Some(total) = f.total {
+                e.dr_remaining = Some(e.dr_remaining.unwrap_or(0) + f.remaining);
+                e.dr_total = Some(e.dr_total.unwrap_or(0) + total);
+                e.dr_window_secs = e.dr_window_secs.or(f.window_secs);
             }
-        }
-        // The absolute deep-research reset (chatgpt reports one); grok is a rolling window instead.
-        if e.dr_reset_after.is_none() {
-            e.dr_reset_after = v
-                .limits
-                .as_ref()
-                .and_then(|l| l.feature("deep_research"))
-                .and_then(|f| f.reset_after.clone());
+            if e.dr_reset_after.is_none() {
+                e.dr_reset_after = f.reset_after.clone();
+            }
         }
     }
 
@@ -1145,8 +1132,13 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         for (name, label) in [
             ("image_gen", "create image"),
             ("file_upload", "file upload"),
+            ("deep_research", "deep research"),
         ] {
             let Some(f) = ll.feature(name) else { continue };
+            // Grok reports remaining+total — that becomes a cube bar, not an info row.
+            if name == "deep_research" && f.total.is_some() {
+                continue;
+            }
             match e.iter_mut().find(|r| r["label"] == label) {
                 Some(row) => {
                     row["remaining"] =
@@ -1241,16 +1233,13 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                     }
                     bars.push(q);
                 }
-                if a.has_dr {
-                    bars.push(limit_bar(
-                        "deep research",
-                        a.dr_used,
-                        a.dr_quota,
-                        a.dr_window_secs,
-                        Some(&a.dr_period),
-                        a.dr_reset_after.as_deref(),
-                        a.dr_quota == 0,
-                    ));
+                if let Some(bar) = live_dr_bar(
+                    a.dr_remaining,
+                    a.dr_total,
+                    a.dr_window_secs,
+                    a.dr_reset_after.as_deref(),
+                ) {
+                    bars.push(bar);
                 }
                 tile["limits"] = json!(bars);
                 tile["catalog"] = json!(catalog);
@@ -1477,11 +1466,9 @@ struct Agg {
     window_secs: Option<i64>,
     web: bool,
     logged: bool,
-    has_dr: bool,
-    dr_used: i64,
-    dr_quota: i64,
+    dr_remaining: Option<i64>,
+    dr_total: Option<i64>,
     dr_window_secs: Option<i64>,
-    dr_period: String,
     dr_reset_after: Option<String>,
     /// Summed real $ balance for top-up providers (exa/parallel/steel); None for credit providers.
     usd: Option<f64>,
@@ -1499,11 +1486,9 @@ impl Agg {
             window_secs: None,
             web: false,
             logged: false,
-            has_dr: false,
-            dr_used: 0,
-            dr_quota: 0,
+            dr_remaining: None,
+            dr_total: None,
             dr_window_secs: None,
-            dr_period: String::new(),
             dr_reset_after: None,
             usd: None,
             pending: false,
@@ -1550,6 +1535,25 @@ fn reset_window(period: &str) -> &'static str {
 }
 
 /// One limit as a cube-bar descriptor for the dashboard: value + its own window + reset date.
+/// Deep-research cube bar only when the live endpoint reported remaining AND total.
+fn live_dr_bar(
+    remaining: Option<i64>,
+    total: Option<i64>,
+    window_secs: Option<i64>,
+    reset_after: Option<&str>,
+) -> Option<Value> {
+    let (rem, total) = remaining.zip(total)?;
+    Some(limit_bar(
+        "deep research",
+        (total - rem).max(0),
+        total,
+        window_secs,
+        None,
+        reset_after,
+        total == 0,
+    ))
+}
+
 fn limit_bar(
     label: &str,
     used: i64,
@@ -1731,5 +1735,17 @@ mod tests {
         p.merge(&no_count);
         assert_eq!(p.remaining, None);
         assert!(!p.all_locked);
+    }
+
+    #[test]
+    fn overview_omits_soft_dr_bar_without_live_total() {
+        assert!(live_dr_bar(None, None, None, None).is_none());
+        assert!(live_dr_bar(Some(3), None, None, None).is_none());
+        assert!(live_dr_bar(None, Some(3), None, None).is_none());
+        let bar = live_dr_bar(Some(140), Some(140), Some(7200), None).unwrap();
+        assert_eq!(bar["label"], "deep research");
+        assert_eq!(bar["quota"], 140);
+        assert_eq!(bar["used"], 0);
+        assert_eq!(bar["window"], "2h");
     }
 }
