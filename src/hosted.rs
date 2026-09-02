@@ -239,52 +239,33 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             }
         }
     }
-    let mut groups = Vec::new();
-    for (id, label) in [
-        ("search", "Search"),
-        ("read", "Read / scrape"),
-        ("browser", "Browser"),
-        ("web", "Web sessions"),
-    ] {
-        let mut providers = Vec::new();
-        for v in mains.iter().filter(|v| provider_group(v.provider) == id) {
-            let web = provider_kind(v.provider).is_some_and(|p| p.is_web());
-            if let Some(existing) = providers
-                .iter_mut()
-                .find(|p: &&mut serde_json::Value| p["name"] == v.provider)
-            {
-                existing["accounts"] = json!(existing["accounts"].as_i64().unwrap_or(0) + 1);
-                existing["used"] = json!(existing["used"].as_i64().unwrap_or(0) + v.used);
-                existing["quota"] = json!(existing["quota"].as_i64().unwrap_or(0) + v.quota);
-                existing["loggedIn"] = json!(
-                    existing["loggedIn"].as_bool().unwrap_or(false) || logged.contains(&v.label)
-                );
-                existing["pending"] =
-                    json!(existing["pending"].as_bool().unwrap_or(false) || v.pending);
-            } else {
-                providers.push(json!({"name":v.provider,"desc":provider_desc(v.provider),"used":v.used,"quota":v.quota,"accounts":1,"resetWindow":window_or_period(v.window_secs, &v.period),"pending":v.pending,"key":!web,"webSession":web,"loggedIn":logged.contains(&v.label),"limits":provider_limit_rows(v),"features":provider_feature_rows(v),"catalog":provider_catalog(v)}));
+    let mut groups = crate::ui::overview_groups(&mains, |label| logged.contains(label));
+    if let Some(cfg) = &cfg {
+        for account in &cfg.accounts {
+            if !account.provider.is_web() || seen_labels.contains(account.label.as_str()) {
+                continue;
             }
-        }
-        if let Some(cfg) = &cfg {
-            for account in &cfg.accounts {
-                if account.provider.is_web()
-                    && provider_group(account.provider.as_str()) == id
-                    && !seen_labels.contains(account.label.as_str())
-                {
-                    if let Some(existing) = providers
-                        .iter_mut()
-                        .find(|p: &&mut serde_json::Value| p["name"] == account.provider.as_str())
-                    {
+            let name = account.provider.as_str();
+            let gid = provider_group(name);
+            let empty = json!({"name":name,"desc":provider_desc(name),"used":0,"quota":0,"accounts":1,"resetWindow":null,"pending":false,"key":false,"webSession":true,"loggedIn":false,"limits":[],"catalog":[]});
+            if let Some(group) = groups.iter_mut().find(|g| g["id"] == gid) {
+                if let Some(providers) = group["providers"].as_array_mut() {
+                    if let Some(existing) = providers.iter_mut().find(|p| p["name"] == name) {
                         existing["accounts"] =
                             json!(existing["accounts"].as_i64().unwrap_or(0) + 1);
                     } else {
-                        providers.push(json!({"name":account.provider.as_str(),"desc":provider_desc(account.provider.as_str()),"used":0,"quota":0,"accounts":1,"resetWindow":null,"pending":false,"key":false,"webSession":true,"loggedIn":false,"limits":[],"features":[],"catalog":[]}));
+                        providers.push(empty);
                     }
                 }
+            } else {
+                let glabel = match gid {
+                    "search" => "Search",
+                    "read" => "Read / scrape",
+                    "browser" => "Browser",
+                    _ => "Web sessions",
+                };
+                groups.push(json!({"id":gid,"label":glabel,"providers":[empty]}));
             }
-        }
-        if !providers.is_empty() {
-            groups.push(json!({"id":id,"label":label,"providers":providers}));
         }
     }
     let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"group":provider_group(p.as_str())})).collect();
@@ -476,6 +457,7 @@ fn mask_proxy(proxy: &str) -> String {
         None => host,
     }
 }
+#[cfg(test)]
 fn provider_limit_rows(v: &crate::router::UsageView) -> Vec<serde_json::Value> {
     let web = provider_kind(v.provider).is_some_and(|p| p.is_web());
     let mut out = Vec::new();
@@ -512,30 +494,6 @@ fn provider_limit_rows(v: &crate::router::UsageView) -> Vec<serde_json::Value> {
         out.push(json!({"label":"quota","used":v.used,"quota":v.quota,"window":v.period,"locked":false,"usd":v.usd}));
     }
     out
-}
-fn provider_feature_rows(v: &crate::router::UsageView) -> Vec<serde_json::Value> {
-    v.limits
-        .as_ref()
-        .map(|l| {
-            l.features
-                .iter()
-                .filter(|f| f.total.is_none())
-                .map(|f| json!({"label":f.feature,"remaining":f.remaining,"resetAt":f.reset_after}))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-fn provider_catalog(v: &crate::router::UsageView) -> Vec<serde_json::Value> {
-    v.limits
-        .as_ref()
-        .map(|l| {
-            l.models
-                .iter()
-                .filter(|m| m.total.is_none())
-                .map(|m| json!({"name":m.name,"levels":m.levels}))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 async fn hosted_static(uri: axum::http::Uri) -> Response {

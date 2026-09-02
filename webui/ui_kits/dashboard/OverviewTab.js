@@ -627,49 +627,11 @@ function LimitRow({
     state: st
   }));
 }
-
-// A capability limit that reports only a remaining count (create image, file upload) — no ceiling,
-// so it's an info row, not a bar.
-function FeatureRow({
-  label,
-  remaining,
-  resetAt
-}) {
-  const reset = fmtReset(resetAt);
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      alignItems: 'baseline',
-      justifyContent: 'space-between',
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: 'var(--font-mono)',
-      fontSize: 12,
-      color: 'var(--text-mid)'
-    }
-  }, label), /*#__PURE__*/React.createElement("span", {
-    style: {
-      display: 'flex',
-      gap: 8,
-      alignItems: 'baseline',
-      fontFamily: 'var(--font-mono)',
-      fontSize: 11,
-      color: 'var(--text-faint)'
-    }
-  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("b", {
-    style: {
-      color: 'var(--text-hi)'
-    }
-  }, (remaining || 0).toLocaleString()), " left"), reset && /*#__PURE__*/React.createElement("span", null, reset)));
-}
 function FxProviderCard(p) {
   const [showSpent, setShowSpent] = React.useState(false);
   const needsLogin = p.webSession && !p.loggedIn;
   const health = needsLogin ? 'off' : 'ok';
   const limits = p.limits || [];
-  const features = p.features || [];
   const catalog = p.catalog || [];
   // Hide locked / used-up limits behind a toggle so the card leads with what you can actually use.
   const isSpent = l => l.locked || (l.quota || 0) - (l.used || 0) <= 0;
@@ -759,9 +721,7 @@ function FxProviderCard(p) {
     key: l.label
   }, l, {
     off: needsLogin
-  }))), features.map(f => /*#__PURE__*/React.createElement(FeatureRow, _extends({
-    key: f.label
-  }, f))))), !p.pending && spent.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }))))), !p.pending && spent.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSpent(s => !s),
     style: {
       alignSelf: 'flex-start',

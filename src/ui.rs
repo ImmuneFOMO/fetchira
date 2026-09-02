@@ -932,8 +932,8 @@ impl AggModel {
             levels: m.levels.clone(),
             remaining: None,
             total: None,
-            window_secs: m.window_secs,
-            reset_after: m.reset_after.clone(),
+            window_secs: None,
+            reset_after: None,
             all_locked: true,
         }
     }
@@ -941,10 +941,8 @@ impl AggModel {
     fn merge(&mut self, m: &crate::providers::ModelInfo) {
         self.remaining = add_opt(self.remaining, m.remaining);
         self.total = add_opt(self.total, m.total);
-        self.window_secs = self.window_secs.or(m.window_secs);
-        if self.reset_after.is_none() {
-            self.reset_after = m.reset_after.clone();
-        }
+        self.window_secs = min_opt(self.window_secs, m.window_secs);
+        self.reset_after = sooner_reset(self.reset_after.take(), m.reset_after.as_deref());
         if !m.locked {
             self.all_locked = false;
         }
@@ -970,6 +968,63 @@ fn add_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
         (Some(x), Some(y)) => Some(x + y),
         (Some(x), None) => Some(x),
         (None, y) => y,
+    }
+}
+
+fn min_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Earliest ISO-8601 reset among the accounts that reported one.
+fn sooner_reset(a: Option<String>, b: Option<&str>) -> Option<String> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y.to_string()),
+        (Some(x), Some(y)) => {
+            let tx = DateTime::parse_from_rfc3339(&x).ok();
+            let ty = DateTime::parse_from_rfc3339(y).ok();
+            match (tx, ty) {
+                (Some(tx), Some(ty)) if ty < tx => Some(y.to_string()),
+                (None, Some(_)) => Some(y.to_string()),
+                _ => Some(x),
+            }
+        }
+    }
+}
+
+struct FeatBar {
+    label: String,
+    used: i64,
+    quota: i64,
+    window_secs: Option<i64>,
+    reset_after: Option<String>,
+    locked: bool,
+}
+
+impl FeatBar {
+    fn to_bar(&self) -> Value {
+        limit_bar(
+            &self.label,
+            self.used,
+            self.quota,
+            self.window_secs,
+            None,
+            self.reset_after.as_deref(),
+            self.locked,
+        )
+    }
+}
+
+fn feat_label(name: &str) -> String {
+    match name {
+        "image_gen" => "create image".into(),
+        "file_upload" => "file upload".into(),
+        "deep_research" => "deep research".into(),
+        _ => name.replace('_', " "),
     }
 }
 
@@ -1060,204 +1115,9 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
-    // Provider tiles, aggregated across each provider's accounts, grouped by capability.
-    let mut order: Vec<&str> = Vec::new();
-    let mut aggs: HashMap<&str, Agg> = HashMap::new();
-    for v in &mains {
-        let e = aggs.entry(v.provider).or_insert_with(|| {
-            order.push(v.provider);
-            Agg::new(v.period.clone())
-        });
-        e.used += v.used;
-        e.quota += v.quota;
-        e.accounts += 1;
-        e.pending |= v.pending;
-        e.window_secs = e.window_secs.or(v.window_secs);
-        if let Some(u) = v.usd {
-            e.usd = Some(e.usd.unwrap_or(0.0) + u);
-        }
-        if let Some(m) = inner.meta.get(&v.label) {
-            if m.is_web {
-                e.web = true;
-                e.logged |= m.logged_in;
-            }
-        }
-        if let Some(f) = v.limits.as_ref().and_then(|l| l.feature("deep_research")) {
-            if let Some(total) = f.total {
-                e.dr_remaining = Some(e.dr_remaining.unwrap_or(0) + f.remaining);
-                e.dr_total = Some(e.dr_total.unwrap_or(0) + total);
-                e.dr_window_secs = e.dr_window_secs.or(f.window_secs);
-            }
-            if e.dr_reset_after.is_none() {
-                e.dr_reset_after = f.reset_after.clone();
-            }
-        }
-    }
-
-    // Per-provider model catalog, SUMMED across the provider's accounts (like the quota tiles):
-    // per model id remaining/total add up, and it stays locked only if every account has it locked.
-    let mut cat_by_provider: HashMap<&str, (Vec<String>, HashMap<String, AggModel>)> =
-        HashMap::new();
-    for v in &mains {
-        let Some(ll) = &v.limits else { continue };
-        let (order, by_id) = cat_by_provider.entry(v.provider).or_default();
-        for m in &ll.models {
-            by_id
-                .entry(m.id.clone())
-                .or_insert_with(|| {
-                    order.push(m.id.clone());
-                    AggModel::seed(m)
-                })
-                .merge(m);
-        }
-    }
-    let catalogs: HashMap<&str, Vec<Value>> = cat_by_provider
-        .iter()
-        .map(|(prov, (order, by_id))| {
-            let models = order
-                .iter()
-                .filter_map(|id| by_id.get(id))
-                .map(AggModel::to_json)
-                .collect();
-            (*prov, models)
-        })
-        .collect();
-
-    // Other capability limits worth surfacing (create image, file upload). These report a remaining
-    // count + reset but no ceiling, so they render as info rows, not fuel-gauge bars. Summed by name.
-    let mut feats_by_provider: HashMap<&str, Vec<Value>> = HashMap::new();
-    for v in &mains {
-        let Some(ll) = &v.limits else { continue };
-        let e = feats_by_provider.entry(v.provider).or_default();
-        for (name, label) in [
-            ("image_gen", "create image"),
-            ("file_upload", "file upload"),
-            ("deep_research", "deep research"),
-        ] {
-            let Some(f) = ll.feature(name) else { continue };
-            // Grok reports remaining+total — that becomes a cube bar, not an info row.
-            if name == "deep_research" && f.total.is_some() {
-                continue;
-            }
-            match e.iter_mut().find(|r| r["label"] == label) {
-                Some(row) => {
-                    row["remaining"] =
-                        json!(row["remaining"].as_i64().unwrap_or(0) + f.remaining.max(0));
-                }
-                None => e.push(json!({
-                    "label": label,
-                    "remaining": f.remaining,
-                    "resetAt": f.reset_after,
-                })),
-            }
-        }
-    }
-
-    let groups: Vec<Value> = [
-        ("search", "Search"),
-        ("read", "Read / scrape"),
-        ("browser", "Browser"),
-        ("web", "Web sessions"),
-    ]
-    .iter()
-    .map(|(gid, glabel)| {
-        let providers: Vec<Value> = order
-            .iter()
-            .filter(|name| group_of(name).0 == *gid)
-            .map(|&name| {
-                let a = &aggs[name];
-                let resets_in = if a.window_secs.is_some() {
-                    Value::Null
-                } else {
-                    json!(resets_in(&a.period))
-                };
-                let mut tile = json!({
-                    "name": name,
-                    "desc": desc_of(name),
-                    "used": a.used,
-                    "quota": a.quota,
-                    "resetWindow": window_or_period(a.window_secs, &a.period),
-                    "resetsIn": resets_in,
-                    "accounts": a.accounts,
-                    "key": !a.web,
-                    "pending": a.pending,
-                });
-                if a.web {
-                    tile["webSession"] = json!(true);
-                    tile["loggedIn"] = json!(a.logged);
-                }
-                // Each limit becomes its own cube bar (with its real window + reset); count-less
-                // models (chatgpt/gemini) fall to a text catalog line.
-                let models = catalogs.get(name).cloned().unwrap_or_default();
-                let mut bars: Vec<Value> = Vec::new();
-                let mut catalog: Vec<Value> = Vec::new();
-                let mut has_model_bar = false;
-                for m in &models {
-                    if m["total"].is_i64() && m["remaining"].is_i64() {
-                        has_model_bar = true;
-                        let total = m["total"].as_i64().unwrap_or(0);
-                        let rem = m["remaining"].as_i64().unwrap_or(0);
-                        bars.push(limit_bar(
-                            m["name"].as_str().unwrap_or(""),
-                            (total - rem).max(0),
-                            total,
-                            m["windowSecs"].as_i64(),
-                            None,
-                            None,
-                            m["locked"].as_bool().unwrap_or(false),
-                        ));
-                    } else {
-                        catalog.push(json!({ "name": m["name"], "levels": m["levels"] }));
-                    }
-                }
-                // Account-level quota bar for API providers only — that's their real key quota. A web
-                // provider's account counter is just a soft failover placeholder; showing it as a
-                // "messages/search" limit misleads (chatgpt caps are per-model, gemini has none), so
-                // web cards show only real live limits (grok modes, deep research) + the model catalog.
-                if !has_model_bar && !a.web {
-                    let mut q = limit_bar(
-                        "quota",
-                        a.used,
-                        a.quota,
-                        a.window_secs,
-                        Some(&a.period),
-                        None,
-                        false,
-                    );
-                    // Estimate providers (a $/token→ops conversion) show "≈" — the count isn't exact.
-                    if approx_quota(name) {
-                        q["approx"] = json!(true);
-                        if let Some(usd) = a.usd {
-                            q["usd"] = json!(usd);
-                        }
-                    }
-                    bars.push(q);
-                }
-                if let Some(bar) = live_dr_bar(
-                    a.dr_remaining,
-                    a.dr_total,
-                    a.dr_window_secs,
-                    a.dr_reset_after.as_deref(),
-                ) {
-                    bars.push(bar);
-                }
-                tile["limits"] = json!(bars);
-                tile["catalog"] = json!(catalog);
-                if let Some(fs) = feats_by_provider.get(name) {
-                    tile["features"] = json!(fs);
-                }
-                tile
-            })
-            .collect();
-        json!({ "id": gid, "label": glabel, "providers": providers })
-    })
-    .filter(|g| {
-        !g["providers"]
-            .as_array()
-            .map(|a| a.is_empty())
-            .unwrap_or(true)
-    })
-    .collect();
+    let groups = overview_groups(&mains, |label| {
+        inner.meta.get(label).is_some_and(|m| m.logged_in)
+    });
 
     // Provider health: quota state + last-seen time from the route log.
     let health: Vec<Value> = mains
@@ -1382,7 +1242,13 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         .collect();
 
     // Capability matrix: each configured provider's native niches + escape-hatch modes.
-    let capabilities: Vec<Value> = order
+    let mut cap_order: Vec<&str> = Vec::new();
+    for v in &mains {
+        if !cap_order.contains(&v.provider) {
+            cap_order.push(v.provider);
+        }
+    }
+    let capabilities: Vec<Value> = cap_order
         .iter()
         .map(|&name| match parse_kind(name) {
             Some(kind) => {
@@ -1458,6 +1324,199 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
     }))
 }
 
+/// Provider tiles, aggregated across each provider's accounts, grouped by capability.
+pub(crate) fn overview_groups(
+    mains: &[&crate::router::UsageView],
+    logged_in: impl Fn(&str) -> bool,
+) -> Vec<Value> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut aggs: HashMap<&str, Agg> = HashMap::new();
+    for v in mains {
+        let e = aggs.entry(v.provider).or_insert_with(|| {
+            order.push(v.provider);
+            Agg::new(v.period.clone())
+        });
+        e.used += v.used;
+        e.quota += v.quota;
+        e.accounts += 1;
+        e.pending |= v.pending;
+        e.window_secs = min_opt(e.window_secs, v.window_secs);
+        if let Some(u) = v.usd {
+            e.usd = Some(e.usd.unwrap_or(0.0) + u);
+        }
+        if v.provider.ends_with("_web") {
+            e.web = true;
+            e.logged |= logged_in(&v.label);
+        }
+    }
+
+    // Per-provider model catalog, SUMMED across the provider's accounts (like the quota tiles):
+    // per model id remaining/total add up, and it stays locked only if every account has it locked.
+    let mut cat_by_provider: HashMap<&str, (Vec<String>, HashMap<String, AggModel>)> =
+        HashMap::new();
+    for v in mains {
+        let Some(ll) = &v.limits else { continue };
+        let (order, by_id) = cat_by_provider.entry(v.provider).or_default();
+        for m in &ll.models {
+            by_id
+                .entry(m.id.clone())
+                .or_insert_with(|| {
+                    order.push(m.id.clone());
+                    AggModel::seed(m)
+                })
+                .merge(m);
+        }
+    }
+    let catalogs: HashMap<&str, Vec<Value>> = cat_by_provider
+        .iter()
+        .map(|(prov, (order, by_id))| {
+            let models = order
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .map(AggModel::to_json)
+                .collect();
+            (*prov, models)
+        })
+        .collect();
+
+    // Live feature limits (chatgpt remaining+reset, grok deep research remaining+total). Summed
+    // by feature id; reset is the soonest ISO among accounts.
+    let mut feats_by_provider: HashMap<&str, (Vec<String>, HashMap<String, FeatBar>)> =
+        HashMap::new();
+    for v in mains {
+        let Some(ll) = &v.limits else { continue };
+        let (ford, by) = feats_by_provider.entry(v.provider).or_default();
+        for f in &ll.features {
+            if f.feature.starts_with("model:") {
+                continue;
+            }
+            let e = by.entry(f.feature.clone()).or_insert_with(|| {
+                ford.push(f.feature.clone());
+                FeatBar {
+                    label: feat_label(&f.feature),
+                    used: 0,
+                    quota: 0,
+                    window_secs: None,
+                    reset_after: None,
+                    locked: true,
+                }
+            });
+            if let Some(total) = f.total {
+                e.used += (total - f.remaining).max(0);
+                e.quota += total;
+                e.locked &= total == 0;
+                e.window_secs = min_opt(e.window_secs, f.window_secs);
+            } else {
+                e.quota += f.remaining.max(0);
+                e.locked = false;
+            }
+            e.reset_after = sooner_reset(e.reset_after.take(), f.reset_after.as_deref());
+        }
+    }
+
+    [
+        ("search", "Search"),
+        ("read", "Read / scrape"),
+        ("browser", "Browser"),
+        ("web", "Web sessions"),
+    ]
+    .iter()
+    .map(|(gid, glabel)| {
+        let providers: Vec<Value> = order
+            .iter()
+            .filter(|name| group_of(name).0 == *gid)
+            .map(|&name| {
+                let a = &aggs[name];
+                let resets_in = if a.window_secs.is_some() {
+                    Value::Null
+                } else {
+                    json!(resets_in(&a.period))
+                };
+                let mut tile = json!({
+                    "name": name,
+                    "desc": desc_of(name),
+                    "used": a.used,
+                    "quota": a.quota,
+                    "resetWindow": window_or_period(a.window_secs, &a.period),
+                    "resetsIn": resets_in,
+                    "accounts": a.accounts,
+                    "key": !a.web,
+                    "pending": a.pending,
+                });
+                if a.web {
+                    tile["webSession"] = json!(true);
+                    tile["loggedIn"] = json!(a.logged);
+                }
+                // Each limit becomes its own cube bar (with its real window + reset); count-less
+                // models (chatgpt/gemini) fall to a text catalog line.
+                let models = catalogs.get(name).cloned().unwrap_or_default();
+                let mut bars: Vec<Value> = Vec::new();
+                let mut catalog: Vec<Value> = Vec::new();
+                let mut has_model_bar = false;
+                for m in &models {
+                    if m["total"].is_i64() && m["remaining"].is_i64() {
+                        has_model_bar = true;
+                        let total = m["total"].as_i64().unwrap_or(0);
+                        let rem = m["remaining"].as_i64().unwrap_or(0);
+                        bars.push(limit_bar(
+                            m["name"].as_str().unwrap_or(""),
+                            (total - rem).max(0),
+                            total,
+                            m["windowSecs"].as_i64(),
+                            None,
+                            m["resetAfter"].as_str(),
+                            m["locked"].as_bool().unwrap_or(false),
+                        ));
+                    } else {
+                        catalog.push(json!({ "name": m["name"], "levels": m["levels"] }));
+                    }
+                }
+                // Account-level quota bar for API providers only — that's their real key quota. A web
+                // provider's account counter is just a soft failover placeholder; showing it as a
+                // "messages/search" limit misleads (chatgpt caps are per-model, gemini has none), so
+                // web cards show only real live limits (grok modes, deep research) + the model catalog.
+                if !has_model_bar && !a.web {
+                    let mut q = limit_bar(
+                        "quota",
+                        a.used,
+                        a.quota,
+                        a.window_secs,
+                        Some(&a.period),
+                        None,
+                        false,
+                    );
+                    // Estimate providers (a $/token→ops conversion) show "≈" — the count isn't exact.
+                    if approx_quota(name) {
+                        q["approx"] = json!(true);
+                        if let Some(usd) = a.usd {
+                            q["usd"] = json!(usd);
+                        }
+                    }
+                    bars.push(q);
+                }
+                if let Some((ford, by)) = feats_by_provider.get(name) {
+                    for id in ford {
+                        if let Some(f) = by.get(id) {
+                            bars.push(f.to_bar());
+                        }
+                    }
+                }
+                tile["limits"] = json!(bars);
+                tile["catalog"] = json!(catalog);
+                tile
+            })
+            .collect();
+        json!({ "id": gid, "label": glabel, "providers": providers })
+    })
+    .filter(|g| {
+        !g["providers"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+    })
+    .collect()
+}
+
 struct Agg {
     used: i64,
     quota: i64,
@@ -1466,10 +1525,6 @@ struct Agg {
     window_secs: Option<i64>,
     web: bool,
     logged: bool,
-    dr_remaining: Option<i64>,
-    dr_total: Option<i64>,
-    dr_window_secs: Option<i64>,
-    dr_reset_after: Option<String>,
     /// Summed real $ balance for top-up providers (exa/parallel/steel); None for credit providers.
     usd: Option<f64>,
     /// Any account still awaiting its first live figure (cached snapshot) → the card shows a loader.
@@ -1486,10 +1541,6 @@ impl Agg {
             window_secs: None,
             web: false,
             logged: false,
-            dr_remaining: None,
-            dr_total: None,
-            dr_window_secs: None,
-            dr_reset_after: None,
             usd: None,
             pending: false,
         }
@@ -1535,25 +1586,6 @@ fn reset_window(period: &str) -> &'static str {
 }
 
 /// One limit as a cube-bar descriptor for the dashboard: value + its own window + reset date.
-/// Deep-research cube bar only when the live endpoint reported remaining AND total.
-fn live_dr_bar(
-    remaining: Option<i64>,
-    total: Option<i64>,
-    window_secs: Option<i64>,
-    reset_after: Option<&str>,
-) -> Option<Value> {
-    let (rem, total) = remaining.zip(total)?;
-    Some(limit_bar(
-        "deep research",
-        (total - rem).max(0),
-        total,
-        window_secs,
-        None,
-        reset_after,
-        total == 0,
-    ))
-}
-
 fn limit_bar(
     label: &str,
     used: i64,
@@ -1684,6 +1716,7 @@ fn desc_of(provider: &str) -> &'static str {
         "steel" => "Headless browser sessions",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
+        "chatgpt_web" => "Browser session · search + deep research",
         _ => "",
     }
 }
@@ -1739,13 +1772,194 @@ mod tests {
 
     #[test]
     fn overview_omits_soft_dr_bar_without_live_total() {
-        assert!(live_dr_bar(None, None, None, None).is_none());
-        assert!(live_dr_bar(Some(3), None, None, None).is_none());
-        assert!(live_dr_bar(None, Some(3), None, None).is_none());
-        let bar = live_dr_bar(Some(140), Some(140), Some(7200), None).unwrap();
-        assert_eq!(bar["label"], "deep research");
-        assert_eq!(bar["quota"], 140);
-        assert_eq!(bar["used"], 0);
-        assert_eq!(bar["window"], "2h");
+        let v = view("chatgpt_web", "a", 0, 100, None);
+        let groups = overview_groups(&[&v], |_| true);
+        let p = tile(&groups, "chatgpt_web");
+        let limits = p["limits"].as_array().unwrap();
+        assert!(limits.iter().all(|l| l["label"] != "deep research"));
+    }
+
+    fn view(
+        provider: &'static str,
+        label: &str,
+        used: i64,
+        quota: i64,
+        limits: Option<crate::providers::LiveLimits>,
+    ) -> crate::router::UsageView {
+        crate::router::UsageView {
+            provider,
+            label: label.into(),
+            period: "monthly".into(),
+            quota,
+            used,
+            remaining: (quota - used).max(0),
+            exhausted: false,
+            proxy: "direct".into(),
+            window_secs: None,
+            limits,
+            usd: None,
+            pending: false,
+        }
+    }
+
+    fn tile<'a>(groups: &'a [Value], name: &str) -> &'a Value {
+        groups
+            .iter()
+            .flat_map(|g| g["providers"].as_array().into_iter().flatten())
+            .find(|p| p["name"] == name)
+            .expect("tile")
+    }
+
+    #[test]
+    fn sooner_reset_picks_earliest_iso() {
+        assert_eq!(
+            sooner_reset(
+                Some("2026-10-02T02:00:00Z".into()),
+                Some("2026-09-20T02:00:00Z"),
+            ),
+            Some("2026-09-20T02:00:00Z".into())
+        );
+        assert_eq!(
+            sooner_reset(None, Some("2026-09-20T02:00:00Z")),
+            Some("2026-09-20T02:00:00Z".into())
+        );
+    }
+
+    #[test]
+    fn overview_sums_chatgpt_features_and_soonest_reset() {
+        let a = view(
+            "chatgpt_web",
+            "a",
+            0,
+            100,
+            Some(crate::providers::LiveLimits {
+                features: vec![
+                    crate::providers::FeatureLimit::simple(
+                        "deep_research",
+                        10,
+                        Some("2026-10-02T02:00:00Z".into()),
+                    ),
+                    crate::providers::FeatureLimit::simple(
+                        "image_gen",
+                        2,
+                        Some("2026-10-05T02:00:00Z".into()),
+                    ),
+                    crate::providers::FeatureLimit::simple(
+                        "paste_text_to_file",
+                        40,
+                        Some("2026-10-08T02:00:00Z".into()),
+                    ),
+                ],
+                ..Default::default()
+            }),
+        );
+        let b = view(
+            "chatgpt_web",
+            "b",
+            0,
+            100,
+            Some(crate::providers::LiveLimits {
+                features: vec![
+                    crate::providers::FeatureLimit::simple(
+                        "deep_research",
+                        15,
+                        Some("2026-09-20T02:00:00Z".into()),
+                    ),
+                    crate::providers::FeatureLimit::simple("image_gen", 1, None),
+                    crate::providers::FeatureLimit::simple(
+                        "paste_text_to_file",
+                        80,
+                        Some("2026-10-01T02:00:00Z".into()),
+                    ),
+                ],
+                ..Default::default()
+            }),
+        );
+        let groups = overview_groups(&[&a, &b], |_| true);
+        let p = tile(&groups, "chatgpt_web");
+        assert_eq!(p["accounts"], 2);
+        let limits = p["limits"].as_array().expect("limits");
+        let dr = limits
+            .iter()
+            .find(|l| l["label"] == "deep research")
+            .unwrap();
+        assert_eq!(dr["quota"], 25);
+        assert_eq!(dr["used"], 0);
+        assert_eq!(dr["resetAt"], "2026-09-20T02:00:00Z");
+        let img = limits
+            .iter()
+            .find(|l| l["label"] == "create image")
+            .unwrap();
+        assert_eq!(img["quota"], 3);
+        let paste = limits
+            .iter()
+            .find(|l| l["label"] == "paste text to file")
+            .unwrap();
+        assert_eq!(paste["quota"], 120);
+        assert_eq!(paste["resetAt"], "2026-10-01T02:00:00Z");
+    }
+
+    #[test]
+    fn overview_sums_api_quota_and_grok_models() {
+        let a = view("exa", "e1", 10, 100, None);
+        let b = view("exa", "e2", 5, 50, None);
+        let groups = overview_groups(&[&a, &b], |_| false);
+        let p = tile(&groups, "exa");
+        assert_eq!(p["accounts"], 2);
+        assert_eq!(p["used"], 15);
+        assert_eq!(p["quota"], 150);
+        let q = p["limits"].as_array().unwrap()[0].clone();
+        assert_eq!(q["label"], "quota");
+        assert_eq!(q["used"], 15);
+        assert_eq!(q["quota"], 150);
+
+        let g1 = view(
+            "grok_web",
+            "g1",
+            0,
+            100,
+            Some(crate::providers::LiveLimits {
+                models: vec![mi("expert", Some(5), Some(20), false)],
+                features: vec![crate::providers::FeatureLimit {
+                    feature: "deep_research".into(),
+                    remaining: 5,
+                    total: Some(20),
+                    window_secs: Some(7200),
+                    reset_after: None,
+                }],
+                ..Default::default()
+            }),
+        );
+        let g2 = view(
+            "grok_web",
+            "g2",
+            0,
+            100,
+            Some(crate::providers::LiveLimits {
+                models: vec![mi("expert", Some(0), Some(0), true)],
+                features: vec![crate::providers::FeatureLimit {
+                    feature: "deep_research".into(),
+                    remaining: 0,
+                    total: Some(0),
+                    window_secs: None,
+                    reset_after: None,
+                }],
+                ..Default::default()
+            }),
+        );
+        let groups = overview_groups(&[&g1, &g2], |_| true);
+        let p = tile(&groups, "grok_web");
+        let limits = p["limits"].as_array().unwrap();
+        let expert = limits.iter().find(|l| l["label"] == "expert").unwrap();
+        assert_eq!(expert["quota"], 20);
+        assert_eq!(expert["used"], 15);
+        assert!(!expert["locked"].as_bool().unwrap());
+        let dr = limits
+            .iter()
+            .find(|l| l["label"] == "deep research")
+            .unwrap();
+        assert_eq!(dr["quota"], 20);
+        assert_eq!(dr["used"], 15);
+        assert_eq!(dr["window"], "2h");
     }
 }
