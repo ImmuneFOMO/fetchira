@@ -1,5 +1,7 @@
 # Private hosted Fetchira
 
+[Home](../README.md) · [Local setup](setup.md) · [CLI](cli.md) · [Configuration](configuration.md)
+
 Hosted mode runs the same router and MCP tools as local stdio, but exposes them at one private HTTPS endpoint. There is no signup, billing or multi-owner tenancy: one administrator owns the server and issues scoped keys to trusted users.
 
 ## Docker Compose
@@ -136,7 +138,7 @@ docker compose --env-file .env.hosted -f docker-compose.hosted.yml exec fetchira
   fetchira server key create laptop "Laptop"
 ```
 
-If this key must run `fetchira remote login`, create it with `--accounts-manage` instead. If an older installed binary rejects that option, use the Keys UI; the option is in the current checkout and the next release.
+If this key must run `fetchira remote login`, create it with `--accounts-manage` instead. On older binaries without that option, use the Keys UI.
 
 Connect a local Fetchira instance:
 
@@ -145,13 +147,13 @@ fetchira remote set https://fetchira.example.com/mcp --key 'fk_live_...'
 fetchira remote check
 ```
 
-Coding tools should keep launching local `fetchira` over stdio after `remote set`. Do not paste the hosted URL as a raw MCP endpoint unless the tool speaks Streamable HTTP and bearer auth.
+Register local `fetchira` in your client using the [setup guide](setup.md). Coding tools should keep launching it over stdio after `remote set`. Do not paste the hosted URL as a raw MCP endpoint unless the tool speaks Streamable HTTP and bearer auth.
 
 For environment-backed storage, omit `--key` and set `api_key = "env:FETCHIRA_API_KEY"` under `[remote]` in the local `fetchira.toml`. The bridge performs the same authenticated protocol/schema compatibility check as `remote check` before it connects; the local CLI and server may have different app versions when their reported compatibility ranges overlap.
 
 Add API-key providers from `/admin` (preferred). As a CLI fallback, configure them on the server with `fetchira add PROVIDER --key 'KEY'` while the server is stopped, then start or restart the hosted process. Keep `--key`; omitting it starts an interactive prompt. Add web-session providers from the admin UI and use its challenge flow below.
 
-The hosted bridge does not upload laptop file paths, so file attachments and file Q&A require local mode. Hosted image outputs are returned to the local bridge and saved on the laptop.
+The hosted bridge does not upload laptop file paths, so attachments and file Q&A require local mode. The six one-shot CLI commands also require local accounts. Hosted images are returned inline over HTTP and saved on the laptop by the stdio bridge; an image `path` refers to the laptop, never the server.
 
 ## Bare-metal systemd
 
@@ -204,7 +206,7 @@ The CLI captures the provider session and uploads it over HTTPS; the server encr
 
 ## Backups and restore
 
-SQLite uses WAL. Take a consistent online backup through the update/backup command, or stop the service before copying all database files. For Compose:
+SQLite uses WAL. Admin updates create a consistent online database snapshot automatically. For an independent full-volume backup, stop the service before copying its files. With Compose:
 
 ```sh
 mkdir -p backups
@@ -218,11 +220,11 @@ The archive includes `fetchira.toml`, `usage.db` and its WAL files, and the `/da
 
 To restore, stop Fetchira, archive the current volume, extract the chosen backup into `/data`, keep ownership uid/gid `10001`, start Fetchira, then require both `/healthz` and `/readyz`. Never restore only `usage.db` while its `-wal` file is live.
 
-Back up `secrets/` separately in a password manager. Losing the master key makes encrypted provider credentials unrecoverable; rotating it requires an application-assisted re-encryption, not replacing the file alone.
+Back up `secrets/` separately in a password manager. Preserve the master-key file exactly, including its whitespace. Losing the master key makes encrypted provider credentials unrecoverable; rotating it requires an application-assisted re-encryption, not replacing the file alone.
 
 ## Updates and rollback
 
-The admin update job checks release metadata and checksums, drains active MCP calls, snapshots SQLite, applies migrations, and re-executes the service with the new binary. `Update when idle` waits for the server to become idle. The database snapshot is retained under `backups/` for operator-led restore if needed; the local CLI updates independently with `fetchira update`.
+The admin update job checks release metadata and checksums, drains active MCP calls, snapshots SQLite, and re-executes the service with the new binary. The new process opens and migrates the database at startup. `Update when idle` waits for the server to become idle. The database snapshot is retained under `backups/` for operator-led restore if needed; the local CLI updates independently with `fetchira update`.
 
 For source-built Compose deployments, the explicit operator fallback is:
 
@@ -269,8 +271,8 @@ Run the local contract smoke test against an already-running server, then the fu
 FETCHIRA_URL=https://fetchira.example.com FETCHIRA_ADMIN_PASSWORD_PLAIN='…' \
   ./deploy/hosted-smoke.sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all
 docker compose --env-file .env.hosted -f docker-compose.hosted.yml config
 ```
 

@@ -1,14 +1,16 @@
 # fetchira — Design System
 
-> **fetchira** is a developer tool that routes web search / scrape / research calls
-> across many free-tier providers behind one quota-aware router. It ships as an MCP
-> server + CLI used by AI coding agents. This design system is for the **local web
-> dashboard** — the human control panel that runs on `127.0.0.1` and lets a developer
-> watch live quota, manage accounts, and see the router route in real time.
+The local dashboard and hosted admin are embedded in the Rust binary. Edit adjacent JSX
+sources, then rebuild generated JavaScript and HTML from the repository root:
 
-This is a from-brief build: there is **no upstream codebase or Figma** for the product
-yet. The visual language here *is* the source of truth. If/when a real app exists,
-reconcile against it and update this folder.
+```sh
+node tools/build_webui.js
+node tools/check_webui_assets.js
+```
+
+`tools/templates/` contains the HTML entrypoint sources. `src/ui.rs` serves the local API;
+`src/hosted.rs` serves authenticated hosted endpoints. Shared components and design rules
+are documented below. Start with [CONTRIBUTING.md](../CONTRIBUTING.md) for build and test setup.
 
 ---
 
@@ -29,8 +31,8 @@ The three nouns to design toward: **gauge, log, ledger.**
 ## 2 · Sources
 
 - **Brief:** product + visual brief supplied by the user (instrument-panel dark
-  dashboard for the fetchira quota router). Real provider data baked into
-  `ui_kits/dashboard/data.js`.
+  dashboard for the fetchira quota router). Standalone preview fixtures live in
+  `ui_kits/dashboard/data.js`; the running app replaces them with API data.
 - **Fonts:** Space Grotesk, Hanken Grotesk, JetBrains Mono — all Google Fonts, loaded
   via `tokens/fonts.css`. ⚠️ *Substitution note:* these are loaded from the Google
   Fonts CDN, not self-hosted. For a fully-offline local app, download the `woff2`
@@ -46,7 +48,7 @@ The three nouns to design toward: **gauge, log, ledger.**
 
 fetchira talks like a CLI `--help` page written by someone who respects your time.
 
-- **Casing:** lowercase for product nouns and provider names (`serper`, `perplexity_web`,
+- **Casing:** lowercase for product nouns and provider names (`serper`, `chatgpt_web`,
   `deep_research`), **Sentence case** for UI labels and buttons (`Add account`, `Provider
   health`, `Log in with browser`). Never Title Case headings. ALL-CAPS only for tiny
   mono eyebrow labels with wide tracking (`REQ REMAINING`, `ACCOUNT`, `QUOTA`).
@@ -57,15 +59,15 @@ fetchira talks like a CLI `--help` page written by someone who respects your tim
   (`1.38M req remaining`). Pad nothing with fake precision.
 - **Status is a verb-y adjective:** `healthy`, `running low`, `exhausted`,
   `needs login`. Errors read like log lines: `429 rate_limited — failed over to
-  tavily-1`, `503 quota_exhausted — 300/300 monthly, resets in 3d`.
+  tavily-1`, `402 quota_exhausted — 300/300 monthly, resets in 3d`.
 - **Tone:** factual, present-tense, no exclamation marks, no hype. A success message is
   `Account added · serper-1 is live in the router rotation.` — not "🎉 Success!".
 - **Emoji:** none. Unicode status marks (`✓`, `⚠`, `→`) are allowed *inline in mono
   contexts* as terminal-style glyphs, not as decorative emoji.
 
-**Correct:** `perplexity-1 · exhausted — resets in 3d` · `❚❚ pause` ·
+**Correct:** `chatgpt-1 · exhausted — resets in 3d` · `❚❚ pause` ·
 `•••• key set`
-**Incorrect:** `Perplexity Account #1 is Currently Unavailable 😔` ·
+**Incorrect:** `ChatGPT Account #1 is Currently Unavailable 😔` ·
 `Your Quota Journey` · `Click here to get started!`
 
 ---
@@ -202,7 +204,7 @@ Assets in `assets/`: `logo-mark.svg` (the gauge mark), `logo-wordmark.svg` (mark
 
 `ui_kits/dashboard/` — the full local dashboard, the primary deliverable. JSX source lives in
 the adjacent `.jsx` files; `tools/build_webui.js` compiles it to the checked-in `.js` assets
-used at runtime. Babel is a build-only tool and is never shipped or loaded by the browser.
+used at runtime. Babel runs at build time; runtime pages load the compiled JavaScript.
 
 | File | Surface |
 |---|---|
@@ -211,12 +213,12 @@ used at runtime. Babel is a build-only tool and is never shipped or loaded by th
 | `OverviewTab.jsx` | provider grid grouped by capability + pinned **live route log** (streams) |
 | `AccountsTab.jsx` | management table — masked key chips, proxy, status, row actions |
 | `ActivityTab.jsx` | filterable route log + per-provider usage sparklines + provider health list |
-| `AddAccountModal.jsx` | add flow — key vs browser-login providers, **guided login** sim, success |
-| `data.js` | real mock data (providers, accounts, log, health) on `window.FX` |
+| `AddAccountModal.jsx` | API-key and browser-session setup, errors and success states |
+| `data.js` | standalone preview fixtures on `window.FX`; replaced by live API data |
 
 States rendered explicitly: exhausted provider (red, "resets in 3d"), needs-login web
 provider (greyed meter, amber CTA), failover log line, and the empty state
-("Add your first provider"). Toggle the empty state with the corner `demo:` button.
+("Add your first provider"). The running dashboard derives these states from the API.
 
 ---
 
@@ -227,7 +229,8 @@ styles.css                  ← consumers link this (imports only)
 tokens/                     ← colors, typography, spacing, effects, fonts, base
 components/                 ← core · meters · providers · feed · forms · navigation
 guidelines/                 ← foundation @dsCard specimens (Type · Colors · Spacing · Brand)
-ui_kits/dashboard/          ← the fetchira router dashboard (UI kit + index.html)
+ui_kits/dashboard/          ← local dashboard JSX and generated assets
+hosted/                     ← hosted admin JSX, generated assets and styles
 assets/                     ← logo-mark.svg, logo-wordmark.svg
 SKILL.md                    ← Agent-Skill front matter for download/Claude Code use
 readme.md                   ← this file

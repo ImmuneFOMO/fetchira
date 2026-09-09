@@ -3,6 +3,8 @@ use fetchira::providers::{Capability, Input, Provider, ProviderKind};
 use fetchira::router::{Bucket, Conn, Router};
 use fetchira::usage::{period_key, Store};
 use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -37,18 +39,73 @@ async fn mount_search(m: &MockServer, body: serde_json::Value) {
 }
 
 async fn fresh_store(name: &str) -> Store {
-    let path = std::env::temp_dir().join(format!(
+    let path = temp_db(name);
+    let _ = std::fs::remove_file(&path);
+    Store::open(path.to_str().expect("temp path"))
+        .await
+        .expect("open store")
+}
+
+fn temp_db(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
         "fetchira_test_{name}_{}_{}.db",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos()
-    ));
+    ))
+}
+
+async fn legacy_exhausted_store(name: &str, label: &str, period: &str) -> Store {
+    let path = temp_db(name);
     let _ = std::fs::remove_file(&path);
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true),
+    )
+    .await
+    .expect("open legacy db");
+    sqlx::query(
+        "CREATE TABLE usage (
+            provider TEXT NOT NULL, label TEXT NOT NULL, period TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0, exhausted INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (label, period)
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO usage (provider, label, period, used, exhausted)
+         VALUES ('firecrawl', ?, ?, 0, 1)",
+    )
+    .bind(label)
+    .bind(period)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
     Store::open(path.to_str().expect("temp path"))
         .await
         .expect("open store")
+}
+
+async fn expire_cooldown(path: &PathBuf, label: &str) {
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false),
+    )
+    .await
+    .expect("open cooldown db");
+    sqlx::query("UPDATE provider_cooldown SET until_ms = 0 WHERE label = ?")
+        .bind(label)
+        .execute(&pool)
+        .await
+        .expect("expire cooldown");
+    pool.close().await;
 }
 
 fn tavily_body() -> serde_json::Value {
@@ -96,32 +153,39 @@ async fn picks_preferred_available() {
     );
 }
 
-// (b) chosen provider returns 429 -> marked exhausted, fails over to next provider.
+// (b) 429 is temporary: refund, persist Retry-After, and fail over without poisoning the month.
 #[tokio::test]
-async fn rate_limit_marks_exhausted_and_fails_over() {
+async fn rate_limit_cools_down_refunds_and_fails_over() {
     let tav = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/search"))
-        .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "37")
+                .set_body_string("slow down"),
+        )
+        .expect(1)
         .mount(&tav)
         .await;
     let exa = MockServer::start().await;
-    mount_search(&exa, exa_body()).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(exa_body()))
+        .expect(2)
+        .mount(&exa)
+        .await;
 
     let store = fresh_store("b").await;
     let period = period_key(Reset::Monthly);
-    store
-        .record("tavily", "tavily-1", &period, 20)
-        .await
-        .unwrap();
-    store.record("exa", "exa-1", &period, 80).await.unwrap();
     let probe = store.clone();
 
-    let buckets = vec![
-        bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1"),
-        bucket(ProviderKind::Exa, &exa.uri(), "exa-1"),
-    ];
-    let router = Router::from_parts(buckets, store);
+    let make_buckets = || {
+        vec![
+            bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1"),
+            bucket(ProviderKind::Exa, &exa.uri(), "exa-1"),
+        ]
+    };
+    let router = Router::from_parts(make_buckets(), store);
     let out = router
         .call(Capability::Search, &query("hi"), None)
         .await
@@ -131,13 +195,298 @@ async fn rate_limit_marks_exhausted_and_fails_over() {
         "expected failover to exa, got: {}",
         out.text
     );
+    let usage = probe.usage_for("tavily-1", &period).await.unwrap();
+    assert_eq!(usage.used, 0, "failed reservation must be refunded");
+    assert!(!usage.exhausted, "temporary 429 must not exhaust the month");
+    let wait = probe
+        .cooldown_remaining("tavily-1")
+        .await
+        .unwrap()
+        .expect("Retry-After cooldown");
+    assert!(
+        (35_000..=37_000).contains(&wait.as_millis()),
+        "got {wait:?}"
+    );
+
+    // A fresh router (the next one-shot CLI process) reads the same cooldown and skips Tavily.
+    let router = Router::from_parts(make_buckets(), probe);
+    let out = router
+        .call(Capability::Search, &query("again"), None)
+        .await
+        .unwrap();
+    assert!(out.text.contains("EXA_HIT"));
+}
+
+#[tokio::test]
+async fn legacy_firecrawl_429_recovers_once_from_live_balance() {
+    let firecrawl = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/team/credit-usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {"remainingCredits": 1515, "planCredits": 3000}
+        })))
+        .expect(1)
+        .mount(&firecrawl)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/scrape"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"markdown": "FIRECRAWL_OK", "metadata": {"creditsUsed": 1}}
+        })))
+        .expect(2)
+        .mount(&firecrawl)
+        .await;
+
+    let period = period_key(Reset::Monthly);
+    let store = legacy_exhausted_store("legacy_positive", "firecrawl-1", &period).await;
+    let probe = store.clone();
+    let router = Arc::new(Router::from_parts(
+        vec![bucket(
+            ProviderKind::Firecrawl,
+            &firecrawl.uri(),
+            "firecrawl-1",
+        )],
+        store,
+    ));
+    let input_a = Input {
+        url: Some("https://example.com/a".into()),
+        ..Default::default()
+    };
+    let input_b = Input {
+        url: Some("https://example.com/b".into()),
+        ..Default::default()
+    };
+    let (a, b) = tokio::join!(
+        router.call(Capability::Read, &input_a, Some(ProviderKind::Firecrawl)),
+        router.call(Capability::Read, &input_b, Some(ProviderKind::Firecrawl))
+    );
+    assert!(a.unwrap().text.contains("FIRECRAWL_OK"));
+    assert!(b.unwrap().text.contains("FIRECRAWL_OK"));
+    let usage = probe.usage_for("firecrawl-1", &period).await.unwrap();
+    assert_eq!(usage.used, 2);
+    assert!(!usage.exhausted);
+}
+
+#[tokio::test]
+async fn legacy_429_without_balance_gets_one_successful_probe() {
+    let exa = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(100))
+                .set_body_json(exa_body()),
+        )
+        .expect(2)
+        .mount(&exa)
+        .await;
+
+    let period = period_key(Reset::Monthly);
+    let store = legacy_exhausted_store("legacy_no_balance", "exa-1", &period).await;
+    let probe = store.clone();
+    let router = Arc::new(Router::from_parts(
+        vec![bucket(ProviderKind::Exa, &exa.uri(), "exa-1")],
+        store,
+    ));
+    let input_a = query("probe a");
+    let input_b = query("probe b");
+    let (a, b) = tokio::join!(
+        router.call(Capability::Search, &input_a, Some(ProviderKind::Exa)),
+        router.call(Capability::Search, &input_b, Some(ProviderKind::Exa))
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    let out = router
+        .call(
+            Capability::Search,
+            &query("normal route"),
+            Some(ProviderKind::Exa),
+        )
+        .await
+        .unwrap();
+    assert!(out.text.contains("EXA_HIT"));
+    assert!(!probe.usage_for("exa-1", &period).await.unwrap().exhausted);
+    assert!(probe.cooldown_remaining("exa-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn legacy_exhaustion_with_zero_live_balance_stays_gated() {
+    let firecrawl = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/team/credit-usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {"remainingCredits": 0, "planCredits": 3000}
+        })))
+        .expect(1)
+        .mount(&firecrawl)
+        .await;
+
+    let period = period_key(Reset::Monthly);
+    let store = legacy_exhausted_store("legacy_zero", "firecrawl-1", &period).await;
+    let probe = store.clone();
+    let router = Router::from_parts(
+        vec![bucket(
+            ProviderKind::Firecrawl,
+            &firecrawl.uri(),
+            "firecrawl-1",
+        )],
+        store,
+    );
+    let result = router
+        .call(
+            Capability::Read,
+            &Input {
+                url: Some("https://example.com".into()),
+                ..Default::default()
+            },
+            Some(ProviderKind::Firecrawl),
+        )
+        .await;
+    assert!(matches!(result, Err(fetchira::Error::ProviderForced(_))));
     assert!(
         probe
-            .usage_for("tavily-1", &period)
+            .usage_for("firecrawl-1", &period)
             .await
             .unwrap()
             .exhausted
     );
+}
+
+#[tokio::test]
+async fn payment_required_rechecks_fresh_balance_after_cooldown() {
+    let tav = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(402).set_body_string("credits exhausted"))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    let db = temp_db("real_402_topup");
+    let _ = std::fs::remove_file(&db);
+    let store = Store::open(db.to_str().expect("temp path")).await.unwrap();
+    let probe = store.clone();
+    let router = Router::from_parts(
+        vec![bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    let first = router
+        .call(
+            Capability::Search,
+            &query("first"),
+            Some(ProviderKind::Tavily),
+        )
+        .await;
+    assert!(matches!(first, Err(fetchira::Error::QuotaExceeded(_))));
+    let second = router
+        .call(
+            Capability::Search,
+            &query("second"),
+            Some(ProviderKind::Tavily),
+        )
+        .await;
+    assert!(matches!(second, Err(fetchira::Error::RateLimit { .. })));
+
+    // Simulate the one-minute probe interval and a user top-up. The recovery fetch bypasses the
+    // router's balance cache, clears only the provider-side marker, then performs the request.
+    tav.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account": {"plan_usage": 0, "plan_limit": 1000}
+        })))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    expire_cooldown(&db, "tavily-1").await;
+    let recovered = router
+        .call(
+            Capability::Search,
+            &query("after top-up"),
+            Some(ProviderKind::Tavily),
+        )
+        .await
+        .unwrap();
+    assert!(recovered.text.contains("TAVILY_HIT"));
+    let usage = probe
+        .usage_for("tavily-1", &period_key(Reset::Monthly))
+        .await
+        .unwrap();
+    assert_eq!(usage.used, 1);
+    assert!(!usage.exhausted);
+    assert!(probe
+        .cooldown_remaining("tavily-1")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn payment_required_without_balance_endpoint_recovers_after_successful_probe() {
+    let tav = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(402).set_body_string("credits exhausted"))
+        .expect(1)
+        .mount(&tav)
+        .await;
+
+    let db = temp_db("real_402_probe");
+    let _ = std::fs::remove_file(&db);
+    let store = Store::open(db.to_str().expect("temp path")).await.unwrap();
+    let router = Router::from_parts(
+        vec![bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    assert!(matches!(
+        router
+            .call(
+                Capability::Search,
+                &query("first"),
+                Some(ProviderKind::Tavily)
+            )
+            .await,
+        Err(fetchira::Error::QuotaExceeded(_))
+    ));
+
+    tav.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(2)
+        .mount(&tav)
+        .await;
+    expire_cooldown(&db, "tavily-1").await;
+    let recovered = router
+        .call(
+            Capability::Search,
+            &query("probe"),
+            Some(ProviderKind::Tavily),
+        )
+        .await
+        .unwrap();
+    assert!(recovered.text.contains("TAVILY_HIT"));
+    let next = router
+        .call(
+            Capability::Search,
+            &query("normal route"),
+            Some(ProviderKind::Tavily),
+        )
+        .await
+        .unwrap();
+    assert!(next.text.contains("TAVILY_HIT"));
 }
 
 // (c) usage() reports correct remaining after recorded calls.
@@ -228,6 +577,46 @@ async fn forced_off_route_provider_works() {
     assert!(out.text.contains("SCRAPED_OK"), "got: {}", out.text);
 }
 
+#[tokio::test]
+async fn image_only_read_is_a_success() {
+    let steel = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/screenshot"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"PNG"))
+        .expect(1)
+        .mount(&steel)
+        .await;
+
+    let store = fresh_store("image_read").await;
+    let probe = store.clone();
+    let router = Router::from_parts(
+        vec![bucket(ProviderKind::Steel, &steel.uri(), "steel-1")],
+        store,
+    );
+    let out = router
+        .call(
+            Capability::Read,
+            &Input {
+                url: Some("https://example.com".into()),
+                mode: Some("screenshot".into()),
+                ..Default::default()
+            },
+            Some(ProviderKind::Steel),
+        )
+        .await
+        .unwrap();
+    assert!(out.text.is_empty());
+    assert_eq!(out.image.unwrap().mime, "image/png");
+    assert_eq!(
+        probe
+            .usage_for("steel-1", &period_key(Reset::Monthly))
+            .await
+            .unwrap()
+            .used,
+        1
+    );
+}
+
 // (g) forcing a provider that can't serve the capability -> clear error, no dial-out.
 #[tokio::test]
 async fn forced_unsupported_errors() {
@@ -282,7 +671,9 @@ async fn forced_exhausted_errors() {
 
     let store = fresh_store("d").await;
     let period = period_key(Reset::Monthly);
-    store.mark_exhausted("exa", "exa-1", &period).await.unwrap();
+    // The configured ceiling is permanent for this period and must not be cleared by the
+    // provider-side 402 recovery path.
+    store.record("exa", "exa-1", &period, 100).await.unwrap();
 
     let buckets = vec![
         bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1"),

@@ -36,6 +36,20 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
 
+      - name: Build native image for runtime checks
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: fetchira:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check hosted auth, assets and headful Chrome
+        run: python3 tests/hosted_container.py fetchira:smoke
+
       - uses: docker/build-push-action@v6
         with:
           context: .

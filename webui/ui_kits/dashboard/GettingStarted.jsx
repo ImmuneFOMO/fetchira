@@ -6,57 +6,98 @@ function apiGet(path) {
     .catch(() => null);
 }
 
+const SKILL_VARIANTS = [
+  { value: 'both', label: 'MCP + CLI', hint: 'Use MCP when it is available; fall back to the fetchira command.' },
+  { value: 'mcp', label: 'MCP only', hint: 'Install the agent instructions for MCP tools only.' },
+  { value: 'cli', label: 'CLI only', hint: 'Use the fetchira command from the shell.' },
+  { value: 'skip', label: 'Skip skill', hint: 'Register selected MCP targets without installing an agent skill.' },
+];
+
 // Detect coding tools, preselect the not-yet-registered ones, register on click.
 // Shared by the onboarding step and the checklist modal.
 function InstallTargets({ onDone }) {
   const [targets, setTargets] = React.useState(null);
   const [picked, setPicked] = React.useState({});
+  const [skill, setSkill] = React.useState('both');
+  const [installedSkill, setInstalledSkill] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [results, setResults] = React.useState(null);
 
   const [failed, setFailed] = React.useState(false);
-  React.useEffect(() => {
+  const loadTargets = () => {
+    setFailed(false);
     apiGet('/api/install/targets').then((d) => {
       if (!d) { setFailed(true); return; }
       const ts = d.targets || [];
       setTargets(ts);
+      const installed = Array.isArray(d.skills) ? d.skills : [d.skill];
+      const current = ['both', 'mcp', 'cli', 'skip'].find((value) => installed.includes(value));
+      if (current) setInstalledSkill(current);
       const pre = {};
       ts.forEach((t) => { if (t.present && !t.installed) pre[t.name] = true; });
       setPicked(pre);
     });
-  }, []);
+  };
+  React.useEffect(loadTargets, []);
 
   const install = async () => {
     const names = Object.keys(picked).filter((n) => picked[n]);
-    if (!names.length || busy) return;
+    if (busy || (skill === 'skip' && !names.length)) return;
     setBusy(true);
-    try { setResults((await window.apiPost('/api/install', { targets: names })).results); }
-    catch (e) { setResults([{ name: 'error', ok: false, msg: String(e.message || e) }]); }
-    setBusy(false);
-    if (onDone) onDone();
+    setResults(null);
+    try {
+      const data = await window.apiPost('/api/install', { targets: names, skill });
+      setResults(data.results || []);
+      if (onDone && (data.results || []).every((r) => r.ok)) onDone();
+    } catch (e) {
+      setResults([{ name: 'error', ok: false, msg: String(e.message || e) }]);
+    } finally { setBusy(false); }
   };
+
+  const retry = () => { if (!busy) install(); };
+  const failedResult = results && results.some((r) => !r.ok);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {failed ? (
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)' }}>couldn't reach the server — reload this tab</span>
+        <React.Fragment>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)' }}>couldn't reach the server</span>
+          <Button variant="ghost" onClick={loadTargets} style={{ alignSelf: 'flex-start' }}>Try again</Button>
+        </React.Fragment>
       ) : !targets ? (
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-faint)' }}>detecting tools…</span>
       ) : results ? (
         <React.Fragment>
           {results.map((r) => (
-            <div key={r.name} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+            <div key={r.name} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
               <span style={{ color: r.ok ? 'var(--green-500)' : 'var(--red-500)' }}>{r.ok ? '✓' : '✗'}</span>
               <span style={{ color: 'var(--text-hi)', width: 120, flexShrink: 0 }}>{r.name}</span>
-              <span style={{ color: 'var(--text-faint)', wordBreak: 'break-all' }}>{r.msg}</span>
+              <span style={{ color: 'var(--text-mid)', overflowWrap: 'anywhere', minWidth: 0 }}>{r.msg}</span>
             </div>
           ))}
-          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>
-            Restart the tool (or reload its MCP servers) to pick up fetchira.
-          </span>
+          {failedResult ? (
+            <Button variant="ghost" onClick={retry} style={{ alignSelf: 'flex-start' }}>Try again</Button>
+          ) : (
+            <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>
+              Restart the agent to load the selected integrations.
+            </span>
+          )}
         </React.Fragment>
       ) : (
         <React.Fragment>
+          <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 7 }}>
+            <legend style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-mid)', marginBottom: 2 }}>Agent skill</legend>
+            {SKILL_VARIANTS.map((variant) => (
+              <label key={variant.value} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-hi)' }}>
+                <input type="radio" name="fetchira-skill" value={variant.value} checked={skill === variant.value}
+                  onChange={() => setSkill(variant.value)} />
+                <span>
+                  <span style={{ display: 'block' }}>{variant.label}{installedSkill === variant.value ? ' · installed' : ''}</span>
+                  <span style={{ display: 'block', color: 'var(--text-mid)', fontSize: 12 }}>{variant.hint}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
           {targets.map((t) => (
             <label key={t.name} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)' }}>
               <input type="checkbox" checked={!!picked[t.name]}
@@ -67,7 +108,7 @@ function InstallTargets({ onDone }) {
             </label>
           ))}
           <Button variant="primary" onClick={install}
-            disabled={busy || !Object.keys(picked).some((n) => picked[n])}
+            disabled={busy || (skill === 'skip' && !Object.keys(picked).some((n) => picked[n]))}
             style={{ alignSelf: 'flex-start' }}>
             {busy ? 'Registering…' : 'Register'}
           </Button>
@@ -81,7 +122,7 @@ window.InstallTargets = InstallTargets;
 function InstallPanel({ onClose }) {
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(4,5,8,0.66)', backdropFilter: 'blur(3px)', padding: 20 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 440, maxWidth: '100%' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 440, maxWidth: '100%', maxHeight: 'calc(100dvh - 40px)', overflowY: 'auto' }}>
         <Card raised pad={0} style={{ borderRadius: 'var(--r-lg)' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border-hairline)' }}>
             <span style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 600, color: 'var(--text-hi)' }}>Register in your coding tools</span>
@@ -112,7 +153,11 @@ function LocalGettingStarted() {
   React.useEffect(() => {
     if (hidden) return;
     apiGet('/api/install/targets').then((d) => {
-      if (d) setRegistered(d.targets.some((t) => t.installed));
+      if (d) {
+        const skillInstalled = (Array.isArray(d.skills) ? d.skills : [d.skill])
+          .some((skill) => ['both', 'mcp', 'cli'].includes(skill));
+        setRegistered(skillInstalled || (d.targets || []).some((t) => t.installed));
+      }
     });
   }, [installOpen]); // re-check after the install panel closes
 

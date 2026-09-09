@@ -172,20 +172,25 @@ pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String,
     let updates = crate::web::set_cookie_updates(resp.headers());
     let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
         .map_err(|_| Error::BadResponse("parallel"))?;
-    Ok((parse_balance(&v), updates))
+    Ok((parse_balance(&v)?, updates))
 }
 
 // No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
 // ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
 // draining bar, add it if the flat gauge proves confusing.
-fn parse_balance(v: &Value) -> LiveBalance {
-    let cents = v["balance"].as_i64().unwrap_or(0);
-    let searches = cents * 2;
-    LiveBalance {
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
+    if !v["balanceError"].is_null() {
+        return Err(Error::BadResponse("parallel"));
+    }
+    let cents = v["balance"]
+        .as_i64()
+        .ok_or(Error::BadResponse("parallel"))?;
+    let searches = cents.saturating_mul(2);
+    Ok(LiveBalance {
         remaining: searches,
         total: searches,
         usd: Some(cents as f64 / 100.0),
-    }
+    })
 }
 
 /// Account email via the dashboard's cookie session (same origin as `balance`, api-key can't read
@@ -270,8 +275,10 @@ mod tests {
 
     #[test]
     fn cents_to_searches() {
-        let b = parse_balance(&json!({"balance": 1690, "balanceError": null}));
+        let b = parse_balance(&json!({"balance": 1690, "balanceError": null})).unwrap();
         assert_eq!(b.remaining, 3380); // $16.90 / $0.005
         assert_eq!(b.total, 3380);
+        assert!(parse_balance(&json!({"balanceError": null})).is_err());
+        assert!(parse_balance(&json!({"balance": 1690, "balanceError": "stale"})).is_err());
     }
 }

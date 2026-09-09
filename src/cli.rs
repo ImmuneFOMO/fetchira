@@ -33,8 +33,13 @@ fn cfg_path(home: &Path) -> PathBuf {
     home.join("fetchira.toml")
 }
 
-pub(crate) fn load_or_empty(home: &Path) -> Config {
-    config::load(cfg_path(home).to_str().unwrap_or_default()).unwrap_or_default()
+pub(crate) fn load_or_empty(home: &Path) -> anyhow::Result<Config> {
+    let path = cfg_path(home);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 async fn open_store(home: &Path, cfg: &Config) -> anyhow::Result<Store> {
@@ -44,6 +49,12 @@ async fn open_store(home: &Path, cfg: &Config) -> anyhow::Result<Store> {
 fn parse_provider(s: &str) -> anyhow::Result<ProviderKind> {
     serde_json::from_value::<ProviderKind>(serde_json::Value::String(s.to_string()))
         .with_context(|| format!("unknown provider '{s}' (try `fetchira providers`)"))
+}
+
+pub fn flag_value(args: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<String> {
+    args.next()
+        .filter(|s| !s.starts_with("--") && !s.is_empty())
+        .with_context(|| format!("missing value for {flag}"))
 }
 
 fn prompt(msg: &str) -> String {
@@ -85,7 +96,7 @@ pub fn providers() {
 }
 
 pub async fn list(home: &Path) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     if cfg.accounts.is_empty() {
         println!("No accounts yet. Run `fetchira` to set up in the dashboard.");
         return Ok(());
@@ -244,18 +255,24 @@ async fn remaining_cell(store: &Store, a: &Account, ready: bool) -> String {
         .to_string()
 }
 
-/// "{remaining}/{quota}/day" deep-research budget for authorized web providers, "-" otherwise.
+/// Deep-research budget with its configured reset period, or "-" until authorized.
 async fn research_cell(store: &Store, a: &Account, ready: bool) -> String {
     if !ready || !a.provider.is_web() {
         return "-".to_string();
     }
     let dq = a.dr_quota.unwrap_or_else(|| a.provider.dr_quota());
-    let period = period_key(a.dr_reset.unwrap_or_else(|| a.provider.dr_reset()));
+    let reset = a.dr_reset.unwrap_or_else(|| a.provider.dr_reset());
+    let period = period_key(reset);
     let dr = store
         .remaining(&format!("{}#dr", a.label), dq, &period)
         .await
         .unwrap_or(dq);
-    format!("{dr}/{dq}/day")
+    let unit = match reset {
+        crate::config::Reset::Daily => "day",
+        crate::config::Reset::Monthly => "month",
+        crate::config::Reset::Once => "one-time",
+    };
+    format!("{dr}/{dq}/{unit}")
 }
 
 pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -266,9 +283,9 @@ pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
     let (mut label, mut key, mut proxy) = (None, None, None);
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "--label" => label = args.next(),
-            "--key" => key = args.next(),
-            "--proxy" => proxy = args.next(),
+            "--label" => label = Some(flag_value(&mut args, &flag)?),
+            "--key" => key = Some(flag_value(&mut args, &flag)?),
+            "--proxy" => proxy = Some(flag_value(&mut args, &flag)?),
             other => bail!("unknown flag '{other}'"),
         }
     }
@@ -288,7 +305,7 @@ pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
     println!("added {} account '{label}'", kind.as_str());
 
     if kind.is_web() {
-        let cfg = load_or_empty(home);
+        let cfg = load_or_empty(home)?;
         // Best-effort: the account is saved either way. On a headless box with no browser,
         // tell the user how to attach the session by hand.
         match do_login(home, &cfg, kind, &label, None).await {
@@ -320,7 +337,7 @@ pub fn add_account(
 ) -> anyhow::Result<String> {
     let proxy = proxy.and_then(|p| parse_proxy_arg(&p));
     validate_proxy(&proxy)?;
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     let label = match label {
         Some(l) if !l.trim().is_empty() => l.trim().to_string(),
         _ => default_label(&cfg, kind),
@@ -371,7 +388,7 @@ pub async fn remove(home: &Path, label: Option<String>) -> anyhow::Result<()> {
 
 /// Delete an account (config + its DB rows). Shared by the CLI and the web UI.
 pub async fn remove_account(home: &Path, label: &str) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     let before = cfg.accounts.len();
     cfg.accounts.retain(|a| a.label != label);
     if cfg.accounts.len() == before {
@@ -392,7 +409,7 @@ pub async fn rename_account(home: &Path, old: &str, new: &str) -> anyhow::Result
     if new == old {
         return Ok(());
     }
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     if !cfg.accounts.iter().any(|a| a.label == old) {
         bail!("no account labelled '{old}'");
     }
@@ -435,7 +452,7 @@ fn validate_proxy(proxy: &Option<String>) -> anyhow::Result<()> {
 /// the next call. Shared by the CLI and web UI.
 pub async fn set_proxy(home: &Path, label: &str, proxy: Option<String>) -> anyhow::Result<()> {
     validate_proxy(&proxy)?;
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     let acc = cfg
         .accounts
         .iter_mut()
@@ -455,6 +472,9 @@ pub async fn proxy(home: &Path, mut args: impl Iterator<Item = String>) -> anyho
     let val = args
         .next()
         .context("usage: fetchira proxy <label> <direct|pool|URL>")?;
+    if args.next().is_some() {
+        bail!("usage: fetchira proxy <label> <direct|pool|URL>");
+    }
     let proxy = parse_proxy_arg(&val);
     set_proxy(home, &label, proxy.clone()).await?;
     println!(
@@ -479,7 +499,7 @@ pub fn set_priority(home: &Path, cap: Capability, list: Vec<ProviderKind>) -> an
     if let Some(p) = list.iter().find(|p| !p.supports(cap)) {
         bail!("{} does not serve {}", p.as_str(), cap.as_str());
     }
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     cfg.priority.set(cap, list);
     config::save(&cfg, &cfg_path(home))?;
     Ok(())
@@ -508,7 +528,7 @@ pub fn priority(home: &Path, args: impl Iterator<Item = String>) -> anyhow::Resu
             .collect::<Vec<_>>()
     });
     let Some(cap_arg) = vals.next() else {
-        print_priority(&load_or_empty(home));
+        print_priority(&load_or_empty(home)?);
         return Ok(());
     };
     let cap = Capability::parse(&cap_arg)
@@ -531,7 +551,7 @@ pub fn priority(home: &Path, args: impl Iterator<Item = String>) -> anyhow::Resu
             .collect::<anyhow::Result<Vec<_>>>()?,
     };
     set_priority(home, cap, list)?;
-    print_priority(&load_or_empty(home));
+    print_priority(&load_or_empty(home)?);
     println!("\nsaved — applies to newly started fetchira processes (restart running MCP servers to pick it up)");
     Ok(())
 }
@@ -543,7 +563,7 @@ pub async fn identity_dup(
     kind: ProviderKind,
     label: &str,
 ) -> anyhow::Result<Option<(String, String)>> {
-    let store = open_store(home, &load_or_empty(home)).await?;
+    let store = open_store(home, &load_or_empty(home)?).await?;
     let Some(id) = store.load_identity(label).await? else {
         return Ok(None);
     };
@@ -585,7 +605,7 @@ pub async fn record_identity(
 /// Fill in missing emails for already-logged-in web/dashboard accounts so the UI shows them
 /// without a forced re-login.
 pub async fn backfill_identities(home: &Path, store: &Store) {
-    let cfg = load_or_empty(home);
+    let Ok(cfg) = load_or_empty(home) else { return };
     for a in &cfg.accounts {
         if !(a.provider.is_web() || a.provider.balance_session()) {
             continue;
@@ -606,7 +626,7 @@ pub async fn capture_login(
     label: &str,
     browser: Option<String>,
 ) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     let acc = cfg
         .accounts
         .iter()
@@ -622,7 +642,7 @@ pub async fn capture_login(
 /// Validate a session JSON captured elsewhere (cookies exported from any browser) and store it
 /// for an existing web account. Returns the cookie count. Shared by the CLI and web UI.
 pub async fn set_session(home: &Path, label: &str, raw: &str) -> anyhow::Result<usize> {
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     let acc = cfg
         .accounts
         .iter()
@@ -658,7 +678,7 @@ pub async fn session(home: &Path, mut args: impl Iterator<Item = String>) -> any
     let mut file = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
-            "--file" | "-f" => file = args.next(),
+            "--file" | "-f" => file = Some(flag_value(&mut args, &flag)?),
             other => bail!("unknown flag '{other}'"),
         }
     }
@@ -676,7 +696,7 @@ pub async fn session(home: &Path, mut args: impl Iterator<Item = String>) -> any
 /// `fetchira login <provider|label>` — capture (or re-capture) a web session.
 pub async fn login(home: &Path, who: Option<String>) -> anyhow::Result<()> {
     let who = who.context("usage: fetchira login <provider|label>")?;
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     let acc = cfg
         .accounts
         .iter()
@@ -793,7 +813,7 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
     print!("\x1B[2J\x1B[H");
     let _ = std::io::stdout().flush();
     println!("fetchira — your providers\n");
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     if cfg.accounts.is_empty() {
         println!("  (nothing configured yet — pick \"Add an account\" below)\n");
         return Ok(());
@@ -830,7 +850,7 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
 }
 
 async fn add_flow(home: &Path) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     let choices: Vec<PChoice> = ProviderKind::all().iter().map(|&k| PChoice(k)).collect();
     let kind = match Select::new("Add which provider? (Esc to cancel)", choices).prompt() {
         Ok(c) => c.0,
@@ -942,7 +962,7 @@ fn host_port(url: &str) -> String {
 
 /// Pick an account, then a new proxy (direct / sticky pool / specific). Esc keeps the current one.
 async fn proxy_flow(home: &Path) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     if cfg.accounts.is_empty() {
         pause("No accounts yet.");
         return Ok(());
@@ -979,7 +999,7 @@ async fn proxy_flow(home: &Path) -> anyhow::Result<()> {
 }
 
 async fn login_flow(home: &Path) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home);
+    let cfg = load_or_empty(home)?;
     let web: Vec<(ProviderKind, String)> = cfg
         .accounts
         .iter()
@@ -1006,7 +1026,7 @@ async fn login_flow(home: &Path) -> anyhow::Result<()> {
 }
 
 async fn remove_flow(home: &Path) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home);
+    let mut cfg = load_or_empty(home)?;
     if cfg.accounts.is_empty() {
         pause("Nothing to remove.");
         return Ok(());
@@ -1038,7 +1058,7 @@ async fn remove_flow(home: &Path) -> anyhow::Result<()> {
 
 // ── Register the MCP server into coding tools ──────────────────────────────────────────────
 
-/// `fetchira install` — pick coding tools and write fetchira's MCP-server registration into each.
+/// `fetchira install` — independently choose MCP registrations and an agent skill.
 pub fn install_tools() -> anyhow::Result<()> {
     let bin = std::env::current_exe()?.to_string_lossy().into_owned();
     let targets = mcp_target_list();
@@ -1054,7 +1074,7 @@ pub fn install_tools() -> anyhow::Result<()> {
         .collect();
 
     let chosen = match MultiSelect::new(
-        "Register fetchira's MCP server into which tools? (Space toggles, Enter confirms)",
+        "Register MCP in which tools? (Space toggles, empty selection skips MCP)",
         opts.clone(),
     )
     .with_default(&preselect)
@@ -1062,6 +1082,18 @@ pub fn install_tools() -> anyhow::Result<()> {
     {
         Ok(c) => c,
         Err(_) => return Ok(()),
+    };
+
+    let skill = match Select::new(
+        "Agent skill?",
+        vec!["both (MCP + CLI)", "MCP only", "CLI only", "skip"],
+    )
+    .prompt()
+    {
+        Ok("both (MCP + CLI)") => crate::skills::SkillVariant::Both,
+        Ok("MCP only") => crate::skills::SkillVariant::Mcp,
+        Ok("CLI only") => crate::skills::SkillVariant::Cli,
+        _ => crate::skills::SkillVariant::Skip,
     };
 
     println!();
@@ -1072,7 +1104,23 @@ pub fn install_tools() -> anyhow::Result<()> {
             Err(e) => println!("  ✗ {:14} {e}", targets[idx].name),
         }
     }
-    println!("\nRestart the tool (or reload its MCP servers) to pick up fetchira.");
+    if skill != crate::skills::SkillVariant::Skip {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .context("HOME is required to install agent skills")?;
+        for result in crate::skills::install_skills(&home, skill) {
+            println!(
+                "  {} {:14} skill: {}",
+                if result.ok { "✓" } else { "✗" },
+                result.name,
+                result.msg
+            );
+        }
+    }
+    if !chosen.is_empty() || skill != crate::skills::SkillVariant::Skip {
+        println!("\nRestart the agent to load the selected integrations.");
+    }
     Ok(())
 }
 
@@ -1095,7 +1143,11 @@ pub(crate) fn mcp_target_list() -> Vec<McpTarget> {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| h.join(".config"));
-    mcp_targets(&h, &appsup, &xdg)
+    let codex = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| h.join(".codex"));
+    mcp_targets(&h, &appsup, &xdg, &codex)
 }
 
 fn has_fetchira(path: &Path) -> bool {
@@ -1111,7 +1163,7 @@ fn mac_or_xdg(mac: PathBuf, xdg: PathBuf) -> PathBuf {
     }
 }
 
-fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path) -> Vec<McpTarget> {
+fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path, codex: &Path) -> Vec<McpTarget> {
     let p = |rel: &str| h.join(rel);
     let claude_dir = mac_or_xdg(appsup.join("Claude"), xdg.join("Claude"));
     let code_dir = mac_or_xdg(appsup.join("Code"), xdg.join("Code"));
@@ -1124,9 +1176,9 @@ fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path) -> Vec<McpTarget> {
         },
         McpTarget {
             name: "Codex CLI",
-            present: p(".codex").exists() || which("codex"),
-            installed: has_fetchira(&p(".codex/config.toml")),
-            run: boxed(p(".codex/config.toml"), reg_codex),
+            present: codex.exists() || which("codex"),
+            installed: has_fetchira(&codex.join("config.toml")),
+            run: boxed(codex.join("config.toml"), reg_codex),
         },
         McpTarget {
             name: "OpenCode",
@@ -1181,21 +1233,23 @@ fn which(cmd: &str) -> bool {
         .any(|d| Path::new(d).join(cmd).exists())
 }
 
-fn read_obj(path: &Path) -> serde_json::Map<String, Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
+fn read_obj(path: &Path) -> anyhow::Result<serde_json::Map<String, Value>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("parse {} (expected a JSON object)", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 fn write_obj(path: &Path, obj: &serde_json::Map<String, Value>) -> anyhow::Result<String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(
+    config::write_atomic(
         path,
-        serde_json::to_string_pretty(&Value::Object(obj.clone()))?,
+        &serde_json::to_string_pretty(&Value::Object(obj.clone()))?,
+        false,
     )?;
     Ok(format!("wrote {}", path.display()))
 }
@@ -1203,61 +1257,64 @@ fn write_obj(path: &Path, obj: &serde_json::Map<String, Value>) -> anyhow::Resul
 /// The common `{ "mcpServers": { "fetchira": { "command": … } } }` shape (Cursor, Windsurf,
 /// Gemini CLI, Claude Desktop).
 fn reg_mcp_servers(path: &Path, bin: &str) -> anyhow::Result<String> {
-    let mut obj = read_obj(path);
+    let mut obj = read_obj(path)?;
     let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    if let Some(m) = servers.as_object_mut() {
-        m.insert("fetchira".into(), json!({ "command": bin }));
-    }
+    let m = servers
+        .as_object_mut()
+        .context("mcpServers must be a JSON object")?;
+    m.insert("fetchira".into(), json!({ "command": bin }));
     write_obj(path, &obj)
 }
 
 /// VS Code: `{ "servers": { "fetchira": { "type": "stdio", "command": … } } }`.
 fn reg_vscode(path: &Path, bin: &str) -> anyhow::Result<String> {
-    let mut obj = read_obj(path);
+    let mut obj = read_obj(path)?;
     let servers = obj.entry("servers").or_insert_with(|| json!({}));
-    if let Some(m) = servers.as_object_mut() {
-        m.insert(
-            "fetchira".into(),
-            json!({ "type": "stdio", "command": bin }),
-        );
-    }
+    let m = servers
+        .as_object_mut()
+        .context("servers must be a JSON object")?;
+    m.insert(
+        "fetchira".into(),
+        json!({ "type": "stdio", "command": bin }),
+    );
     write_obj(path, &obj)
 }
 
 /// OpenCode: `{ "mcp": { "fetchira": { "type": "local", "command": [bin], "enabled": true } } }`.
 fn reg_opencode(path: &Path, bin: &str) -> anyhow::Result<String> {
-    let mut obj = read_obj(path);
+    let mut obj = read_obj(path)?;
     obj.entry("$schema")
         .or_insert_with(|| json!("https://opencode.ai/config.json"));
     let mcp = obj.entry("mcp").or_insert_with(|| json!({}));
-    if let Some(m) = mcp.as_object_mut() {
-        m.insert(
-            "fetchira".into(),
-            json!({ "type": "local", "command": [bin], "enabled": true }),
-        );
-    }
+    let m = mcp.as_object_mut().context("mcp must be a JSON object")?;
+    m.insert(
+        "fetchira".into(),
+        json!({ "type": "local", "command": [bin], "enabled": true }),
+    );
     write_obj(path, &obj)
 }
 
 /// Codex CLI: TOML `[mcp_servers.fetchira] command = … args = []`.
 fn reg_codex(path: &Path, bin: &str) -> anyhow::Result<String> {
-    let mut doc: toml::Table = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default();
+    let mut doc: toml::Table = match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
     let servers = doc
         .entry("mcp_servers")
         .or_insert_with(|| toml::Value::Table(Default::default()));
-    if let Some(t) = servers.as_table_mut() {
-        let mut e = toml::Table::new();
-        e.insert("command".into(), toml::Value::String(bin.to_string()));
-        e.insert("args".into(), toml::Value::Array(vec![]));
-        t.insert("fetchira".into(), toml::Value::Table(e));
-    }
+    let t = servers
+        .as_table_mut()
+        .context("mcp_servers must be a TOML table")?;
+    let mut e = toml::Table::new();
+    e.insert("command".into(), toml::Value::String(bin.to_string()));
+    e.insert("args".into(), toml::Value::Array(vec![]));
+    t.insert("fetchira".into(), toml::Value::Table(e));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, toml::to_string_pretty(&doc)?)?;
+    config::write_atomic(path, &toml::to_string_pretty(&doc)?, false)?;
     Ok(format!("wrote {}", path.display()))
 }
 
@@ -1286,10 +1343,16 @@ pub fn help() {
          USAGE:\n  \
            fetchira [serve]              run the MCP server (stdio) — the default when piped\n  \
            fetchira ui                  open the local web dashboard (http://127.0.0.1:7878); also the default in a terminal\n  \
+           fetchira search QUERY...     one-shot search; MCP optional\n  \
+           fetchira read URL            read a page as markdown\n  \
+           fetchira deep_research QUERY...  deep research (alias dr)\n  \
+           fetchira browser URL         read a JS-heavy page\n  \
+           fetchira create_image PROMPT...  generate/edit an image; prints saved file path\n  \
+           fetchira usage [PROVIDER]    compact quota snapshot or full provider sheet\n  \
            fetchira setup               guided setup: pick providers, enter keys, log in\n  \
            fetchira providers           list all available providers\n  \
            fetchira list                show your accounts + remaining quota\n  \
-           fetchira install             register the MCP server into your coding tools (Claude Code, Codex, …)\n  \
+           fetchira install             choose MCP registrations and an agent skill (both / MCP / CLI / skip)\n  \
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
@@ -1306,6 +1369,9 @@ pub fn help() {
            fetchira update              download & install the latest release (--when-idle: after all instances exit)\n  \
            fetchira --version           print the installed version\n  \
            fetchira help                this message\n\n\
+         Tool flags: fetchira <command> --help. Flags may mix with words; -- ends flags.\n\
+         Quote queries, file paths, and session tokens. ChatGPT research/image poll sessions may omit text.\n\
+         CLI tools require local accounts; hosted endpoints remain MCP-only.\n\n\
          Config lives in $FETCHIRA_HOME or ~/.config/fetchira (fetchira.toml + usage.db)."
     );
 }
@@ -1343,16 +1409,18 @@ mod tests {
             ),
             ("VS Code", native.join("Code/User/mcp.json")),
             ("OpenCode", xdg.join("opencode/opencode.json")),
+            ("Codex CLI", home.join("custom-codex/config.toml")),
         ] {
-            let targets = mcp_targets(&home, &appsup, &xdg);
+            let targets = mcp_targets(&home, &appsup, &xdg, &home.join("custom-codex"));
             let target = targets.iter().find(|t| t.name == name).unwrap();
             assert!(!target.installed);
             (target.run)("/bin/fetchira").unwrap();
             assert!(has_fetchira(&path), "wrong config path for {name}");
-            let targets = mcp_targets(&home, &appsup, &xdg);
+            let targets = mcp_targets(&home, &appsup, &xdg, &home.join("custom-codex"));
             let target = targets.iter().find(|t| t.name == name).unwrap();
             assert!(target.present && target.installed);
         }
+        assert!(!home.join(".codex/config.toml").exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -1370,6 +1438,40 @@ mod tests {
         assert_eq!(v["mcpServers"]["other"]["command"], "x"); // untouched
         assert_eq!(v["theme"], "dark"); // untouched
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_configs_are_reported_and_preserved() {
+        let home =
+            std::env::temp_dir().join(format!("fetchira-config-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("fetchira.toml");
+        std::fs::write(&path, "broken = [").unwrap();
+        assert!(add_account(
+            &home,
+            ProviderKind::Serper,
+            None,
+            Some("test-key".into()),
+            None
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken = [");
+        for (register, contents) in [
+            (
+                reg_mcp_servers as fn(&Path, &str) -> anyhow::Result<String>,
+                "{invalid",
+            ),
+            (reg_mcp_servers, "{\"mcpServers\":[]}"),
+            (reg_vscode, "{\"servers\":null}"),
+            (reg_opencode, "{\"mcp\":false}"),
+            (reg_codex, "broken = ["),
+            (reg_codex, "mcp_servers = 42"),
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(register(&path, "/bin/fetchira").is_err(), "{contents}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

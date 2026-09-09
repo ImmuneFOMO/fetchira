@@ -40,9 +40,42 @@ struct HostedState {
     store: Store,
     active: Arc<tokio::sync::Semaphore>,
     key_active: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
+    mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
     updates: crate::hosted_update::UpdateState,
     home: PathBuf,
     db_path: String,
+}
+
+/// Kept in the HTTP request extensions. RMCP moves those extensions into the JSON-RPC request,
+/// so permits live until the tool handler finishes even when its SSE response is disconnected.
+struct HostedRequestLease {
+    store: Store,
+    request_id: String,
+    key_id: String,
+    started: Instant,
+    status: Option<tokio::sync::oneshot::Receiver<u16>>,
+    _global: tokio::sync::OwnedSemaphorePermit,
+    _key: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for HostedRequestLease {
+    fn drop(&mut self) {
+        let Some(status) = self.status.take() else {
+            return;
+        };
+        let store = self.store.clone();
+        let request_id = self.request_id.clone();
+        let key_id = self.key_id.clone();
+        let latency_ms = self.started.elapsed().as_millis() as i64;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let status = status.await.unwrap_or(500) as i64;
+                let _ = store
+                    .log_request(&request_id, &key_id, status, latency_ms)
+                    .await;
+            });
+        }
+    }
 }
 
 pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
@@ -65,6 +98,7 @@ pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
         store: store.clone(),
         active: Arc::new(tokio::sync::Semaphore::new(64)),
         key_active: Default::default(),
+        mcp_sessions: Default::default(),
         updates: Default::default(),
         home: home.to_path_buf(),
         db_path,
@@ -1024,28 +1058,49 @@ async fn admin_create_challenge(
         )
             .into_response();
     }
-    let provider = req.provider.or_else(|| {
-        config::load_hosted(&st.home.join("fetchira.toml"))
-            .ok()
-            .and_then(|c| {
-                c.accounts
-                    .iter()
-                    .find(|a| a.label == req.label)
-                    .map(|a| a.provider)
-            })
-    });
+    let cfg = match config::load_hosted(&st.home.join("fetchira.toml")) {
+        Ok(cfg) => cfg,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let requested_label = req.label.trim();
+    let existing = cfg
+        .accounts
+        .iter()
+        .find(|account| !requested_label.is_empty() && account.label == requested_label);
+    let provider = req
+        .provider
+        .or_else(|| existing.map(|account| account.provider));
     let Some(provider) = provider else {
         return (StatusCode::BAD_REQUEST, "provider is required").into_response();
     };
-    let label = if req.label.trim().is_empty() {
-        match cli::add_account(&st.home, provider, None, None, None) {
-            Ok(label) => label,
+    if !provider.is_web() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "provider account must support browser sessions",
+        )
+            .into_response();
+    }
+    if existing.is_some_and(|account| account.provider != provider) {
+        return (StatusCode::BAD_REQUEST, "provider does not match account").into_response();
+    }
+    let (label, created) = if let Some(account) = existing {
+        (account.label.clone(), false)
+    } else {
+        match cli::add_account(
+            &st.home,
+            provider,
+            (!requested_label.is_empty()).then_some(requested_label),
+            None,
+            None,
+        ) {
+            Ok(label) => (label, true),
             Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
-    } else {
-        req.label.trim().to_string()
     };
     if label.len() > 80 {
+        if created {
+            let _ = cli::remove_account(&st.home, &label).await;
+        }
         return (StatusCode::BAD_REQUEST, "invalid label").into_response();
     }
     let mut raw = [0_u8; 24];
@@ -1058,7 +1113,12 @@ async fn admin_create_challenge(
         .await
     {
         Ok(()) => Json(json!({"ok":true,"challenge":id,"label":label,"provider":provider.as_str(),"expiresAt":expires})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            if created {
+                let _ = cli::remove_account(&st.home, &label).await;
+            }
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 
@@ -1165,6 +1225,20 @@ async fn challenge_upload(
     };
     if consumed || expires <= Utc::now().to_rfc3339() {
         return (StatusCode::GONE, "challenge expired or already consumed").into_response();
+    }
+    let cfg = match config::load_hosted(&st.home.join("fetchira.toml")) {
+        Ok(cfg) => cfg,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let account_matches = cfg.accounts.iter().any(|account| {
+        account.label == label && account.provider.is_web() && account.provider.as_str() == provider
+    });
+    if !account_matches {
+        return (
+            StatusCode::CONFLICT,
+            "challenge account changed; create a new challenge",
+        )
+            .into_response();
     }
     if crate::web::parse_session(&req.session).cookies.is_empty() {
         return (StatusCode::BAD_REQUEST, "session contains no cookies").into_response();
@@ -1561,10 +1635,6 @@ async fn admin_start_update(
         )
             .into_response();
     }
-    if st.updates.start().await.is_none() {
-        return (StatusCode::CONFLICT, "update already running").into_response();
-    }
-    let when_idle = req.when_idle || req.mode.as_deref() == Some("idle");
     if req
         .mode
         .as_deref()
@@ -1572,6 +1642,10 @@ async fn admin_start_update(
     {
         return (StatusCode::BAD_REQUEST, "mode must be now or idle").into_response();
     }
+    if st.updates.start().await.is_none() {
+        return (StatusCode::CONFLICT, "update already running").into_response();
+    }
+    let when_idle = req.when_idle || req.mode.as_deref() == Some("idle");
     let _ = st
         .store
         .log_audit(
@@ -1685,7 +1759,7 @@ pub async fn create_key(
     name: String,
     accounts_manage: bool,
 ) -> anyhow::Result<()> {
-    let cfg = cli::load_or_empty(home);
+    let cfg = cli::load_or_empty(home)?;
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let mut scopes = vec![auth::Scope::Mcp, auth::Scope::UsageRead];
     if accounts_manage {
@@ -1747,6 +1821,19 @@ async fn authenticate(
         )
             .into_response();
     }
+    let session = match req.headers().get("mcp-session-id") {
+        Some(value) => match value.to_str() {
+            Ok(value) => Some(value.to_string()),
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid MCP session ID").into_response(),
+        },
+        None => None,
+    };
+    if let Some(session) = &session {
+        let sessions = state.mcp_sessions.lock().await;
+        if sessions.get(session) != Some(&key.id) {
+            return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
+        }
+    }
     let request_id = format!(
         "{}-{}",
         std::process::id(),
@@ -1768,9 +1855,17 @@ async fn authenticate(
         .await
     {
         Ok(Some(q)) => q,
-        Ok(None) => return rate_limited("quota exceeded", 60, None),
+        Ok(None) => {
+            if let Some(response) = forward_cancellation(req, next).await {
+                return response;
+            }
+            return rate_limited("quota exceeded", 60, None);
+        }
         Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "quota store unavailable").into_response()
+            if let Some(response) = forward_cancellation(req, next).await {
+                return response;
+            }
+            return (StatusCode::SERVICE_UNAVAILABLE, "quota store unavailable").into_response();
         }
     };
     let global_permit = match tokio::time::timeout(
@@ -1782,6 +1877,9 @@ async fn authenticate(
         Ok(Ok(p)) => p,
         _ => {
             let _ = state.store.cancel_request(&request_id, &key.id).await;
+            if let Some(response) = forward_cancellation(req, next).await {
+                return response;
+            }
             return rate_limited("server concurrency limit exceeded", 1, Some(quota));
         }
     };
@@ -1801,26 +1899,70 @@ async fn authenticate(
         Err(_) => {
             drop(global_permit);
             let _ = state.store.cancel_request(&request_id, &key.id).await;
+            if let Some(response) = forward_cancellation(req, next).await {
+                return response;
+            }
             return rate_limited("API key concurrency limit exceeded", 1, Some(quota));
         }
     };
     let _ = state.store.touch_api_key(&key.id).await;
     let started = Instant::now();
+    let method = req.method().clone();
+    let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+    req.extensions_mut().insert(Arc::new(HostedRequestLease {
+        store: state.store.clone(),
+        request_id: request_id.clone(),
+        key_id: key.id.clone(),
+        started,
+        status: Some(status_rx),
+        _global: global_permit,
+        _key: key_permit,
+    }));
     let response = crate::usage::HOSTED_REQUEST_ID
         .scope(request_id.clone(), next.run(req))
         .await;
-    drop(key_permit);
-    drop(global_permit);
-    let _ = state
-        .store
-        .log_request(
-            &request_id,
-            &key.id,
-            response.status().as_u16() as i64,
-            started.elapsed().as_millis() as i64,
-        )
-        .await;
+    if response.status().is_success() {
+        if let Some(created) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            state
+                .mcp_sessions
+                .lock()
+                .await
+                .insert(created.to_string(), key.id.clone());
+        } else if method == axum::http::Method::DELETE {
+            if let Some(session) = &session {
+                state.mcp_sessions.lock().await.remove(session);
+            }
+        }
+    }
+    let _ = status_tx.send(response.status().as_u16());
     with_rate_limit_headers(response, quota)
+}
+
+/// Cancellation must be able to reach RMCP even when the request it targets owns the last permit.
+/// We only inspect the body on the already-rejected path, so normal calls are never buffered here.
+async fn forward_cancellation(req: Request<axum::body::Body>, next: Next) -> Option<Response> {
+    if req.method() != axum::http::Method::POST {
+        return None;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024).await.ok()?;
+    let cancellation = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()?
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        == Some("notifications/cancelled");
+    if cancellation {
+        Some(
+            next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                .await,
+        )
+    } else {
+        None
+    }
 }
 
 fn rate_limited(
@@ -1867,8 +2009,71 @@ mod tests {
     use axum::middleware;
     use axum::routing::get;
     use chrono::{Duration as ChronoDuration, FixedOffset};
+    use rmcp::{
+        model::{
+            CallToolResult, ClientNotification, ClientRequest, Content, Implementation,
+            ServerCapabilities, ServerInfo, ServerResult,
+        },
+        service::{NotificationContext, RequestContext},
+        ErrorData, RoleServer, Service,
+    };
     use serde_json::json;
     use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct BlockingMcp {
+        started: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+        cancelled: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl Service<RoleServer> for BlockingMcp {
+        async fn handle_request(
+            &self,
+            request: ClientRequest,
+            context: RequestContext<RoleServer>,
+        ) -> Result<ServerResult, ErrorData> {
+            match request {
+                ClientRequest::InitializeRequest(_) => {
+                    Ok(ServerResult::InitializeResult(self.get_info()))
+                }
+                ClientRequest::CallToolRequest(_) => {
+                    let parts = context
+                        .extensions
+                        .get::<http::request::Parts>()
+                        .expect("RMCP request parts");
+                    assert!(parts.extensions.get::<Arc<HostedRequestLease>>().is_some());
+                    self.started.add_permits(1);
+                    let result = crate::mcp::cancellable(context.ct.clone(), async {
+                        let permit = self.release.acquire().await;
+                        permit.expect("release semaphore").forget();
+                        ServerResult::CallToolResult(CallToolResult::success(vec![Content::text(
+                            "done",
+                        )]))
+                    })
+                    .await;
+                    if result.is_err() {
+                        self.cancelled.add_permits(1);
+                    }
+                    result
+                }
+                _ => Err(ErrorData::internal_error("unexpected test request", None)),
+            }
+        }
+
+        async fn handle_notification(
+            &self,
+            _notification: ClientNotification,
+            _context: NotificationContext<RoleServer>,
+        ) -> Result<(), ErrorData> {
+            Ok(())
+        }
+
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(Implementation::new("hosted-test", "1"))
+        }
+    }
 
     async fn fresh_store(name: &str) -> Store {
         let path = std::env::temp_dir().join(format!(
@@ -1885,16 +2090,8 @@ mod tests {
             .expect("open store")
     }
 
-    async fn test_app(store: Store, key: &auth::ApiKey, concurrency_limit: i64) -> axum::Router {
-        store
-            .save_api_key_with_limits(key, "test", 10, 0, 0, concurrency_limit, None)
-            .await
-            .expect("save key");
-        test_app_with_state(store)
-    }
-
-    fn test_app_with_state(store: Store) -> axum::Router {
-        let state = HostedState {
+    fn test_state(store: Store) -> HostedState {
+        HostedState {
             router: Arc::new(tokio::sync::RwLock::new(Arc::new(Router::from_parts(
                 vec![],
                 store.clone(),
@@ -1902,10 +2099,15 @@ mod tests {
             store,
             active: Arc::new(tokio::sync::Semaphore::new(64)),
             key_active: Default::default(),
+            mcp_sessions: Default::default(),
             updates: Default::default(),
             home: std::env::temp_dir(),
             db_path: String::new(),
-        };
+        }
+    }
+
+    fn test_app_with_state(store: Store) -> axum::Router {
+        let state = test_state(store);
         axum::Router::new()
             .route(
                 "/mcp/slow",
@@ -1919,6 +2121,68 @@ mod tests {
             .route("/usage", get(key_usage))
             .layer(middleware::from_fn_with_state(state.clone(), authenticate))
             .with_state(state)
+    }
+
+    fn test_mcp_app(store: Store, service: BlockingMcp) -> (axum::Router, HostedState) {
+        let state = test_state(store);
+        let mcp = StreamableHttpService::new(
+            move || Ok(service.clone()),
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig::default(),
+        );
+        let app = axum::Router::new()
+            .nest_service("/mcp", mcp)
+            .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+            .with_state(state.clone());
+        (app, state)
+    }
+
+    async fn initialize_mcp(client: &reqwest::Client, url: &str, key: &str) -> String {
+        let response = client
+            .post(url)
+            .bearer_auth(key)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .json(&json!({
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"initialize",
+                "params":{
+                    "protocolVersion":"2025-11-25",
+                    "capabilities":{},
+                    "clientInfo":{"name":"hosted-test","version":"1"}
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = response
+            .headers()
+            .get("mcp-session-id")
+            .expect("session header")
+            .to_str()
+            .expect("session text")
+            .to_string();
+        let _ = response.bytes().await.expect("initialize body");
+        session
+    }
+
+    fn mcp_post(
+        client: &reqwest::Client,
+        url: &str,
+        key: &str,
+        session: &str,
+        body: serde_json::Value,
+    ) -> reqwest::RequestBuilder {
+        client
+            .post(url)
+            .bearer_auth(key)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-11-25")
+            .header("mcp-session-id", session)
+            .json(&body)
     }
 
     #[test]
@@ -1941,14 +2205,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn key_concurrency_rejection_does_not_consume_quota() {
-        let store = fresh_store("key_concurrency").await;
-        let key = auth::generate_key(
-            "key-concurrency",
-            [auth::Scope::Mcp, auth::Scope::UsageRead],
-        )
-        .expect("key");
-        let app = test_app(store.clone(), &key, 1).await;
+    async fn rmcp_permit_tracks_tool_after_disconnect_and_releases_on_cancel() {
+        let store = fresh_store("rmcp_lease").await;
+        let key = auth::generate_key("rmcp-lease", [auth::Scope::Mcp]).expect("key");
+        store
+            .save_api_key_with_limits(&key, "test", 3, 0, 0, 1, None)
+            .await
+            .expect("save key");
+        let service = BlockingMcp {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancelled: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let (app, state) = test_mcp_app(store.clone(), service.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -1957,34 +2226,223 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test app");
         });
         let client = reqwest::Client::new();
-        let url = format!("http://{addr}/mcp/slow");
-        let auth = format!("Bearer {}", key.plaintext);
+        let url = format!("http://{addr}/mcp");
+        let session = initialize_mcp(&client, &url, &key.plaintext).await;
 
-        let first = client
-            .get(&url)
-            .header("authorization", auth.clone())
-            .send();
-        let second = client.get(&url).header("authorization", auth).send();
-        let (r1, r2) = tokio::join!(first, second);
-        let r1 = r1.expect("first response");
-        let r2 = r2.expect("second response");
-        server.abort();
+        let first = mcp_post(
+            &client,
+            &url,
+            &key.plaintext,
+            &session,
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow","arguments":{}}}),
+        )
+        .send()
+        .await
+        .expect("first tool response");
+        assert_eq!(first.status(), StatusCode::OK);
+        service
+            .started
+            .acquire()
+            .await
+            .expect("tool started")
+            .forget();
+        drop(first);
 
-        // Both futures start in join!, so either request can acquire the permit first.
-        let mut statuses = [r1.status(), r2.status()];
-        statuses.sort();
-        assert_eq!(statuses, [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]);
-
-        let rows = store
+        let blocked = mcp_post(
+            &client,
+            &url,
+            &key.plaintext,
+            &session,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow","arguments":{}}}),
+        )
+        .send()
+        .await
+        .expect("blocked response");
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(store
             .recent_requests(Some(&key.id), 10)
             .await
-            .expect("recent requests");
+            .expect("active request rows")
+            .iter()
+            .any(|row| row["status"] == 0));
+
+        service.release.add_permits(1);
+        for _ in 0..100 {
+            let available = state
+                .key_active
+                .lock()
+                .await
+                .get(&key.id)
+                .is_some_and(|sem| sem.available_permits() == 1);
+            if available {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
-            rows.len(),
+            state
+                .key_active
+                .lock()
+                .await
+                .get(&key.id)
+                .expect("key semaphore")
+                .available_permits(),
             1,
-            "429 concurrency rejection must not spend quota"
+            "permit must release when the disconnected tool finishes"
         );
-        assert_eq!(rows[0]["status"], 200);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let rows = store
+                    .recent_requests(Some(&key.id), 10)
+                    .await
+                    .expect("completed request rows");
+                if rows.iter().all(|row| row["status"] != 0) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("request accounting completes with the handler");
+
+        let cancelled_call = mcp_post(
+            &client,
+            &url,
+            &key.plaintext,
+            &session,
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slow","arguments":{}}}),
+        )
+        .send()
+        .await
+        .expect("cancelled tool response");
+        service
+            .started
+            .acquire()
+            .await
+            .expect("second tool started")
+            .forget();
+        drop(cancelled_call);
+        let cancellation = mcp_post(
+            &client,
+            &url,
+            &key.plaintext,
+            &session,
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4,"reason":"test"}}),
+        )
+        .send()
+        .await
+        .expect("cancellation response");
+        assert!(cancellation.status().is_success());
+        service
+            .cancelled
+            .acquire()
+            .await
+            .expect("handler cancelled")
+            .forget();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state
+                    .key_active
+                    .lock()
+                    .await
+                    .get(&key.id)
+                    .is_some_and(|sem| sem.available_permits() == 1)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("permit released after cancellation");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rmcp_session_is_bound_to_the_key_that_initialized_it() {
+        let store = fresh_store("rmcp_key_session").await;
+        let key_a = auth::generate_key("key-a", [auth::Scope::Mcp]).expect("key A");
+        let key_b = auth::generate_key("key-b", [auth::Scope::Mcp]).expect("key B");
+        for key in [&key_a, &key_b] {
+            store
+                .save_api_key_with_limits(key, "test", 20, 0, 0, 1, None)
+                .await
+                .expect("save key");
+        }
+        let service = BlockingMcp {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            cancelled: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let (app, _) = test_mcp_app(store.clone(), service);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/mcp");
+        let session = initialize_mcp(&client, &url, &key_a.plaintext).await;
+
+        let post = mcp_post(
+            &client,
+            &url,
+            &key_b.plaintext,
+            &session,
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow","arguments":{}}}),
+        )
+        .send()
+        .await
+        .expect("cross-key POST");
+        let get = client
+            .get(&url)
+            .bearer_auth(&key_b.plaintext)
+            .header("accept", "text/event-stream")
+            .header("mcp-protocol-version", "2025-11-25")
+            .header("mcp-session-id", &session)
+            .send()
+            .await
+            .expect("cross-key GET");
+        let delete = client
+            .delete(&url)
+            .bearer_auth(&key_b.plaintext)
+            .header("mcp-protocol-version", "2025-11-25")
+            .header("mcp-session-id", &session)
+            .send()
+            .await
+            .expect("cross-key DELETE");
+        assert_eq!(post.status(), StatusCode::NOT_FOUND);
+        assert_eq!(get.status(), StatusCode::NOT_FOUND);
+        assert_eq!(delete.status(), StatusCode::NOT_FOUND);
+        assert!(store
+            .recent_requests(Some(&key_b.id), 10)
+            .await
+            .expect("key B requests")
+            .is_empty());
+
+        let deleted = client
+            .delete(&url)
+            .bearer_auth(&key_a.plaintext)
+            .header("mcp-protocol-version", "2025-11-25")
+            .header("mcp-session-id", &session)
+            .send()
+            .await
+            .expect("owner DELETE");
+        assert!(deleted.status().is_success());
+        let stale = mcp_post(
+            &client,
+            &url,
+            &key_a.plaintext,
+            &session,
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slow","arguments":{}}}),
+        )
+        .send()
+        .await
+        .expect("stale session");
+        assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+        server.abort();
     }
 
     #[tokio::test]
@@ -2188,6 +2646,7 @@ mod tests {
             store,
             active: Arc::new(tokio::sync::Semaphore::new(64)),
             key_active: Default::default(),
+            mcp_sessions: Default::default(),
             updates: Default::default(),
             home: home.clone(),
             db_path: String::new(),

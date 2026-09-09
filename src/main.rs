@@ -10,6 +10,16 @@ use fetchira::mcp::Fetchira;
 use fetchira::router::Router;
 use fetchira::usage::Store;
 
+fn require_no_args(
+    args: &mut impl Iterator<Item = String>,
+    usage: &'static str,
+) -> anyhow::Result<()> {
+    if args.next().is_some() {
+        anyhow::bail!(usage);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let home = cli::home();
@@ -39,23 +49,61 @@ async fn main() -> anyhow::Result<()> {
         fetchira::update::nudge_if_stale(&home).await;
     }
     match cmd.as_deref() {
-        Some("setup") => return cli::setup(&home).await,
+        Some("setup") => {
+            require_no_args(&mut args, "usage: fetchira setup")?;
+            return cli::setup(&home).await;
+        }
         Some("providers") => {
+            require_no_args(&mut args, "usage: fetchira providers")?;
             cli::providers();
             return Ok(());
         }
-        Some("list") | Some("accounts") | Some("usage") => return cli::list(&home).await,
-        Some("install") => return cli::install_tools(),
+        Some(command @ ("list" | "accounts")) => {
+            require_no_args(&mut args, if command == "list" {
+                "usage: fetchira list"
+            } else {
+                "usage: fetchira accounts"
+            })?;
+            return cli::list(&home).await;
+        }
+        Some(command @ ("search" | "read" | "deep_research" | "dr" | "browser" | "create_image" | "usage")) => {
+            return fetchira::invoke::run(&home, command, args).await;
+        }
+        Some("install") => {
+            require_no_args(&mut args, "usage: fetchira install")?;
+            return cli::install_tools();
+        }
         Some("add") => return cli::add(&home, args).await,
-        Some("remove") | Some("rm") => return cli::remove(&home, args.next()).await,
-        Some("login") => return cli::login(&home, args.next()).await,
+        Some(command @ ("remove" | "rm")) => {
+            let label = args.next();
+            require_no_args(
+                &mut args,
+                if command == "rm" {
+                    "usage: fetchira rm <label>"
+                } else {
+                    "usage: fetchira remove <label>"
+                },
+            )?;
+            return cli::remove(&home, label).await;
+        }
+        Some("login") => {
+            let account = args.next();
+            require_no_args(&mut args, "usage: fetchira login <provider|label>")?;
+            return cli::login(&home, account).await;
+        }
         Some("session") => return cli::session(&home, args).await,
         Some("proxy") => return cli::proxy(&home, args).await,
         Some("priority") => return cli::priority(&home, args),
-        Some("ui") => return fetchira::ui::run(&home).await,
+        Some("ui") => {
+            require_no_args(&mut args, "usage: fetchira ui")?;
+            return fetchira::ui::run(&home).await;
+        }
         Some("server") => {
             let sub = args.next();
             if sub.as_deref() == Some("password") && args.next().as_deref() == Some("hash") {
+                if args.next().is_some() {
+                    anyhow::bail!("usage: fetchira server password hash (password on stdin)");
+                }
                 use std::io::{IsTerminal, Read};
                 let mut password = String::new();
                 if std::io::stdin().is_terminal() {
@@ -70,6 +118,9 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             if sub.as_deref() == Some("healthcheck") {
+                if args.next().is_some() {
+                    anyhow::bail!("usage: fetchira server healthcheck");
+                }
                 let bind = std::env::var("FETCHIRA_HEALTH_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:7879/readyz".into());
                 let response = reqwest::Client::new().get(bind).send().await?;
@@ -99,10 +150,16 @@ async fn main() -> anyhow::Result<()> {
                 let name = name.unwrap_or_else(|| id.clone());
                 return fetchira::hosted::create_key(&home, id, name, accounts_manage).await;
             }
+            if sub.is_some() {
+                anyhow::bail!("usage: fetchira server [healthcheck|password hash|key create ID [NAME] [--accounts-manage]]");
+            }
             let bind = std::env::var("FETCHIRA_BIND").unwrap_or_else(|_| "127.0.0.1:7879".into());
             return fetchira::hosted::run(&home, &bind).await;
         }
         Some("serve-http") => {
+            if args.next().is_some() {
+                anyhow::bail!("usage: fetchira serve-http");
+            }
             let bind = std::env::var("FETCHIRA_BIND").unwrap_or_else(|_| "127.0.0.1:7879".into());
             return fetchira::hosted::run(&home, &bind).await;
         }
@@ -115,13 +172,20 @@ async fn main() -> anyhow::Result<()> {
                 let mut api_key = None;
                 while let Some(flag) = args.next() {
                     match flag.as_str() {
-                        "--key" => api_key = args.next(),
+                        "--key" => {
+                            api_key = Some(cli::flag_value(&mut args, &flag)?);
+                        }
                         _ => anyhow::bail!("usage: fetchira remote set URL [--key API_KEY]"),
                     }
                 }
                 return fetchira::remote::set(&home, endpoint, api_key);
             }
-            Some("check") => return fetchira::remote::check(&home).await,
+            Some("check") => {
+                if args.next().is_some() {
+                    anyhow::bail!("usage: fetchira remote check");
+                }
+                return fetchira::remote::check(&home).await;
+            }
             Some("login") => {
                 let challenge = args
                     .next()
@@ -130,8 +194,14 @@ async fn main() -> anyhow::Result<()> {
                 let mut browser = None;
                 while let Some(flag) = args.next() {
                     match flag.as_str() {
-                        "--file" | "-f" => file = args.next(),
-                        "--browser" => browser = args.next(),
+                        "--file" | "-f" | "--browser" => {
+                            let value = cli::flag_value(&mut args, &flag)?;
+                            if flag == "--browser" {
+                                browser = Some(value);
+                            } else {
+                                file = Some(value);
+                            }
+                        }
                         _ => anyhow::bail!(
                             "usage: fetchira remote login CHALLENGE [--browser chrome|firefox] [--file session.json]"
                         ),
@@ -151,20 +221,27 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await;
             }
-            Some("disconnect") => return fetchira::remote::disconnect(&home),
+            Some("disconnect") => {
+                if args.next().is_some() {
+                    anyhow::bail!("usage: fetchira remote disconnect");
+                }
+                return fetchira::remote::disconnect(&home);
+            }
             _ => anyhow::bail!(
                 "usage: fetchira remote <set URL [--key API_KEY]|check|login CHALLENGE [--file session.json]|disconnect>"
             ),
         },
         Some("--version") | Some("-V") | Some("version") => {
+            require_no_args(&mut args, "usage: fetchira --version")?;
             println!("fetchira {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         Some("help") | Some("-h") | Some("--help") => {
+            require_no_args(&mut args, "usage: fetchira help")?;
             cli::help();
             return Ok(());
         }
-        Some("serve") => {}
+        Some("serve") => require_no_args(&mut args, "usage: fetchira serve")?,
         // Bare `fetchira` from an interactive terminal opens the dashboard; piped
         // (an MCP client) it serves stdio. `FETCHIRA_NO_UI=1` forces serve either way.
         None => {

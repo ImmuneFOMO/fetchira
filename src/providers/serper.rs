@@ -118,18 +118,18 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
         .header("X-API-KEY", key)
         .send()
         .await?;
-    Ok(parse_balance(&check("serper", resp).await?.json().await?))
+    parse_balance(&check("serper", resp).await?.json().await?)
 }
 
-// One-time 2,500-credit grant; bought packs accumulate into the same `balance`, so the gauge ceiling
-// tracks the larger of the grant and the current balance.
-fn parse_balance(v: &Value) -> LiveBalance {
-    let remaining = v["balance"].as_i64().unwrap_or(0);
-    LiveBalance {
+// The endpoint reports remaining credits but no original ceiling, so keep the live gauge honest by
+// using the current balance for both values.
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
+    let remaining = v["balance"].as_i64().ok_or(Error::BadResponse("serper"))?;
+    Ok(LiveBalance {
         remaining,
-        total: remaining.max(2500),
+        total: remaining,
         usd: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -181,8 +181,9 @@ mod tests {
 
     #[test]
     fn parses_account_balance() {
-        let b = parse_balance(&json!({"balance": 1629, "rateLimit": 5}));
+        let b = parse_balance(&json!({"balance": 1629, "rateLimit": 5})).unwrap();
         assert_eq!(b.remaining, 1629);
-        assert_eq!(b.total, 2500);
+        assert_eq!(b.total, 1629);
+        assert!(parse_balance(&json!({"rateLimit": 5})).is_err());
     }
 }

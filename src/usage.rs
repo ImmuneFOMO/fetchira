@@ -1,6 +1,7 @@
 use chrono::{Datelike, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
 use sqlx::Row;
+use std::time::Duration;
 
 use crate::auth;
 use crate::config::Reset;
@@ -124,6 +125,15 @@ fn should_bump_user_version(current: i64, peer_count: usize) -> bool {
     current < SCHEMA && (current == 0 || peer_count == 0)
 }
 
+async fn usage_has_exhausted_kind(pool: &SqlitePool) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_table_info('usage') WHERE name = 'exhausted_kind'",
+    )
+    .fetch_one(pool)
+    .await?
+        != 0)
+}
+
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
@@ -131,7 +141,8 @@ impl Store {
             .create_if_missing(true)
             // WAL so readers don't block the writer when several processes share this file.
             .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal);
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePool::connect_with(opts).await?;
         let v: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
@@ -155,7 +166,30 @@ impl Store {
                 period    TEXT    NOT NULL,
                 used      INTEGER NOT NULL DEFAULT 0,
                 exhausted INTEGER NOT NULL DEFAULT 0,
+                exhausted_kind TEXT,
                 PRIMARY KEY (label, period)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        // Old versions marked both temporary 429s and real 402s as exhausted. New durable marks
+        // carry `quota`; a NULL legacy mark may be cleared only after a fresh positive balance.
+        if !usage_has_exhausted_kind(&pool).await? {
+            if let Err(err) = sqlx::query("ALTER TABLE usage ADD COLUMN exhausted_kind TEXT")
+                .execute(&pool)
+                .await
+            {
+                // Two fresh CLI/MCP processes can both observe the legacy schema. The loser of
+                // the ALTER race is healthy only when the winner really added the column.
+                if !usage_has_exhausted_kind(&pool).await? {
+                    return Err(err.into());
+                }
+            }
+        }
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS provider_cooldown (
+                label TEXT PRIMARY KEY,
+                until_ms INTEGER NOT NULL
             )",
         )
         .execute(&pool)
@@ -879,12 +913,22 @@ impl Store {
             .collect())
     }
 
-    /// Remove all rows for an account (usage, proxy assignment, web session).
+    /// Remove all rows for an account (usage, cooldown, proxy assignment, web session).
     pub async fn delete_account(&self, label: &str) -> Result<()> {
-        sqlx::query("DELETE FROM usage WHERE label = ?")
-            .bind(label)
-            .execute(&self.pool)
-            .await?;
+        for owned in [
+            label.to_string(),
+            format!("{label}#dr"),
+            format!("{label}#image"),
+        ] {
+            sqlx::query("DELETE FROM usage WHERE label = ?")
+                .bind(&owned)
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("DELETE FROM provider_cooldown WHERE label = ?")
+                .bind(&owned)
+                .execute(&self.pool)
+                .await?;
+        }
         sqlx::query("DELETE FROM proxy_assignment WHERE label = ?")
             .bind(label)
             .execute(&self.pool)
@@ -906,15 +950,21 @@ impl Store {
         Ok(())
     }
 
-    /// Move an account's rows to a new label — usage (incl. the `{label}#dr` budget), proxy
+    /// Move an account's rows to a new label — usage (incl. feature budgets), cooldown, proxy
     /// assignment, and web session. The label is the identity key, so a rename must carry these or
     /// the session/quota are orphaned. Mirrors `delete_account`.
     pub async fn rename_account(&self, old: &str, new: &str) -> Result<()> {
         for (from, to) in [
             (old.to_string(), new.to_string()),
             (format!("{old}#dr"), format!("{new}#dr")),
+            (format!("{old}#image"), format!("{new}#image")),
         ] {
             sqlx::query("UPDATE usage SET label = ? WHERE label = ?")
+                .bind(&to)
+                .bind(&from)
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("UPDATE provider_cooldown SET label = ? WHERE label = ?")
                 .bind(&to)
                 .bind(&from)
                 .execute(&self.pool)
@@ -958,6 +1008,115 @@ impl Store {
                 exhausted: false,
             },
         })
+    }
+
+    pub async fn legacy_exhausted(&self, label: &str, period: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM usage
+             WHERE label = ? AND period = ? AND exhausted = 1 AND exhausted_kind IS NULL)",
+        )
+        .bind(label)
+        .bind(period)
+        .fetch_one(&self.pool)
+        .await?
+            != 0)
+    }
+
+    pub async fn quota_exhausted(&self, label: &str, period: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM usage
+             WHERE label = ? AND period = ? AND exhausted = 1 AND exhausted_kind = 'quota')",
+        )
+        .bind(label)
+        .bind(period)
+        .fetch_one(&self.pool)
+        .await?
+            != 0)
+    }
+
+    /// Clear only a pre-upgrade exhaustion mark. The condition prevents a concurrent real 402
+    /// from being undone after the balance request started.
+    pub async fn clear_legacy_exhausted(&self, label: &str, period: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE usage SET exhausted = 0
+             WHERE label = ? AND period = ? AND exhausted = 1 AND exhausted_kind IS NULL",
+        )
+        .bind(label)
+        .bind(period)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn clear_quota_exhausted(&self, label: &str, period: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE usage SET exhausted = 0, exhausted_kind = NULL
+             WHERE label = ? AND period = ? AND exhausted = 1 AND exhausted_kind = 'quota'",
+        )
+        .bind(label)
+        .bind(period)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Persist a provider-request cooldown so CLI invocations and separate MCP processes honor it.
+    pub async fn set_cooldown(&self, label: &str, delay: Duration) -> Result<()> {
+        let millis = delay.as_millis().max(1).min(i64::MAX as u128) as i64;
+        let until = Utc::now().timestamp_millis().saturating_add(millis);
+        sqlx::query(
+            "INSERT INTO provider_cooldown (label, until_ms) VALUES (?, ?)
+             ON CONFLICT(label) DO UPDATE SET
+                until_ms = max(provider_cooldown.until_ms, excluded.until_ms)",
+        )
+        .bind(label)
+        .bind(until)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn cooldown_remaining(&self, label: &str) -> Result<Option<Duration>> {
+        let now = Utc::now().timestamp_millis();
+        let until =
+            sqlx::query_scalar::<_, i64>("SELECT until_ms FROM provider_cooldown WHERE label = ?")
+                .bind(label)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(until) = until else { return Ok(None) };
+        if until > now {
+            return Ok(Some(Duration::from_millis((until - now) as u64)));
+        }
+        Ok(None)
+    }
+
+    /// Claim the next probe window after a persisted cooldown. Keeping expired rows makes this
+    /// atomic across independent CLI, MCP, and hosted processes sharing the database.
+    pub async fn claim_cooldown(&self, label: &str, delay: Duration) -> Result<Option<i64>> {
+        let now = Utc::now().timestamp_millis();
+        let millis = delay.as_millis().max(1).min(i64::MAX as u128) as i64;
+        let until = now.saturating_add(millis);
+        let result = sqlx::query(
+            "INSERT INTO provider_cooldown (label, until_ms) VALUES (?, ?)
+             ON CONFLICT(label) DO UPDATE SET until_ms = excluded.until_ms
+             WHERE provider_cooldown.until_ms <= ?",
+        )
+        .bind(label)
+        .bind(until)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok((result.rows_affected() == 1).then_some(until))
+    }
+
+    /// Release only the probe lease this caller acquired. A newer 429/402 cooldown wins the race.
+    pub async fn release_cooldown(&self, label: &str, until: i64) -> Result<()> {
+        sqlx::query("DELETE FROM provider_cooldown WHERE label = ? AND until_ms = ?")
+            .bind(label)
+            .bind(until)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Atomically claim `cost` units, or return `false` if granting it would exceed `quota` (or the
@@ -1013,8 +1172,9 @@ impl Store {
 
     pub async fn mark_exhausted(&self, provider: &str, label: &str, period: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO usage (provider, label, period, used, exhausted) VALUES (?, ?, ?, 0, 1)
-             ON CONFLICT(label, period) DO UPDATE SET exhausted = 1",
+            "INSERT INTO usage (provider, label, period, used, exhausted, exhausted_kind)
+             VALUES (?, ?, ?, 0, 1, 'quota')
+             ON CONFLICT(label, period) DO UPDATE SET exhausted = 1, exhausted_kind = 'quota'",
         )
         .bind(provider)
         .bind(label)
@@ -1245,7 +1405,8 @@ pub fn period_key(reset: Reset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::sync::Barrier;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1264,6 +1425,92 @@ mod tests {
         assert!(should_bump_user_version(1, 0));
         assert!(!should_bump_user_version(1, 3));
         assert!(!should_bump_user_version(SCHEMA, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_legacy_open_adds_exhaustion_kind_once() {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_migration_race_{}_{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let legacy = SqlitePool::connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE usage (
+                provider TEXT NOT NULL, label TEXT NOT NULL, period TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0, exhausted INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (label, period)
+            )",
+        )
+        .execute(&legacy)
+        .await
+        .unwrap();
+        legacy.close().await;
+
+        let path = Arc::new(path.to_string_lossy().into_owned());
+        let barrier = Arc::new(Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                Store::open(&path).await
+            }));
+        }
+        let mut stores = Vec::new();
+        for task in tasks {
+            stores.push(task.await.unwrap().expect("concurrent Store::open"));
+        }
+        assert!(usage_has_exhausted_kind(&stores[0].pool).await.unwrap());
+        for store in stores {
+            store.pool.close().await;
+        }
+        let _ = std::fs::remove_file(path.as_str());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cooldown_probe_has_one_winner() {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_probe_race_{}_{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        sqlx::query("INSERT INTO provider_cooldown(label, until_ms) VALUES ('account-1', 0)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store
+                    .claim_cooldown("account-1", Duration::from_secs(60))
+                    .await
+                    .unwrap()
+                    .is_some()
+            }));
+        }
+        let mut winners = 0;
+        for task in tasks {
+            winners += usize::from(task.await.unwrap());
+        }
+        assert_eq!(winners, 1);
+        store.pool.close().await;
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

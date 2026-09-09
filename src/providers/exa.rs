@@ -164,20 +164,22 @@ pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String,
     let updates = crate::web::set_cookie_updates(resp.headers());
     let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
         .map_err(|_| Error::BadResponse("exa"))?;
-    Ok((parse_balance(&v), updates))
+    Ok((parse_balance(&v)?, updates))
 }
 
 // No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
 // ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
 // draining bar, add it if the flat gauge proves confusing.
-fn parse_balance(v: &Value) -> LiveBalance {
-    let cents = v["orbCreditsInCents"].as_f64().unwrap_or(0.0);
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
+    let cents = v["orbCreditsInCents"]
+        .as_f64()
+        .ok_or(Error::BadResponse("exa"))?;
     let searches = (cents / 0.7) as i64;
-    LiveBalance {
+    Ok(LiveBalance {
         remaining: searches,
         total: searches,
         usd: Some(cents / 100.0),
-    }
+    })
 }
 
 /// Account email via the same dashboard cookie session as `balance` (masked in the dashboard, and
@@ -205,9 +207,10 @@ mod tests {
 
     #[test]
     fn cents_to_searches() {
-        let b = parse_balance(&json!({"orbCreditsInCents": 1766.99, "orbInvoiceDebt": 0}));
+        let b = parse_balance(&json!({"orbCreditsInCents": 1766.99, "orbInvoiceDebt": 0})).unwrap();
         assert_eq!(b.remaining, 2524); // $17.67 / $0.007
         assert_eq!(b.total, 2524);
+        assert!(parse_balance(&json!({"orbInvoiceDebt": 0})).is_err());
     }
 
     #[test]

@@ -217,17 +217,52 @@ pub fn load(path: &str) -> Result<Config> {
     toml::from_str(&txt).map_err(|e| Error::Config(format!("parse {path}: {e}")))
 }
 
-/// Write the config back (it can hold API keys, so restrict perms to 0600 on unix).
+/// Replace the config atomically; a failed write must preserve the previous credentials.
 pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     let txt = toml::to_string_pretty(cfg).map_err(|e| Error::Config(format!("serialize: {e}")))?;
-    std::fs::write(path, txt)
-        .map_err(|e| Error::Config(format!("write {}: {e}", path.display())))?;
+    write_atomic(path, &txt, true)
+}
+
+/// Shared with MCP registration: protect Fetchira secrets, preserve existing client file modes.
+pub(crate) fn write_atomic(path: &Path, text: &str, private: bool) -> Result<()> {
+    use std::io::Write;
+    // Preserve a user's config symlink while replacing its target.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => path
+            .canonicalize()
+            .map_err(|e| Error::Config(format!("resolve {}: {e}", path.display())))?,
+        Ok(_) => path.to_path_buf(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) => return Err(Error::Config(format!("read {}: {e}", path.display()))),
+    };
+    let temp = target.with_file_name(format!(".fetchira-{}.tmp", rand::random::<u64>()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    let mut file = options
+        .open(&temp)
+        .map_err(|e| Error::Config(format!("create {}: {e}", temp.display())))?;
+    let result = (|| -> std::io::Result<()> {
+        if !private {
+            match std::fs::metadata(&target) {
+                Ok(metadata) => file.set_permissions(metadata.permissions())?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, &target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result.map_err(|e| Error::Config(format!("write {}: {e}", path.display())))
 }
 
 /// Encrypt literal provider credentials before a config is used by the hosted runtime. Existing
@@ -299,6 +334,62 @@ pub fn resolve_secret(s: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_replaces_privately_without_truncating_previous_file() {
+        let home = std::env::temp_dir().join(format!("fetchira-config-{}", rand::random::<u64>()));
+        std::fs::create_dir(&home).unwrap();
+        let path = home.join("fetchira.toml");
+        let previous = home.join("previous.toml");
+        std::fs::write(&path, "original credentials").unwrap();
+        std::fs::hard_link(&path, &previous).unwrap();
+        save(&Config::default(), &path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "original credentials"
+        );
+        assert!(load(path.to_str().unwrap()).is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = home.join("linked.toml");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            save(&Config::default(), &link).unwrap();
+            assert!(std::fs::symlink_metadata(link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            let dangling = home.join("dangling.toml");
+            std::os::unix::fs::symlink(home.join("missing.toml"), &dangling).unwrap();
+            assert!(save(&Config::default(), &dangling).is_err());
+            assert!(std::fs::symlink_metadata(dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+            write_atomic(&path, "client = true", false).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        let blocked = home.join("directory.toml");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(save(&Config::default(), &blocked).is_err());
+        assert!(blocked.is_dir());
+        assert!(!std::fs::read_dir(&home).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn secret_debug_is_redacted() {

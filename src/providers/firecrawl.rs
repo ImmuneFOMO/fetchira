@@ -107,7 +107,8 @@ async fn scrape_markdown(
     Ok(Outcome::new(text, cost))
 }
 
-// LLM-structured extraction over a single url; query doubles as the extraction prompt.
+// Single-page JSON extraction is synchronous. The legacy /extract endpoint returns an async
+// job ID, which cannot satisfy this read operation without a separate polling interface.
 async fn extract(
     base: &str,
     key: &str,
@@ -116,20 +117,27 @@ async fn extract(
 ) -> Result<Outcome> {
     let resp = crate::httptrace::send_traced(
         client
-            .post(format!("{base}/v1/extract"))
+            .post(format!("{base}/v2/scrape"))
             .bearer_auth(key)
             .json(&extract_body(input)?),
     )
     .await?;
     let v: Value = check("firecrawl", resp).await?.json().await?;
+    let data = &v["data"]["json"];
+    if data.is_null() {
+        return Err(Error::BadResponse("firecrawl: missing extracted JSON"));
+    }
     let cost = v["data"]["metadata"]["creditsUsed"].as_i64().unwrap_or(1);
-    Ok(Outcome::new(v["data"].to_string(), cost))
+    Ok(Outcome::new(data.to_string(), cost))
 }
 
 fn extract_body(input: &Input) -> Result<Value> {
     Ok(json!({
-        "urls": [input.need_url()?],
-        "prompt": input.query.as_deref().unwrap_or("Extract the main content of the page as structured data."),
+        "url": input.need_url()?,
+        "formats": [{
+            "type": "json",
+            "prompt": input.query.as_deref().unwrap_or("Extract the main content of the page as structured data."),
+        }],
     }))
 }
 
@@ -150,28 +158,34 @@ async fn crawl(base: &str, key: &str, client: &reqwest::Client, input: &Input) -
     Ok(Outcome::new(text, 1))
 }
 
-/// `GET /v1/team/credit-usage` → monthly credit balance. Free read, reflects paid plans + top-ups.
+/// `GET /v2/team/credit-usage` → monthly credit balance. Free read, reflects paid plans + top-ups.
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
     let resp = client
-        .get(format!("{base}/v1/team/credit-usage"))
+        .get(format!("{base}/v2/team/credit-usage"))
         .bearer_auth(key)
         .send()
         .await?;
-    Ok(parse_balance(
-        &check("firecrawl", resp).await?.json().await?,
-    ))
+    parse_balance(&check("firecrawl", resp).await?.json().await?)
 }
 
-// remaining_credits is the real spendable balance (includes coupons/packs/auto-recharge);
-// plan_credits is only the monthly base, so it seeds the gauge ceiling but can't cap remaining.
-fn parse_balance(v: &Value) -> LiveBalance {
+// remainingCredits is the real spendable balance (includes coupons/packs/auto-recharge);
+// planCredits is only the monthly base, so it seeds the gauge ceiling but can't cap remaining.
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let d = &v["data"];
-    let remaining = d["remaining_credits"].as_i64().unwrap_or(0);
-    LiveBalance {
+    // Snake-case compatibility covers the retired v1 payload in an upgraded local cache/test.
+    let remaining = d["remainingCredits"]
+        .as_i64()
+        .or_else(|| d["remaining_credits"].as_i64())
+        .ok_or(Error::BadResponse("firecrawl"))?;
+    let total = d["planCredits"]
+        .as_i64()
+        .or_else(|| d["plan_credits"].as_i64())
+        .unwrap_or(0);
+    Ok(LiveBalance {
         remaining,
-        total: d["plan_credits"].as_i64().unwrap_or(0).max(remaining),
+        total: total.max(remaining),
         usd: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -214,17 +228,55 @@ mod tests {
             ..Default::default()
         };
         let body = extract_body(&input).unwrap();
-        assert_eq!(body["urls"], json!(["https://example.com"]));
-        assert_eq!(body["prompt"], "list the pricing tiers");
+        assert_eq!(body["url"], "https://example.com");
+        assert_eq!(body["formats"][0]["type"], "json");
+        assert_eq!(body["formats"][0]["prompt"], "list the pricing tiers");
+    }
+
+    #[tokio::test]
+    async fn extract_returns_data_and_rejects_async_or_missing_results() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        let client = reqwest::Client::new();
+        let input = Input {
+            url: Some("https://example.com".into()),
+            mode: Some("extract".into()),
+            ..Input::default()
+        };
+        for (body, expected) in [
+            (
+                json!({"success":true,"data":{"json":{"title":"Example"}}}),
+                Some("{\"title\":\"Example\"}"),
+            ),
+            (json!({"success":true,"id":"pending-job"}), None),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/v2/scrape"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = call(&server.uri(), "test-key", &client, Capability::Read, &input).await;
+            match expected {
+                Some(text) => assert_eq!(result.unwrap().text, text),
+                None => assert!(result.is_err()),
+            }
+        }
     }
 
     #[test]
     fn parses_credit_usage() {
         let b = parse_balance(&json!({
             "success": true,
-            "data": {"remaining_credits": 1357, "plan_credits": 1000},
-        }));
+            "data": {"remainingCredits": 1357, "planCredits": 1000},
+        }))
+        .unwrap();
         assert_eq!(b.remaining, 1357);
         assert_eq!(b.total, 1357); // top-ups exceed the plan base
+        assert!(parse_balance(&json!({"success": true, "data": {}})).is_err());
     }
 }

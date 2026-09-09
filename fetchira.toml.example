@@ -51,7 +51,7 @@ provider = "steel"
 label = "steel-1"
 api_key = "env:STEEL_API_KEY"
 
-# --- Web-session providers (no api_key). Run `fetchira login <provider>` once to capture cookies. ---
+# --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"
 label = "gemini-1"
@@ -59,3 +59,12 @@ label = "gemini-1"
 [[account]]
 provider = "grok_web"
 label = "grok-1"
+
+[[account]]
+provider = "chatgpt_web"
+label = "chatgpt-1"
+
+# Optional: proxy MCP to your private hosted server. One-shot CLI commands require local mode.
+# [remote]
+# endpoint = "https://fetchira.example.com/mcp"
+# api_key = "env:FETCHIRA_API_KEY"

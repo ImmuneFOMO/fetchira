@@ -88,19 +88,17 @@ pub struct Router {
     debug: Option<i64>,
     // ponytail: serialize hosted Chromium work; overlapping browser processes reset CDP on small VPSes.
     browser_gate: Arc<tokio::sync::Mutex<()>>,
-    // Adaptive per-account backoff only after ChatGPT reports a temporary rate limit.
-    chatgpt_backoff: Mutex<HashMap<String, ChatgptBackoff>>,
+    // Legacy 429 marks are reconciled once per process at a time so concurrent callers do not
+    // stampede the provider's balance endpoint during an upgrade.
+    legacy_recovery_gate: tokio::sync::Mutex<()>,
 }
 
 const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(30);
-const CHATGPT_BACKOFF_INITIAL: Duration = Duration::from_secs(5);
-const CHATGPT_BACKOFF_MAX: Duration = Duration::from_secs(300);
-const CHATGPT_RETRY_ATTEMPTS: u8 = 5;
+const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy)]
-struct ChatgptBackoff {
-    until: Instant,
-    delay: Duration,
+struct ExhaustionRecovery {
+    /// A one-shot probe lease is released only after the provider accepts the request.
+    probe_until: Option<i64>,
 }
 
 impl Router {
@@ -114,7 +112,7 @@ impl Router {
             balance: Mutex::new(HashMap::new()),
             debug: None,
             browser_gate: Arc::new(tokio::sync::Mutex::new(())),
-            chatgpt_backoff: Mutex::new(HashMap::new()),
+            legacy_recovery_gate: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -239,49 +237,8 @@ impl Router {
             balance: Mutex::new(HashMap::new()),
             debug,
             browser_gate: Arc::new(tokio::sync::Mutex::new(())),
-            chatgpt_backoff: Mutex::new(HashMap::new()),
+            legacy_recovery_gate: tokio::sync::Mutex::new(()),
         })
-    }
-
-    async fn wait_chatgpt_backoff(&self, account: &str) {
-        let wait = self
-            .chatgpt_backoff
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(account)
-            .map(|state| state.until.saturating_duration_since(Instant::now()))
-            .unwrap_or_default();
-        if !wait.is_zero() {
-            tracing::info!(
-                account,
-                wait_secs = wait.as_secs(),
-                "waiting for ChatGPT rate limit"
-            );
-            tokio::time::sleep(wait).await;
-        }
-    }
-
-    fn backoff_chatgpt(&self, account: &str) {
-        let now = Instant::now();
-        let mut backoff = self
-            .chatgpt_backoff
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let delay = next_chatgpt_delay(backoff.get(account).map(|state| state.delay));
-        backoff.insert(
-            account.to_string(),
-            ChatgptBackoff {
-                until: now + delay,
-                delay,
-            },
-        );
-    }
-
-    fn reset_chatgpt_backoff(&self, account: &str) {
-        self.chatgpt_backoff
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(account);
     }
 
     /// Pick the most-preferred provider with a non-exhausted account (most-remaining
@@ -347,7 +304,7 @@ impl Router {
             None => order_for(cap, input.topic.as_deref(), self.priority.for_cap(cap)),
         };
         for &kind in &order {
-            let mut cands: Vec<(usize, i64, String, i64, String)> = Vec::new();
+            let mut cands: Vec<(usize, i64, String, i64, String, Option<i64>)> = Vec::new();
             for (i, b) in self.buckets.iter().enumerate() {
                 if b.provider.kind != kind {
                     continue;
@@ -357,7 +314,33 @@ impl Router {
                 }
                 let (blabel, bquota, breset) = budget(b, cap);
                 let period = period_key(breset);
+                if let Some(wait) = self.store.cooldown_remaining(&blabel).await? {
+                    last_err = Some(Error::rate_limit_after(
+                        format!(
+                            "{}: account '{}' is cooling down; retry after {}",
+                            kind.as_str(),
+                            b.label,
+                            human_wait(wait)
+                        ),
+                        Some(wait),
+                    ));
+                    continue;
+                }
                 let mut rem = self.store.remaining(&blabel, bquota, &period).await?;
+                let mut probe_until = None;
+                if rem == 0 {
+                    if let Some(recovery) =
+                        self.recover_exhaustion(b, cap, &blabel, &period).await?
+                    {
+                        probe_until = recovery.probe_until;
+                        rem = self.store.remaining(&blabel, bquota, &period).await?;
+                    } else if self.store.cooldown_remaining(&blabel).await?.is_none() {
+                        // A sibling may have cleared the mark from a positive live balance while
+                        // this caller waited on recovery. Re-read only when it left no probe lease;
+                        // an active lease still owns the sole no-balance request.
+                        rem = self.store.remaining(&blabel, bquota, &period).await?;
+                    }
+                }
                 // For tool-gated capabilities, trust the provider's live allowance over the soft
                 // counter: skip a bucket the provider says is exhausted (proactive failover). Only
                 // when auto-choosing — a *forced* provider is attempted regardless (limits may be
@@ -374,12 +357,12 @@ impl Router {
                     }
                 }
                 if rem > 0 {
-                    cands.push((i, rem, blabel, bquota, period));
+                    cands.push((i, rem, blabel, bquota, period, probe_until));
                 }
             }
             cands.sort_by(|a, c| c.1.cmp(&a.1));
 
-            for (i, _rem, blabel, bquota, period) in cands {
+            for (i, _rem, blabel, bquota, period, probe_until) in cands {
                 let b = &self.buckets[i];
                 // Reserve the slot *before* the network call so concurrent tasks can't all clear the
                 // same `remaining > 0` gate and stampede one account past its quota. Claim a nominal
@@ -422,34 +405,8 @@ impl Router {
                     // token, so the turn always goes through the browser. chatgpt_web is still used
                     // for cookie-only reads (limits / tier / identity), which aren't anti-bot gated.
                     Conn::Web(_, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
-                        let mut attempts = 0;
-                        // Image kickoffs never retry in-request: a browser-side rate-limit can be
-                        // returned after the prompt was already submitted, so retrying (or failing
-                        // over to a second account) would duplicate the generation. The `img|poll`
-                        // follow-up resumes the submitted turn instead.
-                        let max_attempts = if matches!(cap, Capability::Image) {
-                            0
-                        } else {
-                            CHATGPT_RETRY_ATTEMPTS
-                        };
-                        loop {
-                            self.wait_chatgpt_backoff(&b.label).await;
-                            let result = {
-                                let _browser_gate = self.browser_gate.lock().await;
-                                providers::chatgpt_browser::run(cookies, cap, input).await
-                            };
-                            let retryable = matches!(
-                                &result,
-                                Err(Error::RateLimit(message))
-                                    if message.contains("wait before retrying")
-                            );
-                            if retryable && attempts < max_attempts {
-                                attempts += 1;
-                                self.backoff_chatgpt(&b.label);
-                                continue;
-                            }
-                            break result;
-                        }
+                        let _browser_gate = self.browser_gate.lock().await;
+                        providers::chatgpt_browser::run(cookies, cap, input).await
                     }
                     Conn::Web(c, _) => b.provider.call_web(c, cap, input, &b.label).await,
                 };
@@ -461,7 +418,7 @@ impl Router {
                     }
                 }
                 let latency = t0.elapsed().as_millis() as i64;
-                let acct = strip_dr(&blabel);
+                let acct = strip_budget(&blabel);
                 let hosted_request = crate::usage::HOSTED_REQUEST_ID
                     .try_with(|id| id.clone())
                     .ok();
@@ -511,16 +468,17 @@ impl Router {
                 }
                 match res {
                     Ok(o) => {
-                        if kind == ProviderKind::ChatgptWeb {
-                            self.reset_chatgpt_backoff(&b.label);
-                        }
                         // An empty read isn't a real answer — refund and fall through so failover
                         // (and the browser escalation below) get a shot instead of returning blank.
-                        if cap == Capability::Read && o.text.trim().is_empty() {
+                        if cap == Capability::Read && o.text.trim().is_empty() && o.image.is_none()
+                        {
                             let _ = self.store.refund(&blabel, &period, 1).await;
                             prev_fail = Some((acct.to_string(), 0));
                             last_err = Some(Error::BadResponse(kind.as_str()));
                             continue;
+                        }
+                        if let Some(until) = probe_until {
+                            let _ = self.store.release_cooldown(&blabel, until).await;
                         }
                         // The reservation already charged 1; settle the rest for costlier calls.
                         if o.cost != 1 {
@@ -578,33 +536,39 @@ impl Router {
                         // The reserved unit never became real usage — give it back.
                         let _ = self.store.refund(&blabel, &period, 1).await;
                         match e {
-                            Error::RateLimit(msg) => {
-                                let temporary_chatgpt_limit = kind == ProviderKind::ChatgptWeb
-                                    && msg.contains("wait before retrying");
-                                if kind == ProviderKind::ChatgptWeb {
-                                    self.backoff_chatgpt(&b.label);
-                                }
-                                if !temporary_chatgpt_limit {
-                                    let _ = self
-                                        .store
-                                        .mark_exhausted(kind.as_str(), &blabel, &period)
-                                        .await;
-                                }
+                            Error::RateLimit {
+                                message,
+                                retry_after,
+                            } => {
+                                let delay = retry_after
+                                    .unwrap_or(DEFAULT_RATE_LIMIT_COOLDOWN)
+                                    .max(Duration::from_secs(1));
+                                let _ = self.store.set_cooldown(&blabel, delay).await;
                                 prev_fail = Some((acct.to_string(), 429));
-                                let hint = if temporary_chatgpt_limit {
-                                    None
-                                } else {
-                                    self.reset_hint(b, cap).await
-                                };
-                                last_err = Some(Error::RateLimit(enrich_limit(msg, hint)));
+                                last_err = Some(Error::rate_limit_after(
+                                    enrich_limit(
+                                        message,
+                                        Some(format!("retry after {}", human_wait(delay))),
+                                    ),
+                                    Some(delay),
+                                ));
                             }
                             Error::QuotaExceeded(msg) => {
                                 let _ = self
                                     .store
                                     .mark_exhausted(kind.as_str(), &blabel, &period)
                                     .await;
+                                // A provider-side 402 is authoritative for now, but a top-up must
+                                // eventually revive even a `Reset::Once` account. One process gets
+                                // a fresh balance check/probe after this persisted interval.
+                                let _ = self
+                                    .store
+                                    .set_cooldown(&blabel, DEFAULT_RATE_LIMIT_COOLDOWN)
+                                    .await;
                                 prev_fail = Some((acct.to_string(), 402));
-                                let hint = self.reset_hint(b, cap).await;
+                                let hint = self.reset_hint(b, cap).await.or_else(|| {
+                                    Some("balance will be rechecked in ~1m".to_string())
+                                });
                                 last_err = Some(Error::QuotaExceeded(enrich_limit(msg, hint)));
                             }
                             Error::Provider { .. }
@@ -649,6 +613,120 @@ impl Router {
             return Err(Error::ProviderForced(f.as_str().to_string()));
         }
         Err(Error::NoCandidate(cap.as_str()))
+    }
+
+    /// Recover legacy 429 marks and periodically recheck confirmed provider quota denials. The
+    /// persisted probe claim prevents separate CLI/MCP/hosted processes from retrying together.
+    async fn recover_exhaustion(
+        &self,
+        b: &Bucket,
+        cap: Capability,
+        label: &str,
+        period: &str,
+    ) -> Result<Option<ExhaustionRecovery>> {
+        if self.store.legacy_exhausted(label, period).await? {
+            return self.recover_legacy_exhaustion(b, label, period).await;
+        }
+        if !self.store.quota_exhausted(label, period).await? {
+            return Ok(None);
+        }
+        let Some(probe_until) = self
+            .store
+            .claim_cooldown(label, DEFAULT_RATE_LIMIT_COOLDOWN)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        // Web quota signals are feature-specific. Prefer a fresh live allowance when available;
+        // otherwise allow the claimed request to probe once after the cooldown.
+        if b.provider.kind.is_web() {
+            if let Some(feature) = live_feature(cap) {
+                match self
+                    .live_limits_for(b, true, true)
+                    .await
+                    .and_then(|limits| limits.remaining(feature))
+                {
+                    Some(remaining) if remaining <= 0 => return Ok(None),
+                    Some(_) => {
+                        let cleared = self.store.clear_quota_exhausted(label, period).await?;
+                        if cleared {
+                            let _ = self.store.release_cooldown(label, probe_until).await;
+                        }
+                        return Ok(cleared.then_some(ExhaustionRecovery { probe_until: None }));
+                    }
+                    None => {}
+                }
+            }
+            let cleared = self.store.clear_quota_exhausted(label, period).await?;
+            return Ok(cleared.then_some(ExhaustionRecovery {
+                probe_until: Some(probe_until),
+            }));
+        }
+
+        // API providers with a balance endpoint recover only from a fresh positive balance. When
+        // no balance can be read, clear the marker for this claimed one-shot provider probe.
+        if let Some(balance) = self.fetch_live_balance(b).await {
+            if let Ok(mut cache) = self.balance.lock() {
+                cache.insert(b.label.clone(), (Instant::now(), Some(balance)));
+            }
+            if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
+                return Ok(None);
+            }
+            let cleared = self.store.clear_quota_exhausted(label, period).await?;
+            if cleared {
+                let _ = self.store.release_cooldown(label, probe_until).await;
+            }
+            return Ok(cleared.then_some(ExhaustionRecovery { probe_until: None }));
+        }
+        let cleared = self.store.clear_quota_exhausted(label, period).await?;
+        Ok(cleared.then_some(ExhaustionRecovery {
+            probe_until: Some(probe_until),
+        }))
+    }
+
+    async fn recover_legacy_exhaustion(
+        &self,
+        b: &Bucket,
+        label: &str,
+        period: &str,
+    ) -> Result<Option<ExhaustionRecovery>> {
+        let _gate = self.legacy_recovery_gate.lock().await;
+        if !self.store.legacy_exhausted(label, period).await? {
+            return Ok(None);
+        }
+        let Some(probe_until) = self
+            .store
+            .claim_cooldown(label, DEFAULT_RATE_LIMIT_COOLDOWN)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // Legacy versions did not distinguish 429 from quota. A web account or an API provider
+        // without readable balance gets one bounded request; a new denial recreates a typed mark.
+        if b.provider.kind.is_web() {
+            let cleared = self.store.clear_legacy_exhausted(label, period).await?;
+            return Ok(cleared.then_some(ExhaustionRecovery {
+                probe_until: Some(probe_until),
+            }));
+        }
+        let Some(balance) = self.fetch_live_balance(b).await else {
+            let cleared = self.store.clear_legacy_exhausted(label, period).await?;
+            return Ok(cleared.then_some(ExhaustionRecovery {
+                probe_until: Some(probe_until),
+            }));
+        };
+        if let Ok(mut cache) = self.balance.lock() {
+            cache.insert(b.label.clone(), (Instant::now(), Some(balance)));
+        }
+        if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
+            return Ok(None);
+        }
+        let cleared = self.store.clear_legacy_exhausted(label, period).await?;
+        if cleared {
+            let _ = self.store.release_cooldown(label, probe_until).await;
+        }
+        Ok(cleared.then_some(ExhaustionRecovery { probe_until: None }))
     }
 
     /// One-shot snapshot that fetches missing live figures inline (CLI `list`/`usage`, MCP usage).
@@ -782,7 +860,7 @@ impl Router {
     /// one (serper/tavily/firecrawl, and steel on paid tiers). Cached 20s; a miss is cached too,
     /// so providers without a usable endpoint (exa/parallel/steel-free) keep the corrected constant.
     async fn patch_live_balance(&self, b: &Bucket, v: &mut UsageView, fetch: bool) {
-        let Conn::Api(c) = &b.conn else { return };
+        let Conn::Api(_) = &b.conn else { return };
         let cached = self.balance.lock().ok().and_then(|m| {
             m.get(&b.label)
                 .map(|(t, bal)| (t.elapsed() < Duration::from_secs(20), *bal))
@@ -792,22 +870,7 @@ impl Router {
             Some((false, bal)) if !fetch => bal,
             None if !fetch => return,
             _ => {
-                // exa/parallel read their $ balance through the dashboard cookie session; the rest
-                // (serper/tavily/firecrawl/steel) through the api-key. The dashboard re-issues a
-                // rolling NextAuth token on every fetch, so re-save it to keep the session alive.
-                let fresh = bounded(async {
-                    match &b.balance_conn {
-                        Some(wc) => match b.provider.live_balance_web(wc).await {
-                            Some((bal, updates)) => {
-                                self.refresh_session(b, &updates).await;
-                                Some(bal)
-                            }
-                            None => None,
-                        },
-                        None => b.provider.live_balance(&b.key, c).await,
-                    }
-                })
-                .await;
+                let fresh = self.fetch_live_balance(b).await;
                 if let Ok(mut m) = self.balance.lock() {
                     m.insert(b.label.clone(), (Instant::now(), fresh));
                 }
@@ -821,6 +884,27 @@ impl Router {
         v.used = (v.quota - v.remaining).max(0);
         v.exhausted = v.remaining <= 0;
         v.usd = bal.usd;
+    }
+
+    /// Fetch a balance without consulting the cache. Recovery uses this so a stale positive cache
+    /// can never clear a durable-looking legacy exhaustion mark.
+    async fn fetch_live_balance(&self, b: &Bucket) -> Option<LiveBalance> {
+        let Conn::Api(c) = &b.conn else { return None };
+        // exa/parallel read their $ balance through the dashboard cookie session; the rest through
+        // the api-key. Dashboard reads may rotate cookies, so persist those updates.
+        bounded(async {
+            match &b.balance_conn {
+                Some(wc) => match b.provider.live_balance_web(wc).await {
+                    Some((balance, updates)) => {
+                        self.refresh_session(b, &updates).await;
+                        Some(balance)
+                    }
+                    None => None,
+                },
+                None => b.provider.live_balance(&b.key, c).await,
+            }
+        })
+        .await
     }
 
     /// Re-save a `balance_session` account's stored cookies with the rolling token the dashboard
@@ -987,9 +1071,12 @@ async fn bounded_browser<T>(fut: impl std::future::Future<Output = Option<T>>) -
         .flatten()
 }
 
-/// Display label for the route log: drop the `#dr` budget suffix back to the account label.
-fn strip_dr(label: &str) -> &str {
-    label.strip_suffix("#dr").unwrap_or(label)
+/// Display label for route/debug logs: drop an internal capability-budget suffix.
+fn strip_budget(label: &str) -> &str {
+    label
+        .strip_suffix("#dr")
+        .or_else(|| label.strip_suffix("#image"))
+        .unwrap_or(label)
 }
 
 /// HTTP-ish status for the debug log: the provider's real code when it has one, else 429/402 for
@@ -997,7 +1084,7 @@ fn strip_dr(label: &str) -> &str {
 fn err_code(e: &Error) -> i64 {
     match e {
         Error::Provider { status, .. } => *status as i64,
-        Error::RateLimit(_) => 429,
+        Error::RateLimit { .. } => 429,
         Error::QuotaExceeded(_) => 402,
         _ => 0,
     }
@@ -1017,8 +1104,8 @@ fn describe_input(cap: Capability, input: &Input) -> String {
     .to_string()
 }
 
-/// (db label, quota, reset) for a bucket+capability. Web deep_research uses a separate
-/// `<label>#dr` daily budget so a research doesn't deplete the chat counter.
+/// (db label, quota, reset) for a bucket+capability. Web deep research and image generation use
+/// separate feature budgets so exhausting one does not disable ordinary chat/search.
 /// The provider feature whose live allowance gates a capability (for proactive failover). `None`
 /// means use only the soft counter (chat/search caps are effectively unlimited on paid tiers).
 fn live_feature(cap: Capability) -> Option<&'static str> {
@@ -1207,18 +1294,24 @@ fn human_dur(secs: i64) -> String {
     }
 }
 
-fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
-    if b.provider.kind.is_web() && cap == Capability::DeepResearch {
-        (format!("{}#dr", b.label), b.dr_quota, b.dr_reset)
-    } else {
-        (b.label.clone(), b.quota, b.reset)
-    }
+fn human_wait(wait: Duration) -> String {
+    let seconds = wait
+        .as_secs()
+        .saturating_add(u64::from(wait.subsec_nanos() != 0));
+    human_dur(seconds.min(i64::MAX as u64) as i64)
 }
 
-fn next_chatgpt_delay(previous: Option<Duration>) -> Duration {
-    previous
-        .map(|delay| (delay * 2).min(CHATGPT_BACKOFF_MAX))
-        .unwrap_or(CHATGPT_BACKOFF_INITIAL)
+fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
+    if b.provider.kind.is_web() {
+        match cap {
+            Capability::DeepResearch => return (format!("{}#dr", b.label), b.dr_quota, b.dr_reset),
+            // Image limits are feature-specific and normally daily. Never let one exhausted image
+            // allowance disable ordinary search/chat on the same web account.
+            Capability::Image => return (format!("{}#image", b.label), b.quota, Reset::Daily),
+            _ => {}
+        }
+    }
+    (b.label.clone(), b.quota, b.reset)
 }
 
 fn image_error_can_failover(err: &Error) -> bool {
@@ -1229,7 +1322,7 @@ fn image_error_can_failover(err: &Error) -> bool {
     )
 }
 
-fn decode_session_affinity(session: &str) -> Option<(String, String)> {
+pub(crate) fn decode_session_affinity(session: &str) -> Option<(String, String)> {
     let (encoded, opaque) = session.split_once(':')?;
     let label = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
@@ -1353,19 +1446,6 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_backoff_doubles_and_caps() {
-        assert_eq!(next_chatgpt_delay(None), Duration::from_secs(5));
-        assert_eq!(
-            next_chatgpt_delay(Some(Duration::from_secs(20))),
-            Duration::from_secs(40)
-        );
-        assert_eq!(
-            next_chatgpt_delay(Some(Duration::from_secs(300))),
-            Duration::from_secs(300)
-        );
-    }
-
-    #[test]
     fn session_affinity_round_trips_arbitrary_labels() {
         let label = "friends: ChatGPT / main";
         let token = format!(
@@ -1392,9 +1472,33 @@ mod tests {
         assert!(!image_error_can_failover(&Error::Timeout(
             "chatgpt_web: browser drive"
         )));
-        assert!(!image_error_can_failover(&Error::RateLimit(
-            "chatgpt_web: wait before retrying".into()
+        assert!(!image_error_can_failover(&Error::rate_limit(
+            "chatgpt_web: wait before retrying"
         )));
+    }
+
+    #[test]
+    fn web_image_budget_is_separate_and_daily() {
+        let bucket = Bucket {
+            provider: Provider::new(ProviderKind::GeminiWeb),
+            conn: Conn::Web(wreq::Client::new(), Vec::new()),
+            key: String::new(),
+            label: "gemini-1".into(),
+            quota: 100,
+            reset: Reset::Monthly,
+            dr_quota: 10,
+            dr_reset: Reset::Daily,
+            proxy: None,
+            balance_conn: None,
+        };
+        assert_eq!(
+            budget(&bucket, Capability::Image),
+            ("gemini-1#image".into(), 100, Reset::Daily)
+        );
+        assert_eq!(
+            budget(&bucket, Capability::Search),
+            ("gemini-1".into(), 100, Reset::Monthly)
+        );
     }
 
     #[tokio::test]

@@ -573,7 +573,7 @@ async fn drive(
     // below is the acceptance signal; do not put a diagnostic Runtime call back on the hot path.
     if !matches!(cap, Capability::Image) {
         if let Some(message) = browser_rate_limit(&mut ws).await? {
-            return Err(Error::RateLimit(message));
+            return Err(Error::rate_limit(message));
         }
     }
 
@@ -656,7 +656,7 @@ async fn drive(
     loop {
         if polls == 0 {
             if let Some(message) = browser_rate_limit(&mut ws).await? {
-                return Err(Error::RateLimit(message));
+                return Err(Error::rate_limit(message));
             }
         }
         polls = (polls + 1) % 5;

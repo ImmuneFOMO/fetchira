@@ -10,6 +10,7 @@ WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends cmake clang perl pkg-config && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY skills ./skills
 COPY --from=webui-build /src/webui ./webui
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

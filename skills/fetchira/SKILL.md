@@ -1,87 +1,50 @@
 ---
 name: fetchira
-description: Web search, page reading, deep research, and headless browsing via the fetchira MCP server. Use whenever you need current/external information — search the web, read a URL as clean markdown, run a multi-source deep research report, or fetch a JS-heavy page. Routes across many free providers (incl. logged-in Gemini/Grok/ChatGPT web sessions) with automatic quota-aware failover.
+description: Use Fetchira for current web search, URL reading, deep research, JavaScript page reading, image generation, and provider quota routing. Prefer its listed MCP tools and use the local CLI only when MCP is unavailable.
 ---
 
-# fetchira
+# Fetchira
 
-fetchira is an MCP server that fronts many web-search/scrape providers behind one quota-aware
-router. Call a capability; it picks the least-exhausted account and fails over on error. Register it
-first (see the project README); these tools then appear as `search`, `read`, `deep_research`,
-`browser`, `create_image`, `usage`.
+Use the transport that is actually available and preserve the exact tool names, arguments, and
+session tokens supplied by the host.
 
-## When to use
-- **`search`** — find current info / answer a factual question. API providers return ranked
-  title+url+snippet; web providers (`gemini_web`/`grok_web`/`chatgpt_web`) return a synthesized
-  answer with sources.
-- **`read`** — fetch ONE known URL as clean markdown (article, doc, README).
-- **`deep_research`** — a thorough, multi-source report with citations. Slower (seconds to minutes).
-- **`browser`** — load a JS-heavy page in a headless browser and get its content.
-- **`create_image`** — generate an image from a prompt via a logged-in web account
-  (gemini_web / grok_web / chatgpt_web). The image is saved to disk and the result names the
-  file — pass `path` (absolute) to save it where you need it, e.g. into the repo.
-- **`usage`** — show remaining free quota per account (and, for chatgpt_web, live per-tool limits).
+## Choose a transport
 
-Prefer `search` for quick facts and `read` when you already have the URL. Reach for `deep_research`
-only when the user wants depth/coverage, not a one-line answer.
+1. If Fetchira MCP tools are listed, call them and do not shell out. This includes namespaced
+   tools such as `mcp__fetchira__search`; use the exact listed schema.
+2. If the host supports deferred tools or tool search, search for/load the Fetchira MCP server or
+   namespace before deciding that MCP is unavailable. Never invent a tool name or schema.
+3. Only when no Fetchira MCP tool is exposed after that discovery, run the `fetchira` executable
+   from `PATH` using the CLI forms below. Quote queries, URLs, paths, and session tokens.
+4. If neither transport is available, report the setup problem instead of guessing.
 
-## Useful args (search / deep_research)
-- `provider` — force a backend (e.g. `"serper"`, `"gemini_web"`, `"chatgpt_web"`). Omit to let
-  the router choose. Web providers give answers+sources; API providers give SERP rows.
-- `model` / `mode` — provider-specific tuning. grok `mode:"auto"|"fast"|"expert"|"heavy"` (search
-  defaults to fast, deep_research to heavy→expert); gemini `model:"pro"|"flash"`; chatgpt_web
-  `model` = a picker model + optional thinking level (see below). Optional; defaults are fine.
-- `session` — continue a previous web-provider conversation **with history**. Every web result ends
-  with `⟦session: <token>⟧`; pass that token back as `session` to ask a follow-up in the same thread.
+Cite inspected source URLs. Empty results and fetched error pages provide no evidence.
 
-## Conversation continuity
-```
-search { query: "...", provider: "chatgpt_web" }     -> answer + ⟦session: chatgpt_web:…⟧
-search { query: "a follow-up question", session: "chatgpt_web:…" }   -> continues the thread
+Read `references.md` only when the request needs provider-specific options, sessions, deep research
+planning or polling, image editing, setup, or error recovery. Defaults for a one-shot search,
+known-URL read, or page read are already covered here.
+
+## CLI fallback
+
+```text
+fetchira search "QUERY" [--provider P] [--max N] [--session S] [--model M] [--mode M] [--topic T] [--recency R] [--domain D]... [--file PATH]...
+fetchira read "URL" [--provider P] [--mode M]
+fetchira deep_research "QUERY" [same search flags] [--depth standard|deep]
+fetchira browser "URL"
+fetchira create_image "PROMPT" [--provider P] [--path DEST] [--session S] [--file PATH]...
+fetchira usage [PROVIDER]
 ```
 
-## Gemini Deep Research (plan → run)
-```
-deep_research { query: "history of X", provider: "gemini_web" }   -> a research PLAN + ⟦session: gemini_web:dr|…⟧
-deep_research { query: "start", session: "gemini_web:dr|…" }      -> runs ~1-3 min, returns the full report
-```
-Send an adjustment instead of `"start"` to refine the plan before running.
+Positional query and prompt words are joined. Flags may be mixed with words; `--` ends flag
+parsing. `deep_research` also accepts `dr`. `usage` is the compact quota snapshot, or a provider
+sheet when given a provider; `list` and `accounts` are the human account tables. CLI mode needs
+local accounts and rejects a configured remote endpoint.
 
-## ChatGPT (`chatgpt_web`): model, thinking level, tools
-`chatgpt_web` is a logged-in ChatGPT session driven through the composer. `search` is a chat turn
-(web search **on by default**; pass `mode:"chat"` to answer from the model alone without browsing).
+ChatGPT research/image polls may omit CLI text when a polling session is supplied. For an MCP
+image poll, use `prompt: ""` if its listed schema requires the field.
 
-Pick the model/level with `model` (case/dots/dashes don't matter — `gpt-5.5` == `gpt-5-5`):
-- **models**: `gpt-5.5`, `gpt-5.4`, `gpt-5.3`, `o3`
-- **thinking level**: `instant`, `medium`, `high` — **varies per model**: gpt-5.5 & gpt-5.4 have all
-  three; gpt-5.3 has instant only; o3 has medium only.
-- pass a model, a level, or both: `model:"gpt-5.4 high"`, `model:"o3"`, or just `model:"high"`
-  (applies to the current model).
-- **Discover the live catalog**: pass an unknown value (e.g. `model:"?"`) — the error lists the
-  actual models and that model's available levels. Don't guess API-style slugs like
-  `gpt-5-5-thinking` — the picker uses the names above.
+For a page that needs JavaScript, use Fetchira `browser`. For actions in the user's existing logged
+in browser, use a listed browser-control capability instead.
 
-`deep_research` with `provider:"chatgpt_web"` runs ChatGPT Deep Research — its own research model, so
-`model` is **ignored**. `create_image` with `provider:"chatgpt_web"` generates an image — **no model
-choice** (uses ChatGPT's own image model). `usage` shows chatgpt_web's live per-tool limits
-(deep_research / image_gen / …) so you can see what's left before calling.
-
-## Helping the user set up
-If a tool fails with "no available account" / "NO KEY", the user hasn't configured providers. You can
-drive setup from a shell (the `fetchira` binary is on PATH):
-- `fetchira providers` — list every provider and whether it needs an API key or a browser login.
-- `fetchira list` — show configured accounts + remaining quota + status.
-- Ask the user which providers they want and for any API keys, then run
-  `fetchira add <provider> --key <KEY>` (key-based) per account. Never omit `--key` — a prompt hangs.
-- For web providers run `fetchira add <provider>` or `fetchira login <provider>` — a browser opens
-  for the user to log in (you can't complete this for them; tell them to finish in the window).
-- `fetchira remove <label>` removes an account.
-
-Do not run bare `fetchira`, `fetchira ui`, `fetchira install`, or `fetchira setup`.
-
-Keys are stored in the user's global config (`~/.config/fetchira`), never in the project.
-
-## Notes
-- Grok (`grok_web`) is rate/anti-bot sensitive and may intermittently 403 — the router fails over.
-- If a web provider returns "session expired / run fetchira login", tell the user to re-run
-  `fetchira login <provider>`; don't retry blindly.
+For sessions, polling, file attachments, setup, and provider options, read the relevant section of
+`references.md` before calling.

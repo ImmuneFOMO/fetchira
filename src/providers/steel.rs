@@ -4,9 +4,8 @@ use serde_json::{json, Value};
 use super::{check, Capability, Input, LiveBalance, OutImage, Outcome};
 use crate::error::{Error, Result};
 
-// ponytail: v1 drives Steel's REST /v1/scrape only (clean markdown of one page). Multi-step
-// CDP/Playwright automation (the `actions` arg) is deferred to v2. /v1/scrape is a flat charge
-// ($0.005 = 1 credit), not metered session time. `mode` switches to /v1/screenshot or /v1/pdf.
+// Browser Tools provide single-page content and artifacts. Multi-step browser control is
+// outside this provider. Proxy bandwidth is billed separately from the per-tool charge.
 pub async fn call(
     base: &str,
     key: &str,
@@ -15,8 +14,8 @@ pub async fn call(
     input: &Input,
 ) -> Result<Outcome> {
     match input.mode.as_deref() {
-        Some("screenshot") => screenshot(base, key, client, input).await,
-        Some("pdf") => pdf(base, key, client, input).await,
+        Some("screenshot") => artifact(base, key, client, input, "screenshot", "image/png").await,
+        Some("pdf") => artifact(base, key, client, input, "pdf", "application/pdf").await,
         Some(other) => Err(Error::Provider {
             provider: "steel",
             status: 400,
@@ -43,47 +42,50 @@ async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
     Ok(Outcome::new(text, 1))
 }
 
-// useProxy + waitFor let bot-protected / JS-heavy pages settle before capture, else the body is empty.
+// Let JavaScript-rendered content settle before capture.
 fn scrape_body(url: &str) -> Value {
-    json!({ "url": url, "format": ["markdown"], "useProxy": true, "waitFor": 1500 })
+    json!({ "url": url, "format": ["markdown"], "useProxy": true, "delay": 1500 })
 }
 
-async fn screenshot(
+async fn artifact(
     base: &str,
     key: &str,
     client: &reqwest::Client,
     input: &Input,
+    format: &str,
+    mime: &str,
 ) -> Result<Outcome> {
     let resp = crate::httptrace::send_traced(
         client
-            .post(format!("{base}/v1/screenshot"))
+            .post(format!("{base}/v1/{format}"))
             .header("steel-api-key", key)
-            .json(&json!({ "url": input.need_url()?, "useProxy": true, "waitFor": 1500 })),
+            .json(&json!({ "url": input.need_url()?, "useProxy": true, "delay": 1500 })),
     )
     .await?;
-    let bytes = check("steel", resp).await?.bytes().await?;
+    let resp = check("steel", resp).await?;
+    // Current Steel returns a hosted artifact URL; older/self-hosted versions return bytes.
+    let resp = if resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"))
+    {
+        let v: Value = resp.json().await?;
+        let url = v["url"]
+            .as_str()
+            .ok_or(Error::BadResponse("steel: missing artifact URL"))?;
+        check("steel", client.get(url).send().await?).await?
+    } else {
+        resp
+    };
+    let bytes = resp.bytes().await?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let mut out = Outcome::new(String::new(), 1);
     out.image = Some(OutImage {
-        mime: "image/png".to_string(),
+        mime: mime.to_string(),
         b64,
     });
     Ok(out)
-}
-
-async fn pdf(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
-    let resp = crate::httptrace::send_traced(
-        client
-            .post(format!("{base}/v1/pdf"))
-            .header("steel-api-key", key)
-            .json(&json!({ "url": input.need_url()?, "useProxy": true, "waitFor": 1500 })),
-    )
-    .await?;
-    let bytes = check("steel", resp).await?.bytes().await?;
-    Ok(Outcome::new(
-        format!("PDF produced ({} bytes)", bytes.len()),
-        1,
-    ))
 }
 
 /// Live credit balance via `POST /v1/usage-details` with the api-key (the gateway routes it as
@@ -97,35 +99,34 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
         .send()
         .await?;
     let v: Value = check("steel", resp).await?.json().await?;
-    Ok(parse_balance(&v))
+    parse_balance(&v)
 }
 
 // Sum the available credit across Stripe credit-balance grants (`value` is in cents), then estimate
 // reads. A read isn't a flat fee: the $0.005 browser-tool charge plus residential-proxy bandwidth
 // (~1 MB of a page at ~$10/GB ≈ $0.0098) — we send `useProxy:true` so pages actually render — puts a
 // typical proxied read near $0.015. So cents ÷ 1.5 (= cents·2/3) reads; it's an estimate (page-weight
-// dependent, screenshot/pdf are cheaper), shown with "≈".
+// dependent), shown with "≈".
 // ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
 // draining bar, add it if the flat gauge proves confusing.
-fn parse_balance(v: &Value) -> LiveBalance {
-    let cents: i64 = v["creditBalanceSummary"]["balances"]
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
+    let balances = v["creditBalanceSummary"]["balances"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|b| {
-                    b["available_balance"]["monetary"]["value"]
-                        .as_i64()
-                        .unwrap_or(0)
-                })
-                .sum()
+        .ok_or(Error::BadResponse("steel: missing credit balance"))?;
+    let cents = balances
+        .iter()
+        .try_fold(0_i64, |sum, b| {
+            b["available_balance"]["monetary"]["value"]
+                .as_i64()
+                .and_then(|value| sum.checked_add(value))
         })
-        .unwrap_or(0);
-    let reads = cents * 2 / 3;
-    LiveBalance {
+        .ok_or(Error::BadResponse("steel: invalid credit balance"))?;
+    let reads = cents.saturating_mul(2) / 3;
+    Ok(LiveBalance {
         remaining: reads,
         total: reads,
         usd: Some(cents as f64 / 100.0),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -137,14 +138,93 @@ mod tests {
         let v = json!({"creditBalanceSummary": {"object": "billing.credit_balance_summary", "balances": [
             {"available_balance": {"monetary": {"currency": "usd", "value": 1000}, "type": "monetary"}}
         ]}});
-        assert_eq!(parse_balance(&v).remaining, 666); // $10.00 / ~$0.015 proxied read
+        assert_eq!(parse_balance(&v).unwrap().remaining, 666); // $10.00 / ~$0.015 proxied read
+        assert!(parse_balance(&json!({})).is_err());
+        assert!(parse_balance(&json!({"creditBalanceSummary":{"balances":[{}]}})).is_err());
     }
 
     #[test]
     fn scrape_body_uses_proxy() {
         let body = scrape_body("https://example.com");
         assert_eq!(body["useProxy"], json!(true));
-        assert_eq!(body["waitFor"], json!(1500));
+        assert_eq!(body["delay"], json!(1500));
         assert_eq!(body["url"], json!("https://example.com"));
+    }
+
+    #[tokio::test]
+    async fn downloads_hosted_artifacts_and_keeps_legacy_bytes() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        let client = reqwest::Client::new();
+        let input = Input {
+            url: Some("https://example.org".into()),
+            ..Input::default()
+        };
+        for (format, mime, bytes) in [
+            ("screenshot", "image/png", b"PNG artifact".as_slice()),
+            ("pdf", "application/pdf", b"%PDF-1.4 artifact".as_slice()),
+        ] {
+            for hosted_url in [true, false] {
+                server.reset().await;
+                let response = if hosted_url {
+                    Mock::given(method("GET"))
+                        .and(path("/artifact"))
+                        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+                        .expect(1)
+                        .mount(&server)
+                        .await;
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"url":format!("{}/artifact", server.uri())}))
+                } else {
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", mime)
+                        .set_body_bytes(bytes)
+                };
+                Mock::given(method("POST"))
+                    .and(path(format!("/v1/{format}")))
+                    .respond_with(response)
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let out = artifact(&server.uri(), "test-key", &client, &input, format, mime)
+                    .await
+                    .unwrap();
+                let img = out.image.unwrap();
+                assert_eq!(img.mime, mime);
+                assert_eq!(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(img.b64)
+                        .unwrap(),
+                    bytes
+                );
+                for request in server.received_requests().await.unwrap() {
+                    if request.method == "GET" {
+                        assert!(!request.headers.contains_key("steel-api-key"));
+                    }
+                }
+            }
+        }
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/pdf"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"url":format!("{}/missing",server.uri())})),
+            )
+            .mount(&server)
+            .await;
+        assert!(artifact(
+            &server.uri(),
+            "test-key",
+            &client,
+            &input,
+            "pdf",
+            "application/pdf"
+        )
+        .await
+        .is_err());
     }
 }

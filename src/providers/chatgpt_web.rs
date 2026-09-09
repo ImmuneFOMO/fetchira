@@ -166,8 +166,19 @@ async fn conduit_prepare(
         .send()
         .await?;
     let status = resp.status().as_u16();
+    let retry_after = crate::error::parse_retry_after(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+    );
     let text = resp.text().await.unwrap_or_default();
     if status >= 400 {
+        if status == 429 {
+            return Err(Error::rate_limit_after(
+                "chatgpt_web: conduit prepare rate limited",
+                retry_after,
+            ));
+        }
         if status == 401 || status == 403 {
             invalidate_ctx().await;
         }
@@ -209,15 +220,24 @@ async fn run_turn(
             // OpenAI rate-limits the completion endpoint with a 403 "unusual activity"; treat it as a
             // (temporary) rate limit so the router fails over instead of nuking the session.
             if body.contains("Unusual activity") || body.contains("try again later") {
-                return Err(Error::RateLimit(
-                    "chatgpt_web: unusual activity, try again later".into(),
+                return Err(Error::rate_limit(
+                    "chatgpt_web: unusual activity, try again later",
                 ));
             }
             chatgpt_sentinel::invalidate().await;
             invalidate_ctx().await;
             return Err(session_err());
         }
-        429 => return Err(Error::RateLimit("chatgpt_web: rate limited".into())),
+        429 => {
+            return Err(Error::rate_limit_after(
+                "chatgpt_web: rate limited",
+                crate::error::parse_retry_after(
+                    resp.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok()),
+                ),
+            ))
+        }
         s if s >= 400 => {
             return Err(Error::Provider {
                 provider: "chatgpt_web",
@@ -262,6 +282,16 @@ async fn get_conversation(
         .send()
         .await?;
     if !resp.status().is_success() {
+        if resp.status().as_u16() == 429 {
+            return Err(Error::rate_limit_after(
+                "chatgpt_web: conversation fetch rate limited",
+                crate::error::parse_retry_after(
+                    resp.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok()),
+                ),
+            ));
+        }
         return Err(Error::Provider {
             provider: "chatgpt_web",
             status: resp.status().as_u16(),

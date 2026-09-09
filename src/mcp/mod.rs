@@ -1,16 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::handler::server::ServerHandler;
-use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, Content, Implementation, ResourceContents, ServerCapabilities, ServerInfo,
+};
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::invoke::{route, save_image, session_footer, CONTINUE, IMAGE_PENDING, IMAGE_READY};
 use crate::providers::{Capability, Input, ProviderKind};
 use crate::router::Router;
 
@@ -27,9 +29,8 @@ pub struct SearchArgs {
     /// Resume token from a previous web-provider result; continues that conversation
     /// on the same provider. Web providers only.
     pub session: Option<String>,
-    /// Web-provider model and/or thinking level (gemini "3.1 pro"/"flash", grok "grok-4",
-    /// chatgpt "gpt-5.4 high"/"o3"/"high" — levels vary per model; an unknown name returns
-    /// the actual options). Ignored by the API providers.
+    /// Web-provider model and/or thinking level. Call usage with that provider for available
+    /// names and levels; omit to use its default. Ignored by the API providers.
     pub model: Option<String>,
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
     /// deep_research to heavy then expert).
@@ -52,7 +53,7 @@ pub struct ResearchArgs {
     #[serde(flatten)]
     pub base: SearchArgs,
     /// Depth: "standard" (default) or "deep" — deep is slower and may spend a paid balance
-    /// (exa deep-reasoning, parallel pro tier, grok heavy).
+    /// (exa deep-reasoning, parallel core processor, grok heavy).
     pub depth: Option<String>,
 }
 
@@ -62,7 +63,7 @@ pub struct ReadArgs {
     pub url: String,
     /// Force a specific provider instead of the priority order.
     pub provider: Option<ProviderKind>,
-    /// Provider-specific escape hatch: firecrawl "crawl"/"extract"/"screenshot", tavily "extract",
+    /// Provider-specific escape hatch: firecrawl "crawl"/"extract", tavily "extract",
     /// serper "scrape", steel "screenshot"/"pdf". Call usage(provider=…) for the exact set.
     pub mode: Option<String>,
 }
@@ -82,8 +83,9 @@ pub struct ImageArgs {
     /// Force a specific provider (gemini_web / grok_web generate in-process over HTTP; chatgpt_web
     /// drives the browser). Otherwise the priority order applies, with failover.
     pub provider: Option<ProviderKind>,
-    /// Absolute path to save the image to. When set, only the path is returned (no inline
-    /// bytes); otherwise it is saved under the fetchira home dir and also returned inline.
+    /// Local destination for stdio or the local hosted bridge. With a path, return the saved
+    /// path without inline bytes; otherwise save under the local Fetchira home and include bytes.
+    /// Direct hosted HTTP returns inline artifacts and never writes caller-supplied server paths.
     pub path: Option<String>,
     /// Resume a ChatGPT image conversation to edit its previous image.
     pub session: Option<String>,
@@ -121,19 +123,21 @@ impl Fetchira {
         cap: Capability,
         input: Input,
         forced: Option<ProviderKind>,
+        write_file: bool,
     ) -> Result<CallToolResult, ErrorData> {
         let router = self.router.read().await.clone();
         Ok(match router.call(cap, &input, forced).await {
             Ok(reply) => {
                 if let Some(img) = reply.image {
-                    return Ok(image_result(img, None, None));
-                }
-                let mut text = reply.text;
-                if let Some(s) = reply.session {
-                    text.push_str(&format!(
-                        "\n\n⟦session: {s} — pass as \"session\" to continue this conversation⟧"
+                    return Ok(image_result_with_write(
+                        img,
+                        None,
+                        reply.session,
+                        write_file,
                     ));
                 }
+                let mut text = reply.text;
+                session_footer(&mut text, reply.session.as_deref(), CONTINUE);
                 CallToolResult::success(vec![Content::text(text)])
             }
             Err(e) => CallToolResult::error(vec![Content::text(e.to_string())]),
@@ -147,10 +151,9 @@ impl Fetchira {
         input: Input,
         forced: Option<ProviderKind>,
     ) -> Result<CallToolResult, ErrorData> {
-        validate_file_input(
-            &input.file,
-            context.extensions.get::<http::request::Parts>().is_some(),
-        )?;
+        let cancellation = context.ct.clone();
+        let is_http = context.extensions.get::<http::request::Parts>().is_some();
+        validate_file_input(&input.file, is_http)?;
         let Some(request_id) = context
             .extensions
             .get::<http::request::Parts>()
@@ -158,11 +161,23 @@ impl Fetchira {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
         else {
-            return self.run(cap, input, forced).await;
+            return cancellable(cancellation, self.run(cap, input, forced, !is_http)).await?;
         };
-        crate::usage::HOSTED_REQUEST_ID
-            .scope(request_id, self.run(cap, input, forced))
-            .await
+        cancellable(
+            cancellation,
+            crate::usage::HOSTED_REQUEST_ID.scope(request_id, self.run(cap, input, forced, false)),
+        )
+        .await?
+    }
+}
+
+pub(crate) async fn cancellable<T>(
+    cancellation: tokio_util::sync::CancellationToken,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, ErrorData> {
+    tokio::select! {
+        result = future => Ok(result),
+        _ = cancellation.cancelled() => Err(ErrorData::internal_error("request cancelled", None)),
     }
 }
 
@@ -174,24 +189,6 @@ fn validate_file_input(files: &[PathBuf], is_http: bool) -> Result<(), ErrorData
         ));
     }
     Ok(())
-}
-
-/// Resolve which provider to force and the opaque resume token. A `session` token is
-/// `provider:<base64-label>:opaque`; `route` strips the provider and leaves the rest.
-fn route(
-    provider: Option<ProviderKind>,
-    session: Option<String>,
-) -> (Option<ProviderKind>, Option<String>) {
-    if let Some(s) = &session {
-        if let Some((p, rest)) = s.split_once(':') {
-            if let Ok(kind) =
-                serde_json::from_value::<ProviderKind>(serde_json::Value::String(p.to_string()))
-            {
-                return (Some(kind), Some(rest.to_string()));
-            }
-        }
-    }
-    (provider, None)
 }
 
 /// Build the shared `Input` from a search/research request (the niche knobs ride along for both).
@@ -225,7 +222,8 @@ impl Fetchira {
         Parameters(args): Parameters<SearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (forced, session) = route(args.provider, args.session.clone());
+        let (forced, session) = route(args.provider, args.session.clone())
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let input = search_input(args, session);
         // An attachment needs a web session that can upload; grok_web is the default carrier.
         let forced = forced.or_else(|| (!input.file.is_empty()).then_some(ProviderKind::GrokWeb));
@@ -258,7 +256,8 @@ impl Fetchira {
         Parameters(args): Parameters<ResearchArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (forced, session) = route(args.base.provider, args.base.session.clone());
+        let (forced, session) = route(args.base.provider, args.base.session.clone())
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let mut input = search_input(args.base, session);
         input.depth = args.depth;
         self.run_http(context, Capability::DeepResearch, input, forced)
@@ -289,6 +288,7 @@ impl Fetchira {
         Parameters(args): Parameters<UsageArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let cancellation = context.ct.clone();
         let router = self.router.read().await.clone();
         let future = router.usage_snapshot();
         let snapshot = if let Some(request_id) = context
@@ -298,11 +298,13 @@ impl Fetchira {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
         {
-            crate::usage::HOSTED_REQUEST_ID
-                .scope(request_id, future)
-                .await
+            cancellable(
+                cancellation,
+                crate::usage::HOSTED_REQUEST_ID.scope(request_id, future),
+            )
+            .await?
         } else {
-            future.await
+            cancellable(cancellation, future).await?
         };
         Ok(match snapshot {
             Ok(views) => {
@@ -317,14 +319,16 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; in local stdio mode, edit an existing image by passing its absolute path in `file` and describing the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Saves the result to disk and returns its path; pass `path` to choose it."
+        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; in local stdio mode, edit an existing image by passing its absolute path in `file` and describing the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Local stdio and the local hosted bridge save the result and return its path; use `path` to choose the local destination. Direct hosted HTTP returns inline artifacts without writing server paths."
     )]
     pub async fn create_image(
         &self,
         Parameters(args): Parameters<ImageArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (forced, session) = route(args.provider, args.session);
+        let cancellation = context.ct.clone();
+        let (forced, session) = route(args.provider, args.session)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let input = Input {
             query: Some(args.prompt),
             session,
@@ -349,11 +353,13 @@ impl Fetchira {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
         {
-            crate::usage::HOSTED_REQUEST_ID
-                .scope(request_id, future)
-                .await
+            cancellable(
+                cancellation,
+                crate::usage::HOSTED_REQUEST_ID.scope(request_id, future),
+            )
+            .await?
         } else {
-            future.await
+            cancellable(cancellation, future).await?
         };
         Ok(match result {
             Ok(reply) => match reply.image {
@@ -371,16 +377,13 @@ impl Fetchira {
 }
 
 fn image_pending_result(mut text: String, session: Option<String>) -> CallToolResult {
-    if let Some(s) = session {
-        text.push_str(&format!(
-            "\n\n⟦session: {s} — pass as `session` to create_image to fetch or edit this image⟧"
-        ));
-    }
+    session_footer(&mut text, session.as_deref(), IMAGE_PENDING);
     CallToolResult::success(vec![Content::text(text)])
 }
 
 /// Local stdio callers get a file because agents cannot consume inline MCP bytes. Hosted HTTP
 /// callers skip this write; the local remote bridge materializes the returned image instead.
+#[cfg(test)]
 fn image_result(
     img: crate::providers::OutImage,
     path: Option<String>,
@@ -396,7 +399,7 @@ fn image_result_with_write(
     write_file: bool,
 ) -> CallToolResult {
     if !write_file {
-        let mut content = vec![Content::image(img.b64, img.mime)];
+        let mut content = vec![inline_artifact(&img)];
         if let Some(s) = session {
             content.push(Content::text(format!(
                 "⟦session: {s} — pass as `session` to create_image to edit this image in the same chat⟧"
@@ -404,49 +407,27 @@ fn image_result_with_write(
         }
         return CallToolResult::success(content);
     }
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(&img.b64) {
-        Ok(b) => b,
-        Err(e) => return CallToolResult::error(vec![Content::text(format!("bad image: {e}"))]),
-    };
     let explicit = path.is_some();
-    let dest = path.map(PathBuf::from).unwrap_or_else(|| {
-        let ext = match img.mime.as_str() {
-            "image/jpeg" => "jpg",
-            m => m.rsplit('/').next().unwrap_or("png"),
-        };
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        crate::cli::home()
-            .join("images")
-            .join(format!("img-{ts}.{ext}"))
-    });
-    if let Some(dir) = dest.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Err(e) = std::fs::write(&dest, &bytes) {
-        return CallToolResult::error(vec![Content::text(format!(
-            "write {} failed: {e}",
-            dest.display()
-        ))]);
-    }
-    let mut note = format!(
-        "saved: {} ({}, {} bytes)",
-        dest.display(),
-        img.mime,
-        bytes.len()
-    );
-    if let Some(s) = session {
-        note.push_str(&format!(
-            "\n\n⟦session: {s} — pass as `session` to create_image to edit this image in the same chat⟧"
-        ));
-    }
+    let mut note = match save_image(&img, path.as_deref().map(std::path::Path::new)) {
+        Ok(note) => note,
+        Err(e) => return CallToolResult::error(vec![Content::text(format!("{e:#}"))]),
+    };
+    session_footer(&mut note, session.as_deref(), IMAGE_READY);
     let note = Content::text(note);
     if explicit {
         CallToolResult::success(vec![note])
     } else {
-        CallToolResult::success(vec![Content::image(img.b64, img.mime), note])
+        CallToolResult::success(vec![inline_artifact(&img), note])
+    }
+}
+
+fn inline_artifact(img: &crate::providers::OutImage) -> Content {
+    if img.mime == "application/pdf" {
+        Content::resource(
+            ResourceContents::blob(&img.b64, "fetchira:///artifact.pdf").with_mime_type(&img.mime),
+        )
+    } else {
+        Content::image(&img.b64, &img.mime)
     }
 }
 
@@ -458,7 +439,7 @@ impl ServerHandler for Fetchira {
             .with_instructions(
                 "Quota-aware router over free web-search/scrape providers. \
                  Tools: search, read, deep_research, browser, create_image, usage. Pass `provider` \
-                 to force a specific backend (it is used even if its quota looks spent); otherwise \
+                 to restrict routing to a specific backend (quota and retry limits still apply); otherwise \
                  providers are tried in the user's priority order with automatic failover.",
             )
     }
@@ -468,6 +449,7 @@ impl ServerHandler for Fetchira {
 mod tests {
     use super::*;
     use crate::providers::OutImage;
+    use base64::Engine;
     use rmcp::model::RawContent;
 
     #[test]
@@ -515,5 +497,23 @@ mod tests {
         assert!(text
             .text
             .contains("⟦session: chatgpt_web:abc:img|poll||query"));
+    }
+
+    #[test]
+    fn hosted_pdf_is_an_inline_blob_and_keeps_session() {
+        let out = image_result_with_write(
+            OutImage {
+                mime: "application/pdf".into(),
+                b64: base64::engine::general_purpose::STANDARD.encode(b"%PDF-test"),
+            },
+            None,
+            Some("steel:test".into()),
+            false,
+        );
+        assert!(matches!(out.content[0].raw, RawContent::Resource(_)));
+        let RawContent::Text(text) = &out.content[1].raw else {
+            panic!("expected session text");
+        };
+        assert!(text.text.contains("⟦session: steel:test"));
     }
 }

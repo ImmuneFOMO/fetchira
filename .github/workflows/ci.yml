@@ -1,0 +1,38 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake clang perl pkg-config
+      - name: Check Rust
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all
+      - name: Check generated web assets
+        run: |
+          node tools/build_webui.js
+          node tools/check_webui_assets.js
+          git diff --exit-code -- webui
+      - name: Check installers and local API
+        run: |
+          sh tests/install-installer.sh
+          cargo build --locked
+          python3 tests/cli_install.py

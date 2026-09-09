@@ -6,7 +6,10 @@ use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
 };
 use rmcp::{
-    model::{ClientNotification, ClientRequest, Content, RawContent, ServerInfo, ServerResult},
+    model::{
+        ClientNotification, ClientRequest, Content, RawContent, ResourceContents, ServerInfo,
+        ServerResult,
+    },
     service::{NotificationContext, RequestContext},
     transport::stdio,
     ErrorData, Peer, RoleClient, RoleServer, Service, ServiceError, ServiceExt,
@@ -206,10 +209,10 @@ impl Service<RoleServer> for StdioBridge {
             .map_err(remote_error)?;
         Ok(match (image_path, result) {
             (Some(path), ServerResult::CallToolResult(result)) => {
-                ServerResult::CallToolResult(materialize_remote_images(result, Some(path)))
+                ServerResult::CallToolResult(materialize_remote_artifacts(result, Some(path)))
             }
             (None, ServerResult::CallToolResult(result)) => {
-                ServerResult::CallToolResult(materialize_remote_images(result, None))
+                ServerResult::CallToolResult(materialize_remote_artifacts(result, None))
             }
             (_, result) => result,
         })
@@ -236,61 +239,43 @@ impl Service<RoleServer> for StdioBridge {
     }
 }
 
-/// Hosted MCP returns image bytes over the wire. Materialize them on the user's machine so the
-/// local stdio bridge has the same `create_image` contract as a non-hosted Fetchira binary.
-fn materialize_remote_images(
+/// Hosted MCP returns artifact bytes over the wire. Materialize them on the user's machine so the
+/// local stdio bridge has the same file contract as a non-hosted Fetchira binary.
+fn materialize_remote_artifacts(
     mut result: rmcp::model::CallToolResult,
     requested_path: Option<String>,
 ) -> rmcp::model::CallToolResult {
-    let image = result
+    let artifact = result
         .content
         .iter()
         .find_map(|content| match &content.raw {
             RawContent::Image(image) => Some((image.data.clone(), image.mime_type.clone())),
+            RawContent::Resource(resource) => match &resource.resource {
+                ResourceContents::BlobResourceContents {
+                    blob,
+                    mime_type: Some(mime),
+                    ..
+                } => Some((blob.clone(), mime.clone())),
+                _ => None,
+            },
             _ => None,
         });
-    let Some((data, mime)) = image else {
+    let Some((data, mime)) = artifact else {
         return result;
     };
-    let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data) {
-        Ok(bytes) => bytes,
+    let explicit_path = requested_path.is_some();
+    let artifact = crate::providers::OutImage { mime, b64: data };
+    let note = match crate::invoke::save_image(
+        &artifact,
+        requested_path.as_deref().map(std::path::Path::new),
+    ) {
+        Ok(note) => Content::text(note),
         Err(error) => {
             return rmcp::model::CallToolResult::error(vec![Content::text(format!(
-                "hosted image decode failed: {error}"
+                "hosted artifact save failed: {error:#}"
             ))]);
         }
     };
-    let explicit_path = requested_path.is_some();
-    let dest = requested_path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let ext = match mime.as_str() {
-                "image/jpeg" => "jpg",
-                value => value.rsplit('/').next().unwrap_or("png"),
-            };
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|value| value.as_millis())
-                .unwrap_or_default();
-            crate::cli::home()
-                .join("images")
-                .join(format!("img-{ts}.{ext}"))
-        });
-    if let Some(parent) = dest.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(error) = std::fs::write(&dest, &bytes) {
-        return rmcp::model::CallToolResult::error(vec![Content::text(format!(
-            "write {} failed: {error}",
-            dest.display()
-        ))]);
-    }
-    let note = Content::text(format!(
-        "saved: {} ({}, {} bytes)",
-        dest.display(),
-        mime,
-        bytes.len()
-    ));
     if explicit_path {
         // Keep the hosted session token alongside the local save note. Without it a caller that
         // selected `path` cannot continue the ChatGPT image conversation for an edit.
@@ -321,11 +306,27 @@ mod image_tests {
         ]);
         let path =
             std::env::temp_dir().join(format!("fetchira-remote-image-{}.png", std::process::id()));
-        result = materialize_remote_images(result, Some(path.to_string_lossy().into_owned()));
+        result = materialize_remote_artifacts(result, Some(path.to_string_lossy().into_owned()));
         assert_eq!(std::fs::read(&path).unwrap(), b"png");
         assert!(matches!(result.content[0].raw, RawContent::Text(_)));
         assert_eq!(result.content.len(), 2);
         assert!(matches!(result.content[1].raw, RawContent::Text(_)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn hosted_pdf_blob_is_saved_by_local_bridge() {
+        let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-test");
+        let mut result = rmcp::model::CallToolResult::success(vec![Content::resource(
+            ResourceContents::blob(pdf, "fetchira:///artifact.pdf")
+                .with_mime_type("application/pdf"),
+        )]);
+        let path =
+            std::env::temp_dir().join(format!("fetchira-remote-pdf-{}.pdf", std::process::id()));
+        result = materialize_remote_artifacts(result, Some(path.to_string_lossy().into_owned()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-test");
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(result.content[0].raw, RawContent::Text(_)));
         let _ = std::fs::remove_file(path);
     }
 }
@@ -345,14 +346,19 @@ fn validate_compatibility(remote: &VersionResponse) -> anyhow::Result<()> {
             crate::hosted::PROTOCOL_VERSION
         );
     }
-    if remote.schema_version > crate::usage::SCHEMA
-        || remote
+    let has_schema_range =
+        remote.min_client_schema_version.is_some() || remote.max_client_schema_version.is_some();
+    let incompatible_schema = if has_schema_range {
+        remote
             .min_client_schema_version
             .is_some_and(|min| crate::usage::SCHEMA < min)
-        || remote
-            .max_client_schema_version
-            .is_some_and(|max| crate::usage::SCHEMA > max)
-    {
+            || remote
+                .max_client_schema_version
+                .is_some_and(|max| crate::usage::SCHEMA > max)
+    } else {
+        remote.schema_version > crate::usage::SCHEMA
+    };
+    if incompatible_schema {
         bail!(
             "incompatible remote schema: server {}, client {}; update the older side",
             remote.schema_version,
@@ -398,7 +404,6 @@ fn normalize_endpoint(endpoint: &str) -> anyhow::Result<String> {
     let mut url = reqwest::Url::parse(endpoint.trim()).context("invalid remote endpoint URL")?;
     let loopback = url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
-            || host.contains("::1")
             || host
                 .trim_matches(['[', ']'])
                 .parse::<std::net::IpAddr>()
@@ -564,6 +569,7 @@ mod tests {
             "http://127.0.0.1:7879/mcp"
         );
         assert!(normalize_endpoint("http://example.test/mcp").is_err());
+        assert!(normalize_endpoint("http://[2001:db8::1]/mcp").is_err());
         assert!(normalize_endpoint("https://user:secret@example.test/mcp").is_err());
         assert!(normalize_endpoint("https://example.test/other").is_err());
         assert_eq!(
@@ -585,6 +591,13 @@ mod tests {
         };
         assert!(validate_compatibility(&version).is_ok());
         version.min_client_schema_version = Some(crate::usage::SCHEMA + 1);
+        assert!(validate_compatibility(&version).is_err());
+        version.min_client_schema_version = Some(1);
+        version.max_client_schema_version = Some(crate::usage::SCHEMA);
+        version.schema_version = crate::usage::SCHEMA + 1;
+        assert!(validate_compatibility(&version).is_ok());
+        version.min_client_schema_version = None;
+        version.max_client_schema_version = None;
         assert!(validate_compatibility(&version).is_err());
     }
 }

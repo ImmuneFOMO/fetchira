@@ -128,20 +128,24 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
         .bearer_auth(key)
         .send()
         .await?;
-    Ok(parse_balance(&check("tavily", resp).await?.json().await?))
+    parse_balance(&check("tavily", resp).await?.json().await?)
 }
 
 // plan_limit is the monthly ceiling, plan_usage what's spent (basic search 1, advanced 2). Paygo
 // overage can push usage past the plan, so remaining floors at 0.
-fn parse_balance(v: &Value) -> LiveBalance {
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let a = &v["account"];
-    let total = a["plan_limit"].as_i64().unwrap_or(0);
-    let used = a["plan_usage"].as_i64().unwrap_or(0);
-    LiveBalance {
-        remaining: (total - used).max(0),
+    let total = a["plan_limit"]
+        .as_i64()
+        .ok_or(Error::BadResponse("tavily"))?;
+    let used = a["plan_usage"]
+        .as_i64()
+        .ok_or(Error::BadResponse("tavily"))?;
+    Ok(LiveBalance {
+        remaining: total.saturating_sub(used).max(0),
         total,
         usd: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -184,8 +188,10 @@ mod tests {
         let b = parse_balance(&json!({
             "key": {"usage": 20},
             "account": {"current_plan": "Researcher", "plan_usage": 20, "plan_limit": 1000},
-        }));
+        }))
+        .unwrap();
         assert_eq!(b.remaining, 980);
         assert_eq!(b.total, 1000);
+        assert!(parse_balance(&json!({"account": {"plan_limit": 1000}})).is_err());
     }
 }

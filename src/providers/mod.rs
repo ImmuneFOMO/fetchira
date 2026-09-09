@@ -195,19 +195,17 @@ impl ProviderKind {
         matches!(self, ProviderKind::Parallel | ProviderKind::Exa)
     }
 
-    /// Fallback ceiling when the provider exposes no live balance (exa, steel-free, parallel) or the
-    /// live fetch fails. Providers with a live endpoint (serper/tavily/firecrawl) overwrite this
-    /// from `live_balance` — the constant only seeds the soft counter.
+    /// Local routing ceilings, not provider plan promises. Live balances update the display;
+    /// they do not raise these ceilings. Override per account to match the intended allowance.
     pub fn default_quota(self) -> i64 {
         match self {
-            ProviderKind::Tavily => 1000,    // 1k credits/mo
-            ProviderKind::Exa => 20_000,     // 20k requests/mo (forever-free)
-            ProviderKind::Serper => 2500,    // 2.5k credits, one-time
-            ProviderKind::Firecrawl => 1000, // 1k credits/mo
-            ProviderKind::Parallel => 4000, // $20 personal-email grant @ $0.005/search ($80 w/ work email)
-            ProviderKind::Steel => 2000,    // $30 one-time ÷ ~$0.015/proxied read ≈ 2k reads
-            // Web sessions: server enforces the real (windowed) limits; these are nominal
-            // ceilings so a 429 marks the account exhausted and the router fails over.
+            ProviderKind::Tavily => 1000,
+            ProviderKind::Exa => 20_000,
+            ProviderKind::Serper => 2500,
+            ProviderKind::Firecrawl => 1000,
+            ProviderKind::Parallel => 4000,
+            ProviderKind::Steel => 2000,
+            // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
             ProviderKind::ChatgptWeb => 100,
@@ -225,15 +223,12 @@ impl ProviderKind {
         }
     }
 
-    /// Deep-research budget (web providers only) — small + daily, since the real per-tier limit
-    /// is tight and time-windowed. These are conservative free-tier guesses; override per account
-    /// (`dr_quota`/`dr_reset`) to match your subscription. Non-web providers use their normal quota.
+    /// Local deep-research ceilings for web providers; override `dr_quota`/`dr_reset` for the
+    /// account. API providers share their normal quota. These defaults do not describe a plan.
     pub fn dr_quota(self) -> i64 {
         match self {
             ProviderKind::GeminiWeb => 10,
             ProviderKind::GrokWeb => 3,
-            // ChatGPT Plus deep research is a monthly bucket (~25/mo); the server reports the live
-            // remaining count in `conversation/init`, so this is just the failover ceiling.
             ProviderKind::ChatgptWeb => 25,
             _ => self.default_quota(),
         }
@@ -284,26 +279,23 @@ impl ProviderKind {
         }
     }
 
-    /// The provider's advertised free tier, verbatim-verified against its pricing page
-    /// (2026-07-09). Display copy only — the router's soft ceilings live in `default_quota`.
+    /// Pricing-page snapshot (2026-09-09); eligibility and offers can change.
+    /// Display only — local routing ceilings live in `default_quota`.
     pub fn free_tier(self) -> &'static str {
         match self {
             ProviderKind::Serper => "2,500 free · one-time",
             ProviderKind::Tavily => "1,000 free / month",
-            ProviderKind::Exa => "up to 20,000 free / month",
+            ProviderKind::Exa => "$20 signup + $10/month",
             ProviderKind::Firecrawl => "1,000 free / month",
-            ProviderKind::Parallel => "$20–$80 credit + $5/mo",
-            ProviderKind::Steel => "$30 credit · one-time",
+            ProviderKind::Parallel => "up to $80 signup + $5/mo · eligibility applies",
+            ProviderKind::Steel => "$30 credit · one-time, 90 days",
             _ => "",
         }
     }
 }
 
 /// Preference order per capability: try providers left-to-right, skipping exhausted.
-/// Economics set the defaults — renewable monthly credits (tavily/firecrawl) burn before
-/// serper's one-time grant, which burns before real $ balances (exa/parallel); the slower,
-/// session-fragile web providers back-stop search but lead deep research, where their free
-/// true multi-round runs beat spending exa/parallel money.
+/// These are defaults, not a quality ranking or a promise of free usage.
 pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
@@ -311,15 +303,8 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
             Tavily, Serper, Exa, Parallel, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
         Capability::Read => &[Firecrawl, Tavily, Serper, Exa],
-        // Report quality ranks the leaders: gemini and chatgpt run the top-tier true deep
-        // research (gemini first — better quota, no browser); grok's deepsearch is quicker but
-        // shallower, and tavily's "deep research" is one synthesized answer, so they trail the
-        // $-billed api researchers (parallel/exa).
         Capability::DeepResearch => &[GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily],
         Capability::Browser => &[Steel],
-        // Arena quality order: gpt-image leads every blind-vote board, gemini (nano banana) is
-        // the 4K/editing runner-up, grok trails both. gemini's EU region gate maps to an error,
-        // so the failover chain survives it.
         Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
     }
 }
@@ -424,7 +409,6 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             niches: &["topic=news → news source"],
             modes: &[
                 ("extract", "pull the main content of a URL — read(provider=tavily)"),
-                ("crawl", "follow a site's links and return their content"),
             ],
             examples: &[
                 "search(query=\"fed rate decision\", provider=\"tavily\", topic=\"news\", recency=\"week\")",
@@ -437,7 +421,6 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "topic=academic → research-paper category",
             ],
             modes: &[
-                ("similar", "find pages semantically similar to a URL"),
                 ("contents", "return the full text of a result — read(provider=exa)"),
             ],
             examples: &[
@@ -448,9 +431,8 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
         Firecrawl => ProviderExtras {
             niches: &["topic=news / academic → query-rewrite hint"],
             modes: &[
-                ("crawl", "crawl a whole site to markdown"),
-                ("extract", "structured extraction against a schema/prompt"),
-                ("screenshot", "render the page and return a screenshot"),
+                ("crawl", "start an async crawl; returns a provider job ID"),
+                ("extract", "single-page JSON extraction with a default content prompt"),
             ],
             examples: &[
                 "read(url=\"https://docs.example.com\", provider=\"firecrawl\", mode=\"crawl\")",
@@ -458,8 +440,8 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             ],
         },
         Parallel => ProviderExtras {
-            niches: &["depth=deep → pro research tier"],
-            modes: &[("extract", "search + extract structured fields in one pass")],
+            niches: &["depth=deep → core research processor"],
+            modes: &[],
             examples: &[
                 "deep_research(query=\"compare EU AI-act obligations by company size\", provider=\"parallel\", depth=\"deep\")",
             ],
@@ -488,15 +470,15 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             niches: &[],
             modes: &[("(model picks the tier — see usage models)", "")],
             examples: &[
-                "search(query=\"latest webb telescope findings\", provider=\"gemini_web\", model=\"3.1 pro\")",
+                "search(query=\"latest webb telescope findings\", provider=\"gemini_web\")",
             ],
         },
         ChatgptWeb => ProviderExtras {
             niches: &[],
             modes: &[("chat", "answer from the model alone, web search off")],
             examples: &[
-                "search(query=\"explain HNSW indexing\", provider=\"chatgpt_web\", model=\"gpt-5.4 high\")",
-                "deep_research(query=\"2025 humanoid-robot startups landscape\", provider=\"chatgpt_web\")",
+                "search(query=\"explain HNSW indexing\", provider=\"chatgpt_web\")",
+                "deep_research(query=\"humanoid-robot startups landscape\", provider=\"chatgpt_web\")",
             ],
         },
     }
@@ -511,9 +493,9 @@ pub struct LiveQuota {
 }
 
 /// Live remaining balance for an API-key provider, already normalized to the unit fetchira displays
-/// (searches/reads/credits — each provider converts from its native $/tokens/credits). Authoritative:
-/// it reflects usage outside fetchira plus any top-up or paid plan. `total` is the grant for the
-/// fuel gauge (0 when unknown).
+/// (searches/reads/credits). Native balances include outside usage and top-ups; dollar-to-call
+/// conversions are approximate and depend on the operation and plan. `total` is a display
+/// ceiling, or the remaining balance itself when the original grant is unknown.
 #[derive(Clone, Copy)]
 pub struct LiveBalance {
     pub remaining: i64,
@@ -892,16 +874,22 @@ fn uuid4() -> String {
     )
 }
 
-/// Map a non-2xx response to the right error: 429/402 trigger failover + exhaustion.
+/// Map a non-2xx response to the right error. A 429 is temporary and carries `Retry-After` into
+/// the router's cooldown; only 402 is a durable exhausted-credit signal.
 async fn check(provider: &'static str, resp: reqwest::Response) -> Result<reqwest::Response> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
     }
     let code = status.as_u16();
+    let retry_after = crate::error::parse_retry_after(
+        resp.headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+    );
     let body = resp.text().await.unwrap_or_default();
     Err(match code {
-        429 => Error::RateLimit(format!("{provider}: {body}")),
+        429 => Error::rate_limit_after(format!("{provider}: {body}"), retry_after),
         402 => Error::QuotaExceeded(format!("{provider}: {body}")),
         _ => Error::Provider {
             provider,

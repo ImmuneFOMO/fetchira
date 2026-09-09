@@ -1,4 +1,4 @@
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -119,27 +119,23 @@ pub async fn backup_db(home: &Path, db_path: &str) -> anyhow::Result<PathBuf> {
     if !src.exists() {
         anyhow::bail!("database does not exist: {}", src.display());
     }
-    // SQLite is in WAL mode. Checkpoint before copying so committed rows in the WAL are
-    // included in the snapshot; copying only usage.db is not a consistent backup.
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(
-            SqliteConnectOptions::new()
-                .filename(src)
-                .journal_mode(SqliteJournalMode::Wal),
-        )
-        .await?;
-    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-        .execute(&pool)
-        .await?;
-    pool.close().await;
     let dir = home.join("backups");
     std::fs::create_dir_all(&dir)?;
     let dst = dir.join(format!(
         "usage-{}.db",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
     ));
-    std::fs::copy(src, &dst)?;
+    // VACUUM INTO reads one transactionally-consistent snapshot while WAL writers continue.
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(src))
+        .await?;
+    let dst_sql = dst.to_string_lossy().into_owned();
+    sqlx::query("VACUUM INTO ?")
+        .bind(dst_sql)
+        .execute(&pool)
+        .await?;
+    pool.close().await;
     Ok(dst)
 }
 pub fn verify_release_bytes(bytes: &[u8], expected_sha256: &str) -> bool {
@@ -154,8 +150,92 @@ pub fn verify_release_bytes(bytes: &[u8], expected_sha256: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     #[test]
     fn checksum_rejects_bad() {
         assert!(!verify_release_bytes(b"x", "bad"));
+    }
+
+    #[tokio::test]
+    async fn backup_is_consistent_while_wal_is_being_written() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).expect("test home");
+        let source = home.join("usage.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&source)
+                    .create_if_missing(true)
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+            )
+            .await
+            .expect("source database");
+        sqlx::query("CREATE TABLE probe(id INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create probe");
+        sqlx::query("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 2000) INSERT INTO probe(payload) SELECT randomblob(2048) FROM n")
+            .execute(&pool)
+            .await
+            .expect("seed probe");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let pool = pool.clone();
+            let stop = stop.clone();
+            let writes = writes.clone();
+            tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    sqlx::query("INSERT INTO probe(payload) VALUES(randomblob(256))")
+                        .execute(&pool)
+                        .await
+                        .expect("concurrent write");
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        while writes.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let backup = backup_db(&home, source.to_str().expect("source path"))
+            .await
+            .expect("backup");
+        stop.store(true, Ordering::Relaxed);
+        writer.await.expect("writer task");
+
+        let backup_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&backup))
+            .await
+            .expect("open backup");
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&backup_pool)
+            .await
+            .expect("integrity check");
+        let backup_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM probe")
+            .fetch_one(&backup_pool)
+            .await
+            .expect("backup rows");
+        let source_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM probe")
+            .fetch_one(&pool)
+            .await
+            .expect("source rows");
+        assert_eq!(integrity, "ok");
+        assert!(backup_rows >= 2000 && backup_rows <= source_rows);
+        assert!(writes.load(Ordering::Relaxed) > 0);
+        backup_pool.close().await;
+        pool.close().await;
+        std::fs::remove_dir_all(home).expect("remove test home");
     }
 }

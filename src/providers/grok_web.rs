@@ -101,6 +101,11 @@ pub async fn call(
         resp = send(base, client, &url, path, &body).await?;
     }
     let status = resp.status().as_u16();
+    let retry_after = crate::error::parse_retry_after(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+    );
     let text = resp.text().await.unwrap_or_default();
     match status {
         401 => {
@@ -122,7 +127,12 @@ pub async fn call(
                 body: "grok anti-bot rejected this request; failing over".into(),
             });
         }
-        429 => return Err(Error::RateLimit("grok_web: rate limited".into())),
+        429 => {
+            return Err(Error::rate_limit_after(
+                "grok_web: rate limited",
+                retry_after,
+            ))
+        }
         _ => {}
     }
     if image {
@@ -825,8 +835,18 @@ fn parse(ndjson: &str) -> Result<Outcome> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if v.get("error").is_some() {
-            return Err(Error::RateLimit("grok_web: stream error".into()));
+        if let Some(error) = v.get("error") {
+            let code = error["code"].as_u64().unwrap_or(0).min(u16::MAX as u64) as u16;
+            let message = error["message"].as_str().unwrap_or("stream error");
+            return Err(match code {
+                429 => Error::rate_limit(format!("grok_web: {message}")),
+                402 => Error::QuotaExceeded(format!("grok_web: {message}")),
+                _ => Error::Provider {
+                    provider: "grok_web",
+                    status: code,
+                    body: message.to_string(),
+                },
+            });
         }
         if conv.is_none() {
             conv = find_str(&v, "conversationId");
@@ -934,7 +954,14 @@ mod tests {
     #[test]
     fn stream_error_is_rate_limit() {
         let line = r#"{"error":{"code":429,"message":"rate"}}"#;
-        assert!(matches!(parse(line), Err(Error::RateLimit(_))));
+        assert!(matches!(parse(line), Err(Error::RateLimit { .. })));
+        let no_credit = r#"{"error":{"code":402,"message":"credits"}}"#;
+        assert!(matches!(parse(no_credit), Err(Error::QuotaExceeded(_))));
+        let other = r#"{"error":{"code":400,"message":"bad input"}}"#;
+        assert!(matches!(
+            parse(other),
+            Err(Error::Provider { status: 400, .. })
+        ));
     }
 
     #[test]
@@ -1247,7 +1274,7 @@ mod tests {
             return crate::web::parse_session(&raw);
         }
         let home = crate::cli::home();
-        let cfg = crate::cli::load_or_empty(&home);
+        let cfg = crate::cli::load_or_empty(&home).unwrap();
         let db = crate::config::resolve_db(&home, &cfg.db_path);
         let store = crate::usage::Store::open(&db).await.expect("store");
         let raw = store

@@ -62,7 +62,7 @@ pub fn hash_key(key: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(key.as_bytes()))
 }
 pub fn verify_key(key: &str, hash: &str) -> bool {
-    hash_key(key).eq_ignore_ascii_case(hash)
+    hash_key(key) == hash
 }
 pub fn has_scope(scopes: &[String], needed: Scope) -> bool {
     scopes
@@ -93,6 +93,7 @@ mod tests {
         let k = generate_key("one", [Scope::Mcp]).unwrap();
         assert!(k.plaintext.starts_with("fk_live_one_"));
         assert!(verify_key(&k.plaintext, &k.hash));
+        assert!(!verify_key("test", &hash_key("test").to_ascii_uppercase()));
         assert!(!verify_key("fk_live_one_bad", &k.hash));
         assert!(has_scope(&k.scopes, Scope::Mcp));
     }

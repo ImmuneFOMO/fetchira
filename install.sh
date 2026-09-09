@@ -114,7 +114,7 @@ build_from_source() {
     exit 1
   }
   echo "==> building fetchira (release)…"
-  ( cd "$IN_REPO" && cargo build --release )
+  ( cd "$IN_REPO" && cargo build --locked --release )
   STAGED="$IN_REPO/target/release/fetchira"
 }
 

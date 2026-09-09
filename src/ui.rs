@@ -61,7 +61,7 @@ struct AppState {
 pub async fn run(home: &Path) -> anyhow::Result<()> {
     // A missing/empty config is fine: the dashboard opens in its onboarding state and the
     // first `POST /api/account/add` writes fetchira.toml.
-    let cfg = cli::load_or_empty(home);
+    let cfg = cli::load_or_empty(home)?;
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let inner = build_inner(home, &store).await?;
     // A post-update re-exec passes the old token and port through so the open tab keeps working.
@@ -159,7 +159,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
 /// (Re)build the router + per-account metadata from the on-disk config. Called at startup
 /// and after every mutation so the dashboard reflects the new state immediately.
 async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
-    let cfg = cli::load_or_empty(home);
+    let cfg = cli::load_or_empty(home)?;
     let mut meta = HashMap::new();
     for a in &cfg.accounts {
         let logged_in = a.provider.is_web() && store.load_session(&a.label).await?.is_some();
@@ -650,12 +650,15 @@ async fn api_install_targets(State(st): State<Arc<AppState>>, headers: HeaderMap
         .iter()
         .map(|t| json!({ "name": t.name, "present": t.present, "installed": t.installed }))
         .collect();
-    Json(json!({ "targets": targets })).into_response()
+    let (skill, skills) = installed_skill_status(&user_home());
+    Json(json!({ "targets": targets, "skill": skill, "skills": skills })).into_response()
 }
 
 #[derive(Deserialize)]
 struct InstallReq {
     targets: Vec<String>,
+    /// Omitted keeps the old API behavior: register MCP targets only.
+    skill: Option<String>,
 }
 
 async fn api_install(
@@ -666,12 +669,20 @@ async fn api_install(
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
     }
-    let bin = match std::env::current_exe() {
-        Ok(p) => p.to_string_lossy().into_owned(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let variant = match parse_install_skill(req.skill.as_deref()) {
+        Ok(variant) => variant,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let bin = if req.targets.is_empty() {
+        String::new()
+    } else {
+        match std::env::current_exe() {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
     };
     let all = cli::mcp_target_list();
-    let results: Vec<Value> = req
+    let mut results: Vec<Value> = req
         .targets
         .iter()
         .map(|name| match all.iter().find(|t| t.name == name) {
@@ -682,7 +693,54 @@ async fn api_install(
             None => json!({ "name": name, "ok": false, "msg": "unknown target" }),
         })
         .collect();
-    Json(json!({ "results": results })).into_response()
+    if let Some(variant) = variant {
+        results.extend(
+            crate::skills::install_skills(&user_home(), variant)
+                .into_iter()
+                .map(|result| {
+                    json!({
+                        "name": format!("skill:{}", result.name),
+                        "ok": result.ok,
+                        "msg": result.msg,
+                    })
+                }),
+        );
+    }
+    Json(json!({ "results": results, "skill": req.skill })).into_response()
+}
+
+fn parse_install_skill(value: Option<&str>) -> Result<Option<crate::skills::SkillVariant>, String> {
+    value.map_or(Ok(None), |value| {
+        crate::skills::SkillVariant::parse(value)
+            .map(Some)
+            .ok_or_else(|| format!("unknown skill '{value}' (expected both, mcp, cli, or skip)"))
+    })
+}
+
+fn user_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn installed_skill_status(home: &Path) -> (Option<&'static str>, Vec<&'static str>) {
+    let destinations = crate::skills::skill_destinations(home);
+    let mut names = Vec::new();
+    for variant in [
+        crate::skills::SkillVariant::Both,
+        crate::skills::SkillVariant::Mcp,
+        crate::skills::SkillVariant::Cli,
+    ] {
+        if destinations
+            .iter()
+            .any(|destination| destination.variants.contains(&variant))
+        {
+            names.push(variant.as_str());
+        }
+    }
+    let selected = (names.len() == 1).then(|| names[0]);
+    (selected, names)
 }
 
 /// The dashboard's Update button: self-update in place, then tell the user to restart.
@@ -1725,6 +1783,7 @@ fn desc_of(provider: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::providers::ModelInfo;
+    use std::fs;
 
     fn mi(id: &str, remaining: Option<i64>, total: Option<i64>, locked: bool) -> ModelInfo {
         ModelInfo {
@@ -1737,6 +1796,46 @@ mod tests {
             reset_after: None,
             locked,
         }
+    }
+
+    #[test]
+    fn install_skill_is_optional_and_validated() {
+        let omitted: InstallReq = serde_json::from_str(r#"{"targets":[]}"#).unwrap();
+        assert_eq!(parse_install_skill(omitted.skill.as_deref()).unwrap(), None);
+
+        let cli: InstallReq = serde_json::from_str(r#"{"targets":[],"skill":"cli"}"#).unwrap();
+        assert_eq!(
+            parse_install_skill(cli.skill.as_deref()).unwrap(),
+            Some(crate::skills::SkillVariant::Cli)
+        );
+        assert!(parse_install_skill(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn installed_skill_status_recognizes_cli_only() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-ui-skill-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(home.join(".agents/skills/fetchira-cli")).unwrap();
+        fs::write(
+            home.join(".agents/skills/fetchira-cli/SKILL.md"),
+            "name: fetchira-cli",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".agents/skills/fetchira-cli/references.md"),
+            "reference",
+        )
+        .unwrap();
+        let (selected, installed) = installed_skill_status(&home);
+        assert_eq!(selected, Some("cli"));
+        assert_eq!(installed, vec!["cli"]);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

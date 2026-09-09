@@ -164,6 +164,11 @@ pub async fn call(
         .send()
         .await?;
     let status = resp.status().as_u16();
+    let retry_after = crate::error::parse_retry_after(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+    );
     let text = resp.text().await.unwrap_or_default();
     match status {
         400 | 401 => {
@@ -176,7 +181,12 @@ pub async fn call(
                 ),
             })
         }
-        429 => return Err(Error::RateLimit("gemini_web: rate limited".into())),
+        429 => {
+            return Err(Error::rate_limit_after(
+                "gemini_web: rate limited",
+                retry_after,
+            ))
+        }
         _ => {}
     }
     if matches!(cap, Capability::Image) {
@@ -197,7 +207,7 @@ async fn image_out(base: &str, client: &wreq::Client, body: &str) -> Result<Outc
         None => {
             // Gemini answers a spent image quota with a plain-text "limit reached" turn.
             if body.contains("Image Generation Limit") {
-                return Err(Error::RateLimit(
+                return Err(Error::QuotaExceeded(
                     "gemini_web: image generation limit reached — resets daily".into(),
                 ));
             }
@@ -260,7 +270,9 @@ fn scan_image(body: &str) -> Result<Option<String>> {
                 continue;
             }
             if usage_limited(it) {
-                return Err(Error::RateLimit("gemini_web: usage limit exceeded".into()));
+                return Err(Error::QuotaExceeded(
+                    "gemini_web: usage limit exceeded".into(),
+                ));
             }
             let resp: Value = match it.get(2).and_then(|x| x.as_str()) {
                 Some(p) => match serde_json::from_str(p) {
@@ -319,6 +331,17 @@ async fn upload(base: &str, client: &wreq::Client, bytes: &[u8]) -> Result<Strin
         .body(Vec::new())
         .send()
         .await?;
+    if start.status().as_u16() == 429 {
+        return Err(Error::rate_limit_after(
+            "gemini_web: file upload rate limited",
+            crate::error::parse_retry_after(
+                start
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok()),
+            ),
+        ));
+    }
     let upload_url = start
         .headers()
         .get("x-goog-upload-url")
@@ -340,6 +363,16 @@ async fn upload(base: &str, client: &wreq::Client, bytes: &[u8]) -> Result<Strin
         .body(bytes.to_vec())
         .send()
         .await?;
+    if fin.status().as_u16() == 429 {
+        return Err(Error::rate_limit_after(
+            "gemini_web: file upload rate limited",
+            crate::error::parse_retry_after(
+                fin.headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok()),
+            ),
+        ));
+    }
     if fin.status().as_u16() != 200 {
         return Err(Error::Provider {
             provider: "gemini_web",
@@ -453,7 +486,9 @@ fn parse(body: &str) -> Result<Outcome> {
                 continue;
             }
             if usage_limited(it) {
-                return Err(Error::RateLimit("gemini_web: usage limit exceeded".into()));
+                return Err(Error::QuotaExceeded(
+                    "gemini_web: usage limit exceeded".into(),
+                ));
             }
             let resp: Value = match it.get(2).and_then(|x| x.as_str()) {
                 Some(p) => match serde_json::from_str(p) {
@@ -527,7 +562,9 @@ fn parse_plan(body: &str) -> Result<Outcome> {
                 continue;
             }
             if usage_limited(it) {
-                return Err(Error::RateLimit("gemini_web: usage limit exceeded".into()));
+                return Err(Error::QuotaExceeded(
+                    "gemini_web: usage limit exceeded".into(),
+                ));
             }
             let resp: Value = match it.get(2).and_then(|x| x.as_str()) {
                 Some(p) => match serde_json::from_str(p) {
@@ -880,7 +917,7 @@ mod tests {
         ]]);
         let n2 = limited.to_string().encode_utf16().count();
         let body2 = format!(")]}}'\n{n2}\n{}", limited);
-        assert!(matches!(scan_image(&body2), Err(Error::RateLimit(_))));
+        assert!(matches!(scan_image(&body2), Err(Error::QuotaExceeded(_))));
     }
 
     #[test]
@@ -910,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_limit_maps_to_rate_limit() {
+    fn usage_limit_maps_to_quota_exhaustion() {
         // wrb.fr item carrying the fatal code at [5][2][0][1][0] = 1037 (USAGE_LIMIT_EXCEEDED).
         let item = json!([
             "wrb.fr",
@@ -924,6 +961,6 @@ mod tests {
         let outer = json!([item]).to_string();
         let n = outer.encode_utf16().count();
         let body = format!(")]}}'\n{n}\n{outer}");
-        assert!(matches!(parse(&body), Err(Error::RateLimit(_))));
+        assert!(matches!(parse(&body), Err(Error::QuotaExceeded(_))));
     }
 }

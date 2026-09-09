@@ -18,6 +18,23 @@ function apiGet(path) {
     }
   }).then(r => r.ok ? r.json() : null)).catch(() => null);
 }
+const SKILL_VARIANTS = [{
+  value: 'both',
+  label: 'MCP + CLI',
+  hint: 'Use MCP when it is available; fall back to the fetchira command.'
+}, {
+  value: 'mcp',
+  label: 'MCP only',
+  hint: 'Install the agent instructions for MCP tools only.'
+}, {
+  value: 'cli',
+  label: 'CLI only',
+  hint: 'Use the fetchira command from the shell.'
+}, {
+  value: 'skip',
+  label: 'Skip skill',
+  hint: 'Register selected MCP targets without installing an agent skill.'
+}];
 
 // Detect coding tools, preselect the not-yet-registered ones, register on click.
 // Shared by the onboarding step and the checklist modal.
@@ -26,10 +43,13 @@ function InstallTargets({
 }) {
   const [targets, setTargets] = React.useState(null);
   const [picked, setPicked] = React.useState({});
+  const [skill, setSkill] = React.useState('both');
+  const [installedSkill, setInstalledSkill] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [results, setResults] = React.useState(null);
   const [failed, setFailed] = React.useState(false);
-  React.useEffect(() => {
+  const loadTargets = () => {
+    setFailed(false);
     apiGet('/api/install/targets').then(d => {
       if (!d) {
         setFailed(true);
@@ -37,44 +57,62 @@ function InstallTargets({
       }
       const ts = d.targets || [];
       setTargets(ts);
+      const installed = Array.isArray(d.skills) ? d.skills : [d.skill];
+      const current = ['both', 'mcp', 'cli', 'skip'].find(value => installed.includes(value));
+      if (current) setInstalledSkill(current);
       const pre = {};
       ts.forEach(t => {
         if (t.present && !t.installed) pre[t.name] = true;
       });
       setPicked(pre);
     });
-  }, []);
+  };
+  React.useEffect(loadTargets, []);
   const install = async () => {
     const names = Object.keys(picked).filter(n => picked[n]);
-    if (!names.length || busy) return;
+    if (busy || skill === 'skip' && !names.length) return;
     setBusy(true);
+    setResults(null);
     try {
-      setResults((await window.apiPost('/api/install', {
-        targets: names
-      })).results);
+      const data = await window.apiPost('/api/install', {
+        targets: names,
+        skill
+      });
+      setResults(data.results || []);
+      if (onDone && (data.results || []).every(r => r.ok)) onDone();
     } catch (e) {
       setResults([{
         name: 'error',
         ok: false,
         msg: String(e.message || e)
       }]);
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
-    if (onDone) onDone();
   };
+  const retry = () => {
+    if (!busy) install();
+  };
+  const failedResult = results && results.some(r => !r.ok);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
       gap: 10
     }
-  }, failed ? /*#__PURE__*/React.createElement("span", {
+  }, failed ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 12,
       color: 'var(--red-500)'
     }
-  }, "couldn't reach the server \u2014 reload this tab") : !targets ? /*#__PURE__*/React.createElement("span", {
+  }, "couldn't reach the server"), /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: loadTargets,
+    style: {
+      alignSelf: 'flex-start'
+    }
+  }, "Try again")) : !targets ? /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 12,
@@ -84,6 +122,7 @@ function InstallTargets({
     key: r.name,
     style: {
       display: 'flex',
+      flexWrap: 'wrap',
       alignItems: 'baseline',
       gap: 8,
       fontFamily: 'var(--font-mono)',
@@ -101,16 +140,66 @@ function InstallTargets({
     }
   }, r.name), /*#__PURE__*/React.createElement("span", {
     style: {
-      color: 'var(--text-faint)',
-      wordBreak: 'break-all'
+      color: 'var(--text-mid)',
+      overflowWrap: 'anywhere',
+      minWidth: 0
     }
-  }, r.msg))), /*#__PURE__*/React.createElement("span", {
+  }, r.msg))), failedResult ? /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: retry,
+    style: {
+      alignSelf: 'flex-start'
+    }
+  }, "Try again") : /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-ui)',
       fontSize: 12,
       color: 'var(--text-lo)'
     }
-  }, "Restart the tool (or reload its MCP servers) to pick up fetchira.")) : /*#__PURE__*/React.createElement(React.Fragment, null, targets.map(t => /*#__PURE__*/React.createElement("label", {
+  }, "Restart the agent to load the selected integrations.")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("fieldset", {
+    style: {
+      border: 0,
+      padding: 0,
+      margin: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement("legend", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: 'var(--text-mid)',
+      marginBottom: 2
+    }
+  }, "Agent skill"), SKILL_VARIANTS.map(variant => /*#__PURE__*/React.createElement("label", {
+    key: variant.value,
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      cursor: 'pointer',
+      fontFamily: 'var(--font-ui)',
+      fontSize: 12,
+      color: 'var(--text-hi)'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    name: "fetchira-skill",
+    value: variant.value,
+    checked: skill === variant.value,
+    onChange: () => setSkill(variant.value)
+  }), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'block'
+    }
+  }, variant.label, installedSkill === variant.value ? ' · installed' : ''), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'block',
+      color: 'var(--text-mid)',
+      fontSize: 12
+    }
+  }, variant.hint))))), targets.map(t => /*#__PURE__*/React.createElement("label", {
     key: t.name,
     style: {
       display: 'flex',
@@ -136,7 +225,7 @@ function InstallTargets({
   }, "detected") : null)), /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: install,
-    disabled: busy || !Object.keys(picked).some(n => picked[n]),
+    disabled: busy || skill === 'skip' && !Object.keys(picked).some(n => picked[n]),
     style: {
       alignSelf: 'flex-start'
     }
@@ -163,7 +252,9 @@ function InstallPanel({
     onClick: e => e.stopPropagation(),
     style: {
       width: 440,
-      maxWidth: '100%'
+      maxWidth: '100%',
+      maxHeight: 'calc(100dvh - 40px)',
+      overflowY: 'auto'
     }
   }, /*#__PURE__*/React.createElement(Card, {
     raised: true,
@@ -226,7 +317,10 @@ function LocalGettingStarted() {
   React.useEffect(() => {
     if (hidden) return;
     apiGet('/api/install/targets').then(d => {
-      if (d) setRegistered(d.targets.some(t => t.installed));
+      if (d) {
+        const skillInstalled = (Array.isArray(d.skills) ? d.skills : [d.skill]).some(skill => ['both', 'mcp', 'cli'].includes(skill));
+        setRegistered(skillInstalled || (d.targets || []).some(t => t.installed));
+      }
     });
   }, [installOpen]); // re-check after the install panel closes
 

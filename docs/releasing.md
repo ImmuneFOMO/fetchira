@@ -10,7 +10,7 @@ commit (feat:/fix:/…) → push main
    └─ release-plz: opens/updates Release PR (bump + CHANGELOG)
 merge the Release PR
    └─ release-plz: tags vX.Y.Z   (needs RELEASE_PLZ_TOKEN, else the tag won't trigger dist)
-        └─ dist: build mac arm/x64 + linux x64 → GitHub Release + Homebrew formula
+        └─ dist: build mac arm/x64 + linux arm/x64 → GitHub Release + Homebrew formula
 ```
 
 ## One-time setup (on GitHub — do this before the first release)
@@ -19,6 +19,7 @@ merge the Release PR
    `Formula/fetchira.rb` into it on every release.
 
 2. **Add two repo secrets** in `ImmuneFOMO/fetchira` → Settings → Secrets and variables → Actions:
+
    | Secret | What | How to make it |
    |---|---|---|
    | `RELEASE_PLZ_TOKEN` | so the tag release-plz pushes actually triggers the dist build (a tag from the default `GITHUB_TOKEN` does **not** start another workflow) | fine-grained PAT on this repo with **Contents: Read/Write** + **Pull requests: Read/Write** |
@@ -27,16 +28,13 @@ merge the Release PR
 3. **Allow Actions to open PRs**: Settings → Actions → General → Workflow permissions →
    enable "Allow GitHub Actions to create and approve pull requests".
 
-4. **Cut the first release** by tagging the current version. This both gives release-plz its
-   baseline (so the next bump is computed from here) and — because the dist workflow triggers
-   on any version tag — **publishes a real `v0.1.0` release** (binaries + Homebrew formula).
-   Make sure steps 1–3 are done first.
-   ```sh
-   git tag v0.1.0 && git push origin v0.1.0
-   ```
+4. Check the release workflows and `dist-workspace.toml` before changing targets or secrets.
+   This repository already has a release history; let release-plz generate the next version
+   and tag from its release PR.
 
 ## Day-to-day
 
+- Run the checks in [CONTRIBUTING.md](../CONTRIBUTING.md) before pushing.
 - Commit with [Conventional Commits](https://www.conventionalcommits.org/) (already the
   house style): `feat:` → minor bump, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major.
 - Push to `main`. A "Release PR" appears/updates. Ignore it as long as you like.
@@ -62,3 +60,10 @@ for the platform it builds from source (from a checkout).
 - **macOS signing**: ad-hoc only (no Apple Developer account). brew and `curl|sh` don't set
   the quarantine flag, so Gatekeeper doesn't block; only a manual browser download does.
 - **Regenerate CI** after editing `dist-workspace.toml`: `dist init --yes` (or `dist generate`).
+
+## Hosted images
+
+The Docker workflow builds `linux/amd64` and `linux/arm64` on pushes to `main` and version
+tags. Native amd64 hosted/auth/browser smoke checks run before publication. `latest` tracks the default branch; use a version tag for a reproducible deployment.
+A passing local test suite does not replace checking both release-build jobs and the
+published artifacts after the release workflow finishes.
