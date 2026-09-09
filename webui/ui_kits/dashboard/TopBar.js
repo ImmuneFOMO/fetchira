@@ -42,7 +42,7 @@ function Wordmark() {
       padding: '1px 5px',
       marginLeft: 2
     }
-  }, window.fxHosted ? 'hosted' : '127.0.0.1:7878'));
+  }, window.fxHosted ? 'hosted' : window.location.host));
 }
 function TopBar({
   onAdd

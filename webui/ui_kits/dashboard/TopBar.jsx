@@ -12,7 +12,7 @@ function Wordmark() {
     <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
       <img src={window.fxHosted ? '/admin/assets/assets/logo-mark.svg' : '../../assets/logo-mark.svg'} alt="" style={{ width: 26, height: 26 }} />
       <span style={{ fontFamily: 'var(--font-display)', fontSize: 19, fontWeight: 600, letterSpacing: '-0.03em', color: 'var(--text-hi)' }}>fetchira</span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-xs)', padding: '1px 5px', marginLeft: 2 }}>{window.fxHosted ? 'hosted' : '127.0.0.1:7878'}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-xs)', padding: '1px 5px', marginLeft: 2 }}>{window.fxHosted ? 'hosted' : window.location.host}</span>
     </div>
   );
 }

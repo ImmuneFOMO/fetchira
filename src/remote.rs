@@ -331,7 +331,10 @@ mod image_tests {
 }
 
 fn remote_error(error: ServiceError) -> ErrorData {
-    ErrorData::internal_error(format!("hosted MCP connection failed: {error}"), None)
+    match error {
+        ServiceError::McpError(error) => error,
+        error => ErrorData::internal_error(format!("hosted MCP connection failed: {error}"), None),
+    }
 }
 
 fn validate_compatibility(remote: &VersionResponse) -> anyhow::Result<()> {
@@ -543,6 +546,12 @@ pub async fn login(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_preserves_hosted_protocol_errors() {
+        let error = ErrorData::invalid_params("local stdio required", None);
+        assert_eq!(remote_error(ServiceError::McpError(error.clone())), error);
+    }
 
     #[test]
     fn endpoint_validation_is_strict() {

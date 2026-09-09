@@ -82,8 +82,22 @@ async fn main() -> anyhow::Result<()> {
                 let id = args
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("missing key id"))?;
-                let name = args.next().unwrap_or_else(|| id.clone());
-                return fetchira::hosted::create_key(&home, id, name).await;
+                let mut name = None;
+                let mut accounts_manage = false;
+                for arg in args {
+                    match arg.as_str() {
+                        "--accounts-manage" => accounts_manage = true,
+                        _ if !arg.starts_with('-') && name.is_none() => name = Some(arg),
+                        _ => anyhow::bail!(
+                            "usage: fetchira server key create ID [NAME] [--accounts-manage]"
+                        ),
+                    }
+                }
+                if id.starts_with('-') {
+                    anyhow::bail!("missing key id before options");
+                }
+                let name = name.unwrap_or_else(|| id.clone());
+                return fetchira::hosted::create_key(&home, id, name, accounts_manage).await;
             }
             let bind = std::env::var("FETCHIRA_BIND").unwrap_or_else(|_| "127.0.0.1:7879".into());
             return fetchira::hosted::run(&home, &bind).await;

@@ -847,9 +847,9 @@ function App() {
     pending: window.FX.update_pending
   }), phase === 'loading' ? /*#__PURE__*/React.createElement(Loading, null) : adminTab === 'overview' ? /*#__PURE__*/React.createElement(window.OverviewTab, null) : adminTab === 'accounts' ? /*#__PURE__*/React.createElement(window.AccountsTab, {
     onAdd: () => setModal(true)
-  }) : /*#__PURE__*/React.createElement(window.ActivityTab, null)), modal && /*#__PURE__*/React.createElement(window.AddAccountModal, {
+  }) : /*#__PURE__*/React.createElement(window.ActivityTab, null))), modal && /*#__PURE__*/React.createElement(window.AddAccountModal, {
     onClose: () => setModal(false)
-  })));
+  }));
 }
 
 // Live wiring for the hosted server. Mutations POST to the hosted admin API and refresh live state.

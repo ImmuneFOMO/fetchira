@@ -338,7 +338,7 @@ function LocalGettingStarted() {
       border: it.done ? '1px solid rgba(70,209,122,0.5)' : '1px solid var(--border-strong)',
       background: it.done ? 'var(--green-dim)' : 'transparent'
     }
-  }, "\u2713"), /*#__PURE__*/React.createElement("span", {
+  }, it.done ? '✓' : ''), /*#__PURE__*/React.createElement("span", {
     style: {
       minWidth: 0
     }

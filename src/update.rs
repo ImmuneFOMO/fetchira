@@ -220,12 +220,34 @@ pub async fn perform(home: &Path, force: bool) -> anyhow::Result<Outcome> {
     let triple = target_triple().context(
         "no prebuilt binary for this platform — reinstall via install.sh or `cargo install`",
     )?;
-    let dir = std::env::temp_dir().join(format!("fetchira-update-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
+    let dir = create_update_dir()?;
     let res = download_and_swap(&client, &tag, triple, &dir).await;
     let _ = std::fs::remove_dir_all(&dir); // clean up on success and failure alike
     res?;
     Ok(Outcome::Updated(latest.to_string()))
+}
+
+fn create_update_dir() -> anyhow::Result<PathBuf> {
+    let root = std::env::temp_dir();
+    for _ in 0..3 {
+        let dir = root.join(format!("fetchira-update-{:032x}", rand::random::<u128>()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("could not create update directory {}", dir.display())
+                });
+            }
+        }
+    }
+    anyhow::bail!("could not create a unique update directory")
 }
 
 fn marker_path(home: &Path) -> PathBuf {
@@ -338,21 +360,73 @@ async fn download_and_swap(
         .await?;
 
     // Verify the checksum dist publishes alongside the archive (catches truncated downloads).
-    if let Ok(resp) = client
+    let checksum = client
         .get(format!("{base}/fetchira-{triple}.tar.xz.sha256"))
         .send()
         .await
-        .and_then(|r| r.error_for_status())
-    {
-        verify_sha256(&tarball, &resp.text().await?)?;
-    }
+        .context("could not download release checksum")?
+        .error_for_status()
+        .context("release checksum request failed")?
+        .text()
+        .await
+        .context("could not read release checksum")?;
+    verify_sha256(&tarball, &checksum)?;
 
     let archive = dir.join("fetchira.tar.xz");
     std::fs::write(&archive, &tarball)?;
     let extracted = extract(&archive, dir)?;
     finalize(&extracted)?;
+    launch_check(
+        &extracted,
+        &dir.join("verify-home"),
+        dir,
+        Duration::from_secs(10),
+    )
+    .await?;
     self_replace::self_replace(&extracted)?;
     Ok(())
+}
+
+/// Launch the downloaded binary before replacing the current one. The isolated home and working
+/// directory keep startup checks from reading or writing the user's real config.
+async fn launch_check(
+    bin: &Path,
+    home: &Path,
+    cwd: &Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(home)?;
+    let output = tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(bin)
+            .arg("--version")
+            .env("FETCHIRA_HOME", home)
+            .current_dir(cwd)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("downloaded binary did not finish `--version` within {timeout:?}"))?
+    .with_context(|| format!("launching downloaded binary {}", bin.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    anyhow::bail!(
+        "downloaded binary failed `--version` ({}){}",
+        output.status,
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    );
 }
 
 fn verify_sha256(bytes: &[u8], want_line: &str) -> anyhow::Result<()> {
@@ -422,4 +496,82 @@ fn finalize(bin: &Path) -> anyhow::Result<()> {
             .status();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_check_accepts_startable_binary_and_rejects_failed_start() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "fetchira-update-check-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let make_executable = |path: &Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+
+        let good = root.join("good");
+        make_executable(
+            &good,
+            "#!/bin/sh\n[ -n \"$FETCHIRA_HOME\" ] || exit 10\nprintf '%s\\n' \"$PWD\" > \"$FETCHIRA_HOME/cwd\"\nprintf '%s\\n' 'fetchira test'\n",
+        );
+        let good_home = root.join("good-home");
+        launch_check(&good, &good_home, &root, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let expected_cwd = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(good_home.join("cwd"))
+                .unwrap()
+                .trim(),
+            expected_cwd.to_string_lossy()
+        );
+
+        let bad = root.join("bad");
+        make_executable(
+            &bad,
+            "#!/bin/sh\nprintf '%s\\n' 'incompatible test binary' >&2\nexit 1\n",
+        );
+        let bad_home = root.join("bad-home");
+        let error = launch_check(&bad, &bad_home, &root, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("incompatible test binary"));
+
+        let hanging = root.join("hanging");
+        make_executable(&hanging, "#!/bin/sh\nexec sleep 60\n");
+        let error = launch_check(
+            &hanging,
+            &root.join("hanging-home"),
+            &root,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("did not finish `--version`"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = create_update_dir().unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        std::fs::remove_dir(dir).unwrap();
+    }
 }

@@ -40,7 +40,9 @@ pub struct SearchArgs {
     pub recency: Option<String>,
     /// Restrict to these domains; prefix one with "-" to exclude it (e.g. ["nature.com","-reddit.com"]).
     pub domains: Option<Vec<String>>,
-    /// Absolute paths of local files/images to attach and ask about. Web providers only;
+    /// Absolute paths of local files/images to attach and ask about. Local stdio only;
+    /// hosted HTTP rejects file inputs because it cannot access the caller's filesystem.
+    /// Web providers only;
     /// defaults to grok_web when no `provider` is forced.
     pub file: Option<Vec<String>>,
 }
@@ -85,7 +87,8 @@ pub struct ImageArgs {
     pub path: Option<String>,
     /// Resume a ChatGPT image conversation to edit its previous image.
     pub session: Option<String>,
-    /// Absolute paths of images/files to attach. Use this to edit an existing/generated image.
+    /// Absolute paths of images/files to attach (local stdio only, not hosted HTTP).
+    /// Use this to edit an existing/generated image.
     pub file: Option<Vec<String>>,
 }
 
@@ -144,6 +147,10 @@ impl Fetchira {
         input: Input,
         forced: Option<ProviderKind>,
     ) -> Result<CallToolResult, ErrorData> {
+        validate_file_input(
+            &input.file,
+            context.extensions.get::<http::request::Parts>().is_some(),
+        )?;
         let Some(request_id) = context
             .extensions
             .get::<http::request::Parts>()
@@ -157,6 +164,16 @@ impl Fetchira {
             .scope(request_id, self.run(cap, input, forced))
             .await
     }
+}
+
+fn validate_file_input(files: &[PathBuf], is_http: bool) -> Result<(), ErrorData> {
+    if is_http && !files.is_empty() {
+        return Err(ErrorData::invalid_params(
+            "File attachments require local stdio mode; hosted HTTP does not upload local files or accept server filesystem paths.",
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve which provider to force and the opaque resume token. A `session` token is
@@ -201,7 +218,7 @@ fn search_input(args: SearchArgs, session: Option<String>) -> Input {
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-up turns. For chatgpt_web this is a full chat turn with web search on by default — `mode=\"chat\"` answers from the model alone. Attach local files with `file` to ask about them. Niche knobs: `topic`, `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
+        description = "Web search across quota-aware providers. API providers (serper, tavily, exa, parallel) return ranked title/url/snippet results; web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-up turns. For chatgpt_web this is a full chat turn with web search on by default — `mode=\"chat\"` answers from the model alone. In local stdio mode, attach files with `file` to ask about them. Niche knobs: `topic`, `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
     )]
     pub async fn search(
         &self,
@@ -300,7 +317,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; to edit an existing/generated image pass its absolute path in `file` and describe the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Saves the result to disk and returns its path; pass `path` to choose it."
+        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; in local stdio mode, edit an existing image by passing its absolute path in `file` and describing the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Saves the result to disk and returns its path; pass `path` to choose it."
     )]
     pub async fn create_image(
         &self,
@@ -319,6 +336,10 @@ impl Fetchira {
                 .collect(),
             ..Default::default()
         };
+        validate_file_input(
+            &input.file,
+            context.extensions.get::<http::request::Parts>().is_some(),
+        )?;
         let router = self.router.read().await.clone();
         let future = router.call(Capability::Image, &input, forced);
         let result = if let Some(request_id) = context
@@ -448,6 +469,14 @@ mod tests {
     use super::*;
     use crate::providers::OutImage;
     use rmcp::model::RawContent;
+
+    #[test]
+    fn hosted_file_inputs_cannot_read_server_files() {
+        let files = [PathBuf::from("/run/secrets/master_key")];
+        assert!(validate_file_input(&files, true).is_err());
+        assert!(validate_file_input(&files, false).is_ok());
+        assert!(validate_file_input(&[], true).is_ok());
+    }
 
     #[test]
     fn image_result_writes_explicit_path() {

@@ -1,6 +1,6 @@
 ---
 name: fetchira
-description: Web search, page reading, deep research, and headless browsing via the fetchira MCP server. Use whenever you need current/external information — search the web, read a URL as clean markdown, run a multi-source deep research report, or fetch a JS-heavy page. Routes across many free providers (incl. logged-in Gemini/Perplexity/Grok web sessions) with automatic quota-aware failover.
+description: Web search, page reading, deep research, and headless browsing via the fetchira MCP server. Use whenever you need current/external information — search the web, read a URL as clean markdown, run a multi-source deep research report, or fetch a JS-heavy page. Routes across many free providers (incl. logged-in Gemini/Grok/ChatGPT web sessions) with automatic quota-aware failover.
 ---
 
 # fetchira
@@ -12,7 +12,7 @@ first (see the project README); these tools then appear as `search`, `read`, `de
 
 ## When to use
 - **`search`** — find current info / answer a factual question. API providers return ranked
-  title+url+snippet; web providers (`perplexity_web`/`gemini_web`/`grok_web`) return a synthesized
+  title+url+snippet; web providers (`gemini_web`/`grok_web`/`chatgpt_web`) return a synthesized
   answer with sources.
 - **`read`** — fetch ONE known URL as clean markdown (article, doc, README).
 - **`deep_research`** — a thorough, multi-source report with citations. Slower (seconds to minutes).
@@ -26,19 +26,18 @@ Prefer `search` for quick facts and `read` when you already have the URL. Reach 
 only when the user wants depth/coverage, not a one-line answer.
 
 ## Useful args (search / deep_research)
-- `provider` — force a backend (e.g. `"serper"`, `"perplexity_web"`, `"gemini_web"`). Omit to let
+- `provider` — force a backend (e.g. `"serper"`, `"gemini_web"`, `"chatgpt_web"`). Omit to let
   the router choose. Web providers give answers+sources; API providers give SERP rows.
 - `model` / `mode` — provider-specific tuning. grok `mode:"auto"|"fast"|"expert"|"heavy"` (search
-  defaults to fast, deep_research to heavy→expert); perplexity `mode:"reasoning"`; gemini
-  `model:"pro"|"flash"`; chatgpt_web `model` = a picker model + optional thinking level (see below).
-  Optional; defaults are fine.
+  defaults to fast, deep_research to heavy→expert); gemini `model:"pro"|"flash"`; chatgpt_web
+  `model` = a picker model + optional thinking level (see below). Optional; defaults are fine.
 - `session` — continue a previous web-provider conversation **with history**. Every web result ends
   with `⟦session: <token>⟧`; pass that token back as `session` to ask a follow-up in the same thread.
 
 ## Conversation continuity
 ```
-search { query: "...", provider: "perplexity_web" }     -> answer + ⟦session: perplexity_web:…⟧
-search { query: "a follow-up question", session: "perplexity_web:…" }   -> continues the thread
+search { query: "...", provider: "chatgpt_web" }     -> answer + ⟦session: chatgpt_web:…⟧
+search { query: "a follow-up question", session: "chatgpt_web:…" }   -> continues the thread
 ```
 
 ## Gemini Deep Research (plan → run)
@@ -73,10 +72,13 @@ drive setup from a shell (the `fetchira` binary is on PATH):
 - `fetchira providers` — list every provider and whether it needs an API key or a browser login.
 - `fetchira list` — show configured accounts + remaining quota + status.
 - Ask the user which providers they want and for any API keys, then run
-  `fetchira add <provider> --key <KEY>` (key-based) per account.
+  `fetchira add <provider> --key <KEY>` (key-based) per account. Never omit `--key` — a prompt hangs.
 - For web providers run `fetchira add <provider>` or `fetchira login <provider>` — a browser opens
   for the user to log in (you can't complete this for them; tell them to finish in the window).
 - `fetchira remove <label>` removes an account.
+
+Do not run bare `fetchira`, `fetchira ui`, `fetchira install`, or `fetchira setup`.
+
 Keys are stored in the user's global config (`~/.config/fetchira`), never in the project.
 
 ## Notes

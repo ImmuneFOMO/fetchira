@@ -1090,7 +1090,12 @@ pub(crate) struct McpTarget {
 pub(crate) fn mcp_target_list() -> Vec<McpTarget> {
     let h = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let appsup = h.join("Library/Application Support");
-    mcp_targets(&h, &appsup)
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| h.join(".config"));
+    mcp_targets(&h, &appsup, &xdg)
 }
 
 fn has_fetchira(path: &Path) -> bool {
@@ -1098,8 +1103,18 @@ fn has_fetchira(path: &Path) -> bool {
         .is_ok_and(|s| s.contains("\"fetchira\"") || s.contains("[mcp_servers.fetchira]"))
 }
 
-fn mcp_targets(h: &Path, appsup: &Path) -> Vec<McpTarget> {
+fn mac_or_xdg(mac: PathBuf, xdg: PathBuf) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        xdg
+    }
+}
+
+fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path) -> Vec<McpTarget> {
     let p = |rel: &str| h.join(rel);
+    let claude_dir = mac_or_xdg(appsup.join("Claude"), xdg.join("Claude"));
+    let code_dir = mac_or_xdg(appsup.join("Code"), xdg.join("Code"));
     vec![
         McpTarget {
             name: "Claude Code",
@@ -1115,9 +1130,9 @@ fn mcp_targets(h: &Path, appsup: &Path) -> Vec<McpTarget> {
         },
         McpTarget {
             name: "OpenCode",
-            present: p(".config/opencode").exists() || which("opencode"),
-            installed: has_fetchira(&p(".config/opencode/opencode.json")),
-            run: boxed(p(".config/opencode/opencode.json"), reg_opencode),
+            present: xdg.join("opencode").exists() || which("opencode"),
+            installed: has_fetchira(&xdg.join("opencode/opencode.json")),
+            run: boxed(xdg.join("opencode/opencode.json"), reg_opencode),
         },
         McpTarget {
             name: "Gemini CLI",
@@ -1139,18 +1154,18 @@ fn mcp_targets(h: &Path, appsup: &Path) -> Vec<McpTarget> {
         },
         McpTarget {
             name: "Claude Desktop",
-            present: appsup.join("Claude").exists(),
-            installed: has_fetchira(&appsup.join("Claude/claude_desktop_config.json")),
+            present: claude_dir.exists(),
+            installed: has_fetchira(&claude_dir.join("claude_desktop_config.json")),
             run: boxed(
-                appsup.join("Claude/claude_desktop_config.json"),
+                claude_dir.join("claude_desktop_config.json"),
                 reg_mcp_servers,
             ),
         },
         McpTarget {
             name: "VS Code",
-            present: appsup.join("Code").exists(),
-            installed: has_fetchira(&appsup.join("Code/User/mcp.json")),
-            run: boxed(appsup.join("Code/User/mcp.json"), reg_vscode),
+            present: code_dir.exists(),
+            installed: has_fetchira(&code_dir.join("User/mcp.json")),
+            run: boxed(code_dir.join("User/mcp.json"), reg_vscode),
         },
     ]
 }
@@ -1270,7 +1285,7 @@ pub fn help() {
         "fetchira — quota-aware web search/scrape MCP server + CLI\n\n\
          USAGE:\n  \
            fetchira [serve]              run the MCP server (stdio) — the default when piped\n  \
-           fetchira ui                  open the local web dashboard (live quota, accounts); also the default in a terminal\n  \
+           fetchira ui                  open the local web dashboard (http://127.0.0.1:7878); also the default in a terminal\n  \
            fetchira setup               guided setup: pick providers, enter keys, log in\n  \
            fetchira providers           list all available providers\n  \
            fetchira list                show your accounts + remaining quota\n  \
@@ -1283,8 +1298,11 @@ pub fn help() {
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
            fetchira remote set URL      connect stdio to hosted Fetchira [--key fk_live_*]\n  \
            fetchira remote check        verify endpoint, API key, and version compatibility\n  \
-           fetchira remote login ID     capture/upload a one-time hosted login [--browser chrome|firefox] [--file session.json]\n  \
+           fetchira remote login CHALLENGE  capture/upload a hosted login [--browser chrome|firefox] [--file session.json]\n  \
            fetchira remote disconnect   clear the saved hosted endpoint and API key\n  \
+           fetchira server              hosted Streamable HTTP at /mcp (alias serve-http; FETCHIRA_MASTER_KEY required; FETCHIRA_BIND default 127.0.0.1:7879)\n  \
+           fetchira server key create ID [NAME] [--accounts-manage]  mint a key (mcp + usage:read; opt in to account management/remote login; prints fk_live_* once)\n  \
+           fetchira server password hash  Argon2id of a password on stdin (not a TTY) — for FETCHIRA_ADMIN_PASSWORD, never plaintext\n  \
            fetchira update              download & install the latest release (--when-idle: after all instances exit)\n  \
            fetchira --version           print the installed version\n  \
            fetchira help                this message\n\n\
@@ -1295,6 +1313,48 @@ pub fn help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_registration_uses_native_config_paths() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira_mcp_paths_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let appsup = home.join("Library/Application Support");
+        let xdg = home.join("custom-config");
+        for base in [&appsup, &xdg] {
+            for app in ["Claude", "Code"] {
+                std::fs::create_dir_all(base.join(app)).unwrap();
+            }
+        }
+        let native = if cfg!(target_os = "macos") {
+            &appsup
+        } else {
+            &xdg
+        };
+        for (name, path) in [
+            (
+                "Claude Desktop",
+                native.join("Claude/claude_desktop_config.json"),
+            ),
+            ("VS Code", native.join("Code/User/mcp.json")),
+            ("OpenCode", xdg.join("opencode/opencode.json")),
+        ] {
+            let targets = mcp_targets(&home, &appsup, &xdg);
+            let target = targets.iter().find(|t| t.name == name).unwrap();
+            assert!(!target.installed);
+            (target.run)("/bin/fetchira").unwrap();
+            assert!(has_fetchira(&path), "wrong config path for {name}");
+            let targets = mcp_targets(&home, &appsup, &xdg);
+            let target = targets.iter().find(|t| t.name == name).unwrap();
+            assert!(target.present && target.installed);
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn mcp_merge_preserves_existing() {

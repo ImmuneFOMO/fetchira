@@ -1,434 +1,259 @@
+![Fetchira](docs/fetchira.gif)
+
 # fetchira
 
-Free web search, page reading, deep research and image generation for your coding
-agent — one binary, zero monthly bill.
+Give your agent search, read, deep research, image gen, and a browser - from free-tier providers and from subscriptions you already pay for. Gemini and Grok web sessions, plus ChatGPT through Chrome/Chromium, can also answer questions about an attached file.
 
-![fetchira architecture](docs/architecture.png)
+Providers come with some free quota, so you can start fetchira with no paid subscriptions: free-tier search keys (several Exa accounts = more quota), and ChatGPT or Gemini sessions if you already pay for those. A router picks the least-exhausted account and fails over on 429. Replies stay compact so the MCP does not eat the model's context.
 
-## The problem
+Hosted: same binary on a server. Agents connect with a key.
 
-Your agent needs the web constantly, and paid search APIs bill by the call. Meanwhile a
-real amount of **free** search goes unused every month: Serper, Tavily, Exa and Parallel
-give away search credits, Firecrawl reads pages, Steel drives a headless browser — and
-your logged-in Gemini, Grok and ChatGPT accounts add search, multi-step deep research,
-image generation and file Q&A on top. Together they cover most of an agent's research,
-for free.
+![how it works](docs/overview.png)
 
-The catch is the bookkeeping. Each provider has its own API, its own key, its own quota
-and its own reset window. To live on the free tiers you have to remember which key goes
-where, track who is exhausted this month, and switch to another provider the moment one
-starts returning `429`. Nobody wants to do that by hand, and an agent certainly can't.
+![local dashboard](docs/dashboard.png)
 
-## The solution
+## Quick start
 
-fetchira is that bookkeeping, turned into a program. It is a single Rust binary that speaks
-**MCP** (the Model Context Protocol) to your coding agent. The agent asks for a generic
-capability — *search this*, *read this URL*, *do deep research*, *drive a browser* — and
-fetchira walks that capability's provider order (built-in, or set yours with `fetchira
-priority`), picks the least-exhausted account of each provider, and fails over to the next
-the moment one errors or runs out. It keeps a running count of what each account has left,
-so the free quota gets spent evenly instead of one key burning out while the rest sit idle.
-
-It also ships with a **local dashboard** so a human can watch the same thing in real time and
-manage accounts without touching a config file.
-
-## Quickstart
-
-```sh
-# macOS, or Linux with Homebrew:
-brew install ImmuneFOMO/tap/fetchira
-# Linux (or macOS without Homebrew) — grabs the prebuilt binary into ~/.local/bin:
-curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
-
-fetchira                                # opens the dashboard: connect a provider, try a search, register your coding tools
-```
-
-Prefer the terminal? `fetchira setup` (guided TUI) + `fetchira install` do the same.
-Restart your coding tool and ask it to search the web — fetchira takes it from there.
-The details: [picking providers](#picking-providers),
-[registering tools](#register-with-your-coding-tools), [web sessions](#web-sessions),
-[configuration](#configuration).
-
-**Host it.** Same router on a private VPS, with keys for friends: [docs/hosted.md](docs/hosted.md).
-
-### Or let your agent set it up
-
-Don't want to touch a terminal? Paste this into Claude Code (or any coding agent with
-shell access) and it will install fetchira, walk you through providers, and register
-itself:
-
-```text
-Install and set up fetchira (https://github.com/ImmuneFOMO/fetchira) for me:
-
-1. Install: `brew install ImmuneFOMO/tap/fetchira`, or without Homebrew:
-   `curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh`
-2. Run `fetchira providers`, then help me pick 1-3 to start (serper + firecrawl for
-   search + reading on API keys, or gemini_web for everything with just a Google login).
-3. For API-key providers: give me the signup link, wait for me to paste the key, then run
-   `fetchira add <provider> --key <KEY>`. Never run `add` without `--key` — it prompts
-   interactively and will hang on you.
-4. For gemini_web / grok_web / chatgpt_web: run `fetchira add <provider>` and tell me a
-   browser window will open — I log in there myself; it waits up to 5 minutes.
-5. Register the MCP server with the tool you are running in. For Claude Code:
-   `claude mcp add fetchira -s user -- $(which fetchira)`. For other tools add
-   `{"mcpServers": {"fetchira": {"command": "<path from which fetchira>"}}}` to their
-   mcp config. Do not use `fetchira install` or `fetchira setup` — they are interactive
-   TUIs and do nothing when you run them.
-6. Verify with `fetchira list`: every account should show `key` or `session`, not
-   `NO KEY` / `NEEDS LOGIN`.
-7. Tell me to restart my coding tool, then test by asking it to search for something
-   current.
-
-Never run bare `fetchira` yourself — piped, it becomes the MCP server and hangs.
-```
-
-## What you get
-
-| Capability | The agent calls | fetchira routes to (default order — reorder with `fetchira priority`) |
-|---|---|---|
-| **search** | `search` | tavily → serper → exa → parallel → gemini_web → grok_web → chatgpt_web |
-| **read** | `read` | firecrawl → tavily → serper → exa (then auto-escalates to a headless browser) |
-| **deep research** | `deep_research` | gemini_web → chatgpt_web → parallel → exa → grok_web → tavily |
-| **image** | `create_image` | chatgpt_web → gemini_web → grok_web |
-| **file Q&A** | `search` / `deep_research` + `file` | attach local files to a grok / gemini / chatgpt turn and ask about them |
-| **browser** | `browser` | steel |
-| **usage** | `usage` | live balance + per-tier limits + model/mode catalog, and a per-provider capability sheet |
-
-- **Quota-aware routing.** Every call goes to the account with the most free quota left for
-  that capability. A `429`/`402` marks that budget exhausted for the period and the router
-  stops sending to it until the window resets.
-- **Automatic failover.** If the chosen account errors, fetchira moves to the next one for the
-  same capability and the agent never sees the hiccup. Force a single backend with
-  `provider: "exa"` and it fails over only among that provider's own accounts.
-- **Many accounts per provider.** Add `exa-1`, `exa-2`, … and the router load-balances across
-  them by remaining quota.
-- **A sticky proxy per account.** Give each account its own outbound IP (`proxy = "pool"` from
-  a Webshare pool, or a pinned URL) so multiple free accounts don't share one address.
-- **Real balances, live.** Where a provider exposes it, fetchira reads the actual figure from the
-  account instead of guessing from a nominal cap — credits for serper / tavily / firecrawl, a real
-  dollar balance for exa / parallel / steel (shown as `$balance · ≈N requests`).
-- **Niche research, not just keywords.** `search` and `deep_research` take `topic` (web / news /
-  academic), `recency`, `domains` (include, or `-` to exclude) and `depth` — each mapped to the
-  backend's native filter (Google News / Scholar, exa categories, date ranges) or folded into the
-  query. `usage(provider=…)` returns that backend's full sheet: its niches, `mode` escape hatches,
-  and ready-to-copy example calls.
-- **Web sessions, not just API keys.** gemini_web / grok_web / chatgpt_web authenticate with your
-  real logged-in browser cookies and return a synthesized answer with sources — plus multi-step
-  Deep Research (Gemini, Grok and ChatGPT), image generation and file Q&A. `usage` reports each
-  session's live per-tier limits and its selectable model/mode catalog. See
-  [Web sessions](#web-sessions) below.
-- **A local dashboard.** Live quota, a streaming route log, and full account management in the
-  browser — covered next.
-
-## The dashboard
-
-```sh
-fetchira ui          # opens http://127.0.0.1:7878 in your browser
-```
-
-An instrument panel for the router. The **Overview** groups every provider by capability and
-shows, per account, how much free quota is left and when it resets — next to a live log of
-calls as they happen. A **Routing priority** panel on the same tab reorders which provider each
-capability tries first (the same order `fetchira priority` sets on the CLI).
-
-![Overview tab](docs/overview.png)
-
-**Accounts** is the management surface: every account with its quota bar, reset window, proxy,
-key/session status and health. Add, remove, re-login or send a real "Test" probe to any
-account, all from here — it writes the same config file the CLI does. Secrets are never sent
-to the browser (keys show as `•••• key set`, proxy credentials are masked).
-
-![Accounts tab](docs/accounts.png)
-
-**Activity** is the full route log with filters, per-provider health, and the failover story
-written out — `exa-1 429 → tavily-1`, last success and last error per provider. Click any call to
-open what it sent and got back; the **Debug** tab keeps that same per-request detail with the raw
-HTTP — headers and body, secrets redacted — for when something needs tracing.
-
-![Activity tab](docs/activity.png)
-
-Adding an account is a small form — pick a provider, paste a key (or log in, for web sessions),
-optionally pin a proxy:
-
-![Add account](docs/add-account.png)
-
-The whole dashboard is **self-contained and offline**: the compiled assets (including React) are embedded
-in the binary, so the runtime needs no Node, no Babel and no frontend build step. It binds to `127.0.0.1` only and
-is gated by a per-session token in the URL plus `Host`/`Origin` checks.
-
-## How it works
-
-One capability call turns into "pick an account, call it, fall back if it fails, record what
-happened" — and the dashboard sees the result live:
-
-![Request flow with failover](docs/request-flow.png)
-
-**Quota tracking.** Usage lives in a SQLite file (`usage.db`), keyed by `(account, period)`
-where the period is `YYYY-MM` (monthly), `YYYY-MM-DD` (daily) or `lifetime`. Each window is a
-fresh row, so quotas reset automatically when the calendar turns over. A successful call
-increments the counter; a `429`/`402` marks the budget exhausted for the period. These are
-**soft local guards** — the provider's `429` is always the source of truth and is what triggers
-failover. Deep research is tracked on its own daily budget per web provider, because those
-limits are tighter and time-windowed.
-
-**The dashboard is a separate process.** Your agent runs one fetchira process (the MCP server);
-`fetchira ui` is another. They never talk directly — they share the one `usage.db`. Every call
-the router serves is appended to a `route_log` table (including failover hops), and the
-dashboard reads quota and the route log straight from that file, streaming new lines to the
-browser over Server-Sent Events. That is why the live log keeps working no matter which process
-actually handled the request.
-
-**One binary, two modes.** The same executable is both the MCP server and the dashboard. Run
-bare `fetchira` from an interactive terminal and it opens the UI; when a coding tool launches it
-over piped stdio it serves MCP exactly as before. Force either with `fetchira serve` /
-`fetchira ui`, or set `FETCHIRA_NO_UI=1`.
-
-## Install and set up
-
-**Homebrew** (macOS + Linux):
+**Mac**
 
 ```sh
 brew install ImmuneFOMO/tap/fetchira
 ```
 
-**Or `curl | sh`** — downloads the prebuilt binary for your platform into `~/.local/bin`:
+**Linux x86_64**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh
 ```
 
-Prebuilt binaries ship for **macOS arm64/x86_64** and **Linux arm64/x86_64**.
-
-**With Cargo** — builds from source, works on any platform Rust targets (incl. arm64 Linux):
+**Linux arm64** (build from source for the current release)
 
 ```sh
-cargo install --git https://github.com/ImmuneFOMO/fetchira            # tip of main
-cargo install --git https://github.com/ImmuneFOMO/fetchira --tag v0.1.12   # pin a release
+cargo install --locked --git https://github.com/ImmuneFOMO/fetchira
 ```
 
-Needs a C toolchain + `cmake` on the build host (the TLS-impersonation dep bundles BoringSSL).
-The binary lands in `~/.cargo/bin`; update later with the same command or `fetchira update`.
+`curl | sh` puts a prebuilt in `~/.local/bin` on macOS (arm64/x86_64) and Linux x86_64 (glibc >= 2.34) — run `export PATH="$HOME/.local/bin:$PATH"` if `fetchira` is missing. The current v0.1.13 release has no Linux arm64 archive, so build that platform with `cargo install --locked --git https://github.com/ImmuneFOMO/fetchira` (needs Rust, cmake, Perl, pkg-config, and a C/C++ toolchain; binary lands in `~/.cargo/bin`).
 
-**From a checkout** (builds with cargo, also seeds config):
+`fetchira ui` opens the local dashboard and keeps running; use another terminal for CLI setup:
 
 ```sh
-./install.sh          # builds, installs the binary to ~/.local/bin
+fetchira providers                # see every provider and its capability
+fetchira add serper --key KEY     # API-key provider; never omit --key
+fetchira add gemini_web            # web-session provider; a browser opens for login
+fetchira list                     # expect key or session, not NO KEY / NEEDS LOGIN
 ```
 
-Then configure providers:
+Config lives in `$FETCHIRA_HOME`, otherwise `$XDG_CONFIG_HOME/fetchira` (default `~/.config/fetchira`).
 
-```sh
-fetchira setup        # guided: pick providers, paste API keys, log into the web ones
+Bare `fetchira` in a TTY opens the dashboard. A coding tool starts bare `fetchira` with piped stdio, where it waits for MCP messages; use `fetchira ui` when you want the dashboard.
+
+### Choose providers
+
+Every provider is optional. Start with one or two that match the job, then add more as needed. API-key providers use the signup link below; web providers use a browser login and do not need an API key.
+
+| Provider | Auth | Useful for | Start here |
+|---|---|---|---|
+| `serper` | API key | Google search and page reads | [serper.dev](https://serper.dev) |
+| `tavily` | API key | Search, answers and page reads | [app.tavily.com](https://app.tavily.com) |
+| `exa` | API key | Semantic search and research | [exa.ai](https://exa.ai/?ref=immunefomo) |
+| `firecrawl` | API key | Search, scrape and crawl pages | [firecrawl.link](https://firecrawl.link/immunefomo) |
+| `parallel` | API key | Search and deep research | [parallel.ai](https://parallel.ai) |
+| `steel` | API key | Browser and JavaScript page reads | [steel.dev](https://steel.dev) |
+| `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
+| `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
+| `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |
+
+The provider's own plan and quota are authoritative; free tiers and prices change. `fetchira providers` prints the same catalog from the installed binary.
+
+**Copy for your agent**
+
+```
+Set up fetchira locally on this machine. Use the real CLI only; do not invent flags.
+
+Install:
+- macOS: `brew install ImmuneFOMO/tap/fetchira`
+- macOS without Homebrew or Linux x86_64: `curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh | sh`, then `export PATH="$HOME/.local/bin:$PATH"` if needed
+- Linux arm64: `cargo install --locked --git https://github.com/ImmuneFOMO/fetchira` (needs Rust, cmake, Perl, pkg-config and a C/C++ toolchain)
+
+Do not run bare `fetchira`, `fetchira install`, or `fetchira setup`: the first opens a dashboard or waits for MCP, and the latter two are interactive. Run `fetchira providers`, recommend one or two providers, and ask me which ones to use.
+
+For an API-key provider, show its signup link from the README, wait for me to paste the key, then run `fetchira add PROVIDER --key 'KEY'`. Never omit `--key`, never print the key, and never run the command before I provide it.
+For `gemini_web`, `grok_web`, or `chatgpt_web`, run `fetchira add PROVIDER`, tell me that a browser window opens, and wait for me to finish login (up to 5 minutes).
+
+Run `fetchira list`; every selected account must show `key` or `session`, not `NO KEY` or `NEEDS LOGIN`. Register fetchira with the coding tool we are using: for Claude Code run `claude mcp add fetchira -s user -- "$(command -v fetchira)"`; for another tool use the exact config snippet and path from the README. Do not use a raw hosted URL for local setup.
+
+Restart the coding tool or reload its MCP servers. Verify by asking it to search for a current topic and report whether the Fetchira tool answered.
 ```
 
-Update later with `brew upgrade fetchira` (Homebrew) or `fetchira update` (curl|sh / manual install).
+## Use it
 
-`setup` walks every provider, asks which you want, prompts for the API key (key-based) or opens
-a browser to log in (web-session), and writes everything to **global config** in
-`~/.config/fetchira/` — no manual `.env` editing. Re-run any time. Config lives in
-`$FETCHIRA_HOME` or `~/.config/fetchira` (`fetchira.toml` + `usage.db`), so the binary works no
-matter which directory an MCP client launches it from.
-
-### Picking providers
-
-Every provider is optional — add what you have and the router routes around the rest. Two good
-starting points: **serper + firecrawl** (solid search + read on generous free keys), or just
-**gemini_web** (one Google login gives search, deep research, images and file Q&A with no API
-key at all). Add more later with `fetchira add <provider>`; they slot into the routing order
-automatically.
-
-| Provider | Auth | Gives you | Free tier (approx.) | Get it |
-|---|---|---|---|---|
-| `serper` | API key | Google results: search, scholar, news, places, patents, page scrape | 2,500 one-time credits | [serper.dev](https://serper.dev) |
-| `tavily` | API key | LLM-tuned search + answers, page extract, site crawl | 1,000 credits/mo | [app.tavily.com](https://app.tavily.com) |
-| `exa` | API key | neural/semantic search, deep research | up to 20,000 requests/mo | [exa.ai](https://exa.ai/?ref=immunefomo) |
-| `parallel` | API key | async multi-round deep research | $20–$80 signup credit + $5/mo | [parallel.ai](https://parallel.ai) |
-| `firecrawl` | API key | read/scrape/crawl pages to clean markdown | 1,000 credits/mo | [firecrawl.dev](https://firecrawl.link/immunefomo) |
-| `steel` | API key | headless-browser scrape: JS pages, screenshots, PDFs | $30 one-time credit | [steel.dev](https://steel.dev) |
-| `gemini_web` | browser login | Gemini search, deep research, images, file Q&A | your Google account | `fetchira login gemini_web` |
-| `grok_web` | browser login | Grok search, deepsearch, images, file Q&A | your X/Grok account | `fetchira login grok_web` |
-| `chatgpt_web` | browser login | ChatGPT chat + web search, deep research, images | your OpenAI account | `fetchira login chatgpt_web` |
-
-Free tiers drift; the column is a rough guide. Once an account is added, the dashboard and
-`usage` show the **real** live balance read from the provider, not these estimates. Web
-sessions ride whatever plan the account has — a paid tier (Gemini Pro, SuperGrok, ChatGPT
-Plus) simply shows up as bigger live limits.
-
-## CLI
-
-```sh
-fetchira ui                     # open the local dashboard (live quota, accounts, route log)
-fetchira providers              # list every available provider and what it does
-fetchira list                   # your accounts + remaining quota + login status
-fetchira add <provider>         # add an account (prompts for key, or logs in if web)
-                                #   flags: --label L  --key K  --proxy pool|URL
-fetchira remove <label>         # delete an account (and its session/usage)
-fetchira login <provider>       # (re)capture a web-session login via a browser
-fetchira session <label>        # attach a web session by hand (cookies JSON on stdin or --file)
-fetchira priority [cap]         # show or set the provider order per capability
-                                #   e.g. fetchira priority search grok_web,serper   (reset: … search reset)
-fetchira install                # register fetchira with your coding tools
-fetchira update                 # download & install the latest release (or `brew upgrade`)
-fetchira --version              # print the installed version
-fetchira help
-```
-
-`fetchira add tavily` asks for the key; `fetchira add gemini_web` opens a browser to log in (or,
-with no browser, falls back to `fetchira session` — see [Web sessions](#web-sessions)). Multiple
-accounts per provider are fine (`--label tavily-2`); the router balances by remaining quota.
-
-## Register with your coding tools
-
-The binary **is** the MCP server (stdio). The easy way is to let it write each tool's config:
+The binary speaks MCP over stdio. For a human in a terminal, the interactive installer can register it with detected coding tools:
 
 ```sh
 fetchira install
 ```
 
-It detects and supports Claude Code, Codex CLI, OpenCode, Gemini CLI, Cursor, Windsurf, VS Code
-and Claude Desktop — multi-select, then it writes the right config shape for each (merging,
-never clobbering your existing servers). Restart the tool to pick it up.
+The picker writes the selected clients' configs and is not suitable for an agent. Restart the selected tool after registration.
 
-Manual registration is just as easy — point any MCP client at the binary:
+You can also paste the snippet for your client. Use the absolute path from `command -v fetchira` (Homebrew: `/opt/homebrew/bin/fetchira` or `/usr/local/bin/fetchira`; `curl | sh`: `$HOME/.local/bin/fetchira`; `cargo install`: `$HOME/.cargo/bin/fetchira`).
 
-```sh
-claude mcp add fetchira -s user -- ~/.local/bin/fetchira     # Claude Code
-```
-```jsonc
-// generic mcp.json (Cursor, Windsurf, Gemini CLI, Claude Desktop)
-{ "mcpServers": { "fetchira": { "command": "/Users/you/.local/bin/fetchira" } } }
-```
-
-stdout is the MCP channel; logs go to stderr (`RUST_LOG=debug` for more). For Claude Code there
-is also a skill in `skills/fetchira/SKILL.md` — copy it to `~/.claude/skills/fetchira/SKILL.md`
-so the agent knows when and how to use the tools.
-
-## Web sessions
-
-gemini_web, grok_web and chatgpt_web use your **logged-in browser cookies** instead
-of an API key, via a Chrome-impersonating client. One-time setup per provider:
+**Claude Code**
 
 ```sh
-fetchira login gemini_web   # opens a browser; log in, then it captures the session
-fetchira login grok_web
-fetchira login chatgpt_web
+claude mcp add fetchira -s user -- "$(command -v fetchira)"
 ```
 
-`fetchira login <provider>` launches a real browser against a dedicated profile, waits for you to
-finish logging in, captures the cookies (HttpOnly included) and stores them in `usage.db`. It uses
-**Chrome/Chromium/Edge/Brave** (over the DevTools protocol) if present, otherwise **Firefox**
-(read straight from its plaintext `cookies.sqlite`, since Firefox dropped CDP). Set
-`FETCHIRA_BROWSER=chrome|firefox` to force one. These accounts get the same sticky-proxy support
-as API accounts.
+Skill (when to call the tools): copy `skills/fetchira/SKILL.md` to `~/.claude/skills/fetchira/SKILL.md`.
 
-**Headless / no browser?** On a server with no GUI, log in on any other machine (or any browser),
-export the cookies as JSON, and attach them by hand — no browser needed on the box that runs
-fetchira:
+**Cursor** — `~/.cursor/mcp.json`
 
-```sh
-fetchira add gemini_web --label gemini_web-1      # saved even though the browser login is skipped
-fetchira session gemini_web-1 --file cookies.json # or: paste/pipe the JSON on stdin
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`
+
+**Gemini CLI** — `~/.gemini/settings.json`
+
+**Claude Desktop** (macOS) — `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+```json
+{ "mcpServers": { "fetchira": { "command": "/absolute/path/to/fetchira" } } }
 ```
 
-The JSON is a cookie array (`[{"name":"sso","value":"…","domain":".grok.com"}]`) or
-`{"cookies":[…]}` — the shape a "Cookie Editor" browser extension exports. The dashboard has the
-same paste box (Add account → *or paste a session*, or the **Session** button on any web account).
-
-**Conversations, models, modes.** Web results end with a `⟦session: …⟧` token; pass it back as
-`session` to continue the same chat with full history. Optional `model` and `mode` select per
-provider (best-effort; subscription features may be locked):
-
-```jsonc
-search { "query": "...", "provider": "gemini_web" }                       // -> answer + session token
-search { "query": "follow-up", "session": "gemini_web:c_…,r_…" }          // continues the chat
-```
-
-**Deep Research.** Gemini and ChatGPT run the real plan-based flow — `deep_research` returns a plan
-plus a `session`; send `"start"` on that session to run it (or a revised request to replace the
-plan). Gemini returns the report in the same call (~1-3 min); ChatGPT then runs for ~5-30 min, so it
-hands back a `session` you call again to fetch the finished report. Grok runs deep research directly
-on its heavy tier (no plan step), and exa / parallel do true multi-round research over the API.
-
-**Images and file Q&A.** `create_image` generates from a text prompt — grok and gemini render
-in-process over HTTP, chatgpt drives the browser. To edit an existing image, pass its absolute path
-in `file` and describe the change in `prompt`; to keep editing a ChatGPT result, pass its returned
-`session` back to `create_image`. The image is written to disk and the result names the file (pass
-`path` to pick where; default `~/.config/fetchira/images/`). The same `file` attachment syntax is
-available on `search` and `deep_research` for file Q&A. Both take an optional `provider` and fail
-over like everything else.
-
-**Live limits.** `usage` polls each web session for its real per-tier limits and the model/mode
-catalog it can select (with thinking levels) — a mode locked by your subscription (e.g. Grok
-Expert/Heavy on a lapsed plan) shows as `0/0`.
-
-Caveats, inherent to reverse-engineered web access:
-- **Sessions expire.** Cloudflare's `cf_clearance` lasts ~30 min to a few hours and cannot be
-  minted headless. Re-run `fetchira login <provider>` (or re-attach with `fetchira session`) when a
-  provider returns session/403 errors; the router fails over to the API providers meanwhile.
-- **Grok is intermittent.** fetchira forges the anti-bot `x-statsig-id` per request, which gets
-  past grok.com, but grok is aggressive on IP reputation and rate. Better odds: a fresh login, a
-  residential `proxy`, and no bursting. The router fails over when grok blocks.
-- **ChatGPT drives a real browser.** chatgpt.com gates every send behind a Turnstile challenge pure
-  HTTP can't pass, so chatgpt_web submits through the logged-in browser profile (reads like limits
-  stay pure HTTP). It needs Chrome/Chromium available; deep-research polls resume over plain HTTP.
-- Browser login needs Chrome/Chromium/Edge/Brave or Firefox installed (Linux names like
-  `google-chrome`, `chromium`, `firefox` are resolved on `$PATH`). With none — or a headless box —
-  use `fetchira session` instead. The first build compiles BoringSSL (needs `cmake` + a C/C++
-  toolchain — Xcode CLT on macOS, `build-essential` on Linux).
-
-## Configuration
-
-Everything lives in the fetchira home dir — `$FETCHIRA_HOME`, default `~/.config/fetchira`:
-`fetchira.toml` (accounts + settings), `.env` (secrets referenced as `env:VAR`), `usage.db`
-(quota counters, web sessions, route/debug logs). `setup`, `add`, `priority` and the dashboard
-all write the same `fetchira.toml`, so hand-editing is never required — but it is plain TOML
-if you want to (see `fetchira.toml.example` and `.env.example`):
+**Codex CLI** — `~/.codex/config.toml`
 
 ```toml
-db_path = "usage.db"              # relative paths resolve against the fetchira home dir
-
-[debug_log]                       # full request/response capture (the Debug tab)
-enabled = true                    # default on; bounded by retention + row/size caps
-retention_hours = 24
-
-[proxy_pool]                      # optional: accounts with proxy = "pool" draw a sticky IP here
-webshare_url = "https://proxy.webshare.io/api/v2/proxy/list/download/<token>/…"
-# proxies = ["http://user:pass@host:port"]   # or a static list
-
-[priority]                        # optional: your provider order per capability
-search        = ["grok_web", "serper"]       # listed ones are tried first, in this order;
-deep_research = ["gemini_web"]               # unlisted providers follow in the built-in order.
-                                             # capabilities: search, read, deep_research, image
-
-[[account]]
-provider = "tavily"
-label    = "tavily-1"             # unique name; shows up in the dashboard and route log
-api_key  = "env:TAVILY_API_KEY"   # literal key, or env:VAR resolved from .env / the environment
-proxy    = "pool"                 # "pool" | "http://user:pass@host:port" | omit for direct
-
-[[account]]
-provider = "gemini_web"           # web sessions carry no api_key — cookies live in usage.db
-label    = "gemini-1"
-quota    = 5000                   # nominal chat/search budget (web providers have no balance endpoint)
-reset    = "monthly"              # monthly | daily | once
-dr_quota = 100                    # separate deep-research budget — set it to match your plan
-dr_reset = "daily"
+[mcp_servers.fetchira]
+command = "/absolute/path/to/fetchira"
+args = []
 ```
 
-**Quota numbers.** API providers report their real remaining balance live, so their rows need no
-tuning. Web sessions have no balance endpoint — `quota`/`dr_quota` are soft failover guards, and
-the provider's own `429` is always the source of truth.
+**OpenCode** — `~/.config/opencode/opencode.json`
 
-**Environment variables.** `FETCHIRA_HOME` — config dir override. `FETCHIRA_BROWSER=chrome|firefox`
-— force the login-capture browser. `FETCHIRA_NO_UI=1` — bare `fetchira` in a terminal serves MCP
-instead of opening the dashboard. `FETCHIRA_NO_OPEN=1` — `fetchira ui` prints the URL without
-opening a browser. `RUST_LOG` — log verbosity (logs go to stderr).
+```json
+{
+  "mcp": {
+    "fetchira": { "type": "local", "command": ["/absolute/path/to/fetchira"], "enabled": true }
+  }
+}
+```
 
-## Build and verify
+Paths under `~/.config` use `$XDG_CONFIG_HOME` when set to an absolute path.
+
+**VS Code** — macOS `~/Library/Application Support/Code/User/mcp.json` (`fetchira install` writes this); Linux `~/.config/Code/User/mcp.json`
+
+```json
+{ "servers": { "fetchira": { "type": "stdio", "command": "/absolute/path/to/fetchira" } } }
+```
+
+## Hosted
+
+Same binary, same router. MCP is Streamable HTTP at `/mcp`, not SSE. `fetchira server` (alias `serve-http`) binds `127.0.0.1:7879` by default. A persistent master key is required; losing it makes encrypted provider credentials unrecoverable.
+
+![how hosted works](docs/hosted-flow.png)
+
+![hosted admin](docs/hosted-admin.png)
+
+### Fast deploy
+
+Install fetchira on the server (same as Quick start, or copy the binary). Run `server` and `key create` as the same user with the same `$FETCHIRA_HOME`:
 
 ```sh
-cargo build --release
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+export FETCHIRA_HOME="${FETCHIRA_HOME:-$HOME/.config/fetchira}"
+mkdir -p "$FETCHIRA_HOME"
+chmod 700 "$FETCHIRA_HOME"
+master_key_file="$FETCHIRA_HOME/master-key"
+if [ ! -e "$master_key_file" ]; then
+  (umask 077; set -C; openssl rand -base64 32 > "$master_key_file") 2>/dev/null || [ -s "$master_key_file" ]
+fi
+chmod 600 "$master_key_file"
+export FETCHIRA_MASTER_KEY_FILE="$master_key_file"
+FETCHIRA_BIND=127.0.0.1:7879 fetchira server             # leave this process running
 ```
 
-Research notes that shaped the design live in [`research/`](research/).
+The `if` block creates the key once and preserves it on later starts. Repeat the `FETCHIRA_HOME` and `FETCHIRA_MASTER_KEY_FILE` exports in any other terminal that runs `fetchira server key create`.
+
+Keep the server on loopback while setting it up. From your laptop, open a tunnel with `ssh -N -L 7879:127.0.0.1:7879 USER@HOST`, then open `http://127.0.0.1:7879/admin` and set a password of at least 12 characters. Add API-key and web-session providers from the hosted admin UI; the CLI fallback is `fetchira add PROVIDER --key 'KEY'` for API keys before starting the server (restart after adding one).
+
+Do not put the admin password itself in `FETCHIRA_ADMIN_PASSWORD`: that variable accepts an Argon2id hash from `printf '%s\n' '…' | fetchira server password hash` (a TTY is refused). Leave it unset for first-visit setup.
+
+Complete first-visit setup before exposing the server through TLS. After the password is set, configure the reverse proxy below and only then publish the hostname.
+
+Mint a key in another terminal (same user and repeated exports). The default scopes are `mcp` + `usage:read`; add `--accounts-manage` only to a trusted key that must upload web sessions or manage accounts. That scope also permits deleting accounts and changing their credentials and proxies. The plaintext prints once:
+
+```sh
+fetchira server key create laptop "Laptop"
+# Only when this key must run `fetchira remote login`:
+# fetchira server key create owner "Owner laptop" --accounts-manage
+```
+
+If an older installed binary rejects `--accounts-manage`, create the key in the admin UI and select that scope; the flag is available in the current checkout and the next release.
+
+Leave fetchira on loopback and put TLS in front — `remote set` requires HTTPS (loopback HTTP is fine for a local smoke test). API-key providers and uploaded Gemini/Grok web sessions work without a browser on a bare-metal server. ChatGPT requests and live limits always need Chrome/Chromium on the machine running the hosted process; the Compose image includes Chrome.
+
+```caddyfile
+fetchira.example.com {
+    reverse_proxy 127.0.0.1:7879 {
+        flush_interval -1
+    }
+}
+```
+
+Docker Compose is the other happy path (Chrome in the image, optional bundled Caddy). Clone the repo on the server and follow [docs/hosted.md](docs/hosted.md). After `up`:
+
+```sh
+docker compose --env-file .env.hosted -f docker-compose.hosted.yml exec fetchira \
+  fetchira server key create laptop "Laptop"
+```
+
+### On your laptop
+
+Coding tools still launch local `fetchira` over stdio. Point that process at hosted `/mcp`:
+
+```sh
+fetchira remote set https://fetchira.example.com/mcp --key 'fk_live_...'
+fetchira remote check
+```
+
+Do not paste the hosted URL into the tool as a raw MCP endpoint unless it speaks Streamable HTTP and bearer auth.
+
+Add API-key providers in `/admin` or, as a CLI fallback, on the server with `fetchira add PROVIDER --key 'KEY'` while it is stopped; restart the hosted process after changing its config. For web providers, add them in `/admin`, then on a machine with a browser (after `remote set`) run the displayed `fetchira remote login CHALLENGE`. Optional: `--browser chrome|firefox` or `--file session.json`.
+
+The hosted bridge does not upload laptop file paths: file attachments and file Q&A require local mode. Hosted image outputs are returned to the local bridge and saved on your laptop.
+
+systemd, nginx, backups: [docs/hosted.md](docs/hosted.md).
+
+**Copy for your agent**
+
+```
+Deploy hosted fetchira on this server, then point my local fetchira at it.
+Real CLI only — do not invent flags. `fetchira add PROVIDER --key 'KEY'`: never omit `--key`.
+Do not run bare `fetchira`, `fetchira ui`, `fetchira install`, or `fetchira setup`.
+
+Install on the server (same as Quick start). Same user for `server` and `key create`.
+If `fetchira` is not found: export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+Server:
+  export FETCHIRA_HOME="${FETCHIRA_HOME:-$HOME/.config/fetchira}"
+  mkdir -p "$FETCHIRA_HOME"; chmod 700 "$FETCHIRA_HOME"
+  master_key_file="$FETCHIRA_HOME/master-key"
+  if [ ! -e "$master_key_file" ]; then (umask 077; set -C; openssl rand -base64 32 > "$master_key_file") 2>/dev/null || [ -s "$master_key_file" ]; fi
+  chmod 600 "$master_key_file"
+  export FETCHIRA_MASTER_KEY_FILE="$master_key_file"
+  # Ask me for API keys; for each selected API provider run `fetchira add PROVIDER --key 'KEY'` before starting the server.
+  FETCHIRA_BIND=127.0.0.1:7879 fetchira server &     # alias serve-http; Streamable HTTP at /mcp, not SSE
+  # Before TLS/public exposure, tunnel from my laptop and set the first admin password:
+  # ssh -N -L 7879:127.0.0.1:7879 USER@HOST
+  # open http://127.0.0.1:7879/admin; password must be at least 12 characters
+  # In another server shell, repeat FETCHIRA_HOME and FETCHIRA_MASTER_KEY_FILE, then:
+  fetchira server key create laptop "Laptop"       # prints fk_live_... once; defaults mcp+usage:read
+  # Add --accounts-manage only for remote login/session upload or account management.
+
+Laptop, keep stdio:
+  fetchira remote set https://HOST/mcp --key 'fk_live_...'  # never omit --key
+  fetchira remote check
+  # web providers: fetchira remote login CHALLENGE   (from /admin; needs remote set first)
+  # register local stdio with Claude Code: claude mcp add fetchira -s user -- "$(command -v fetchira)"
+  # for another client, use the README config snippet with the local absolute binary path
+  # restart the coding tool and ask it to search for a current topic
+
+TLS in front (`remote set` requires HTTPS; loopback HTTP is fine for a smoke test).
+Compose/Caddy: docs/hosted.md. Do not paste /mcp as a raw MCP URL.
+```

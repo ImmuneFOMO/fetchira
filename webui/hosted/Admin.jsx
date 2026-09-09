@@ -3,7 +3,7 @@ const { Card: HostedCard, Button: HostedButton, Badge: HostedBadge, StatusDot: H
 const HOSTED_SCOPE_INFO = [
   { id: 'mcp', label: 'mcp', description: 'Use Fetchira tools through the hosted endpoint.' },
   { id: 'usage:read', label: 'usage:read', description: 'View this key’s usage, limits and request history.' },
-  { id: 'accounts:manage', label: 'accounts:manage', description: 'Add, replace or remove provider sessions.' },
+  { id: 'accounts:manage', label: 'accounts:manage', description: 'Manage provider accounts, credentials, sessions, proxies and routing priority, including account deletion.' },
   { id: 'server:update', label: 'server:update', description: 'Start a hosted server update and manage releases.' },
 ];
 

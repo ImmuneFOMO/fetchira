@@ -159,7 +159,7 @@ function LocalGettingStarted() {
         {items.map((it, i) => (
           <button key={it.label} onClick={it.action}
             style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'transparent', border: 'none', borderTop: i ? '1px solid var(--border-faint)' : 'none', cursor: 'pointer', textAlign: 'left', width: '100%' }}>
-            <span style={{ width: 16, height: 16, flexShrink: 0, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: it.done ? 'var(--green-500)' : 'transparent', border: it.done ? '1px solid rgba(70,209,122,0.5)' : '1px solid var(--border-strong)', background: it.done ? 'var(--green-dim)' : 'transparent' }}>✓</span>
+            <span style={{ width: 16, height: 16, flexShrink: 0, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: it.done ? 'var(--green-500)' : 'transparent', border: it.done ? '1px solid rgba(70,209,122,0.5)' : '1px solid var(--border-strong)', background: it.done ? 'var(--green-dim)' : 'transparent' }}>{it.done ? '✓' : ''}</span>
             <span style={{ minWidth: 0 }}>
               <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 12.5, color: it.done ? 'var(--text-faint)' : 'var(--text-hi)', textDecoration: it.done ? 'line-through' : 'none' }}>{it.label}</span>
               <span style={{ display: 'block', fontFamily: 'var(--font-ui)', fontSize: 11.5, color: 'var(--text-faint)' }}>{it.hint}</span>

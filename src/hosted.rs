@@ -1679,10 +1679,19 @@ async fn remote_check(State(st): State<HostedState>, headers: axum::http::Header
     Json(json!({"ok":true,"keyId":key.id,"checkedAt":now,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":PROTOCOL_VERSION,"schemaVersion":crate::usage::SCHEMA})).into_response()
 }
 
-pub async fn create_key(home: &std::path::Path, id: String, name: String) -> anyhow::Result<()> {
+pub async fn create_key(
+    home: &std::path::Path,
+    id: String,
+    name: String,
+    accounts_manage: bool,
+) -> anyhow::Result<()> {
     let cfg = cli::load_or_empty(home);
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
-    let key = auth::generate_key(id, [auth::Scope::Mcp, auth::Scope::UsageRead])?;
+    let mut scopes = vec![auth::Scope::Mcp, auth::Scope::UsageRead];
+    if accounts_manage {
+        scopes.push(auth::Scope::AccountsManage);
+    }
+    let key = auth::generate_key(id, scopes)?;
     store.save_api_key(&key, &name).await?;
     println!("{}", key.plaintext);
     eprintln!("Save this key now; it cannot be shown again.");
@@ -1955,15 +1964,16 @@ mod tests {
             .get(&url)
             .header("authorization", auth.clone())
             .send();
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         let second = client.get(&url).header("authorization", auth).send();
         let (r1, r2) = tokio::join!(first, second);
         let r1 = r1.expect("first response");
         let r2 = r2.expect("second response");
         server.abort();
 
-        assert_eq!(r1.status(), StatusCode::OK);
-        assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Both futures start in join!, so either request can acquire the permit first.
+        let mut statuses = [r1.status(), r2.status()];
+        statuses.sort();
+        assert_eq!(statuses, [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]);
 
         let rows = store
             .recent_requests(Some(&key.id), 10)

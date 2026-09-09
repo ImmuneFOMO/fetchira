@@ -21,7 +21,7 @@ const HOSTED_SCOPE_INFO = [{
 }, {
   id: 'accounts:manage',
   label: 'accounts:manage',
-  description: 'Add, replace or remove provider sessions.'
+  description: 'Manage provider accounts, credentials, sessions, proxies and routing priority, including account deletion.'
 }, {
   id: 'server:update',
   label: 'server:update',

@@ -357,9 +357,9 @@ function App() {
               : adminTab === 'accounts' ? <window.AccountsTab onAdd={() => setModal(true)} />
               : <window.ActivityTab />}
           </main>
-          {modal && <window.AddAccountModal onClose={() => setModal(false)} />}
         </React.Fragment>
       )}
+      {modal && <window.AddAccountModal onClose={() => setModal(false)} />}
     </React.Fragment>
   );
 }
