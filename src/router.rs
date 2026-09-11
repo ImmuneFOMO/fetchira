@@ -360,7 +360,7 @@ impl Router {
                     cands.push((i, rem, blabel, bquota, period, probe_until));
                 }
             }
-            cands.sort_by(|a, c| c.1.cmp(&a.1));
+            cands.sort_by_key(|a| std::cmp::Reverse(a.1));
 
             for (i, _rem, blabel, bquota, period, probe_until) in cands {
                 let b = &self.buckets[i];

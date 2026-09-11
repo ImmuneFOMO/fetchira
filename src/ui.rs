@@ -1496,7 +1496,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             (*label, total, series)
         })
         .collect();
-    usage_rows.sort_by(|a, b| b.1.cmp(&a.1));
+    usage_rows.sort_by_key(|a| std::cmp::Reverse(a.1));
     usage_rows.truncate(6);
     let usage: Vec<Value> = usage_rows
         .iter()
