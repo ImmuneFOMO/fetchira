@@ -18,25 +18,216 @@ function apiGet(path) {
     }
   }).then(r => r.ok ? r.json() : null)).catch(() => null);
 }
+
+// The local dashboard configures this computer; hosted admin onboarding manages the server.
+function ConnectionSetup({
+  onReady
+}) {
+  const [mode, setMode] = React.useState('local');
+  const [endpoint, setEndpoint] = React.useState('');
+  const [wasHosted, setWasHosted] = React.useState(false);
+  const [clearConfirmed, setClearConfirmed] = React.useState(false);
+  const [apiKey, setApiKey] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+  const [loadFailed, setLoadFailed] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState('');
+  React.useEffect(() => {
+    let cancelled = false;
+    apiGet('/api/setup').then(data => {
+      if (cancelled) return;
+      if (data) {
+        setMode(data.mode);
+        setEndpoint(data.endpoint || '');
+        setWasHosted(data.mode === 'hosted');
+      } else {
+        setLoadFailed(true);
+        setError('Unable to load connection settings. Reload the page to retry.');
+      }
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const save = async event => {
+    event.preventDefault();
+    if (loading || loadFailed || busy || mode === 'local' && wasHosted && !clearConfirmed) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await window.apiPost('/api/setup', _objectSpread({
+        mode
+      }, mode === 'hosted' ? {
+        endpoint: endpoint.trim(),
+        api_key: apiKey
+      } : {}));
+      setApiKey('');
+      onReady(result.setup.mode);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("form", {
+    onSubmit: save,
+    style: {
+      display: 'grid',
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("fieldset", {
+    disabled: loading || loadFailed || busy,
+    style: {
+      border: 0,
+      padding: 0,
+      margin: 0,
+      display: 'grid',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("legend", {
+    style: {
+      color: 'var(--text-hi)',
+      fontSize: 15,
+      fontWeight: 600,
+      marginBottom: 12
+    }
+  }, "Where should Fetchira run?"), [{
+    value: 'local',
+    label: 'On this computer',
+    hint: 'Use your own API keys and browser sessions on this computer.'
+  }, {
+    value: 'hosted',
+    label: 'Connect to a server',
+    hint: 'Use an existing hosted Fetchira. You need its URL and API key.'
+  }].map(choice => /*#__PURE__*/React.createElement("label", {
+    key: choice.value,
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "radio",
+    name: "fetchira-connection",
+    checked: mode === choice.value,
+    onChange: () => setMode(choice.value)
+  }), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'block',
+      color: 'var(--text-hi)',
+      fontSize: 13
+    }
+  }, choice.label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'block',
+      color: 'var(--text-mid)',
+      fontSize: 12,
+      lineHeight: 1.5
+    }
+  }, choice.hint)))), mode === 'local' && wasHosted && /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      color: 'var(--text-mid)',
+      fontSize: 12,
+      lineHeight: 1.5
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: clearConfirmed,
+    onChange: e => setClearConfirmed(e.target.checked)
+  }), "Clear the saved server URL and API key. I have kept the key if I need to reconnect."), mode === 'hosted' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'grid',
+      gap: 5,
+      color: 'var(--text-mid)',
+      fontSize: 12
+    }
+  }, "Server URL", /*#__PURE__*/React.createElement("input", {
+    type: "url",
+    required: true,
+    value: endpoint,
+    onChange: e => setEndpoint(e.target.value),
+    placeholder: "https://fetchira.example.com/mcp",
+    style: {
+      width: '100%',
+      boxSizing: 'border-box',
+      padding: '9px 10px',
+      borderRadius: 'var(--r-sm)',
+      border: '1px solid var(--border-hairline)',
+      background: 'var(--surface-sunken)',
+      color: 'var(--text-hi)'
+    }
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'grid',
+      gap: 5,
+      color: 'var(--text-mid)',
+      fontSize: 12
+    }
+  }, "API key", /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    autoComplete: "off",
+    value: apiKey,
+    onChange: e => setApiKey(e.target.value),
+    placeholder: "Server API key",
+    style: {
+      width: '100%',
+      boxSizing: 'border-box',
+      padding: '9px 10px',
+      borderRadius: 'var(--r-sm)',
+      border: '1px solid var(--border-hairline)',
+      background: 'var(--surface-sunken)',
+      color: 'var(--text-hi)'
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-mid)',
+      fontSize: 12
+    }
+  }, "Leave the key blank to keep it only when the URL is unchanged. Access and compatibility are checked before saving; local accounts are preserved."))), error && /*#__PURE__*/React.createElement("div", {
+    role: "alert",
+    style: {
+      color: 'var(--red-500)',
+      fontSize: 12
+    }
+  }, error), /*#__PURE__*/React.createElement(Button, {
+    type: "submit",
+    variant: "primary",
+    disabled: loading || loadFailed || busy || mode === 'local' && wasHosted && !clearConfirmed,
+    style: {
+      justifySelf: 'start'
+    }
+  }, loading ? 'Loading…' : busy ? 'Checking…' : 'Continue'));
+}
+window.ConnectionSetup = ConnectionSetup;
 const SKILL_VARIANTS = [{
   value: 'both',
-  label: 'MCP + CLI',
-  hint: 'Use MCP when it is available; fall back to the fetchira command.'
+  label: 'MCP with CLI fallback',
+  hint: 'Register MCP and install a skill that uses CLI when MCP is unavailable.'
 }, {
   value: 'mcp',
-  label: 'MCP only',
-  hint: 'Install the agent instructions for MCP tools only.'
+  label: 'MCP',
+  hint: 'Register MCP and install the skill for its tools.'
 }, {
   value: 'cli',
   label: 'CLI only',
-  hint: 'Use the fetchira command from the shell.'
+  hint: 'Install the shell skill. No MCP registration is needed.'
 }, {
   value: 'skip',
-  label: 'Skip skill',
-  hint: 'Register selected MCP targets without installing an agent skill.'
+  label: 'Later',
+  hint: 'Keep your current agent integrations unchanged.'
 }];
 
-// Detect coding tools, preselect the not-yet-registered ones, register on click.
+// Select one integration and its agent destinations.
 // Shared by the onboarding step and the checklist modal.
 function InstallTargets({
   onDone
@@ -55,22 +246,22 @@ function InstallTargets({
         setFailed(true);
         return;
       }
-      const ts = d.targets || [];
+      const ts = d.agents || [];
       setTargets(ts);
       const installed = Array.isArray(d.skills) ? d.skills : [d.skill];
       const current = ['both', 'mcp', 'cli', 'skip'].find(value => installed.includes(value));
       if (current) setInstalledSkill(current);
       const pre = {};
       ts.forEach(t => {
-        if (t.present && !t.installed) pre[t.name] = true;
+        if (t.present) pre[t.name] = true;
       });
       setPicked(pre);
     });
   };
   React.useEffect(loadTargets, []);
   const install = async () => {
-    const names = Object.keys(picked).filter(n => picked[n]);
-    if (busy || skill === 'skip' && !names.length) return;
+    const names = (targets || []).filter(t => picked[t.name] && (skill !== 'cli' || t.skillSupported)).map(t => t.name);
+    if (busy || skill !== 'skip' && !names.length) return;
     setBusy(true);
     setResults(null);
     try {
@@ -144,19 +335,27 @@ function InstallTargets({
       overflowWrap: 'anywhere',
       minWidth: 0
     }
-  }, r.msg))), failedResult ? /*#__PURE__*/React.createElement(Button, {
+  }, r.msg))), failedResult ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Button, {
     variant: "ghost",
     onClick: retry,
-    style: {
-      alignSelf: 'flex-start'
-    }
-  }, "Try again") : /*#__PURE__*/React.createElement("span", {
+    disabled: busy
+  }, "Try again"), /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: () => setResults(null),
+    disabled: busy
+  }, "Change selection")) : /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-ui)',
       fontSize: 12,
       color: 'var(--text-lo)'
     }
-  }, "Restart the agent to load the selected integrations.")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("fieldset", {
+  }, skill === 'skip' ? 'Your integration settings are unchanged.' : 'Restart the agent to load the selected integrations.')) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("fieldset", {
+    disabled: busy,
     style: {
       border: 0,
       padding: 0,
@@ -172,7 +371,7 @@ function InstallTargets({
       color: 'var(--text-mid)',
       marginBottom: 2
     }
-  }, "Agent skill"), SKILL_VARIANTS.map(variant => /*#__PURE__*/React.createElement("label", {
+  }, "How should your agents use Fetchira?"), SKILL_VARIANTS.map(variant => /*#__PURE__*/React.createElement("label", {
     key: variant.value,
     style: {
       display: 'flex',
@@ -199,7 +398,22 @@ function InstallTargets({
       color: 'var(--text-mid)',
       fontSize: 12
     }
-  }, variant.hint))))), targets.map(t => /*#__PURE__*/React.createElement("label", {
+  }, variant.hint))))), skill !== 'skip' && /*#__PURE__*/React.createElement("fieldset", {
+    disabled: busy,
+    style: {
+      border: 0,
+      padding: 0,
+      margin: 0,
+      display: 'grid',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("legend", {
+    style: {
+      color: 'var(--text-mid)',
+      fontSize: 12,
+      marginBottom: 8
+    }
+  }, "Choose agents"), targets.filter(t => skill !== 'cli' || t.skillSupported).map(t => /*#__PURE__*/React.createElement("label", {
     key: t.name,
     style: {
       display: 'flex',
@@ -216,25 +430,33 @@ function InstallTargets({
     onChange: e => setPicked(p => _objectSpread(_objectSpread({}, p), {}, {
       [t.name]: e.target.checked
     }))
-  }), t.name, t.installed ? /*#__PURE__*/React.createElement(Badge, {
-    tone: "ok",
-    variant: "soft"
-  }, "registered \u2713") : t.present ? /*#__PURE__*/React.createElement(Badge, {
+  }), t.name, t.present ? /*#__PURE__*/React.createElement(Badge, {
     tone: "accent",
     variant: "outline"
-  }, "detected") : null)), /*#__PURE__*/React.createElement(Button, {
+  }, "detected") : null, skill !== 'cli' && !t.skillSupported && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: 'var(--text-mid)'
+    }
+  }, "MCP registration only"))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-mid)',
+      fontSize: 12
+    }
+  }, "Codex and Gemini may share a skill directory. Cursor also reads other agents\u2019 skill folders, so a skill can be available to several agents.")), /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: install,
-    disabled: busy || skill === 'skip' && !Object.keys(picked).some(n => picked[n]),
+    disabled: busy || skill !== 'skip' && !targets.some(t => picked[t.name] && (skill !== 'cli' || t.skillSupported)),
     style: {
       alignSelf: 'flex-start'
     }
-  }, busy ? 'Registering…' : 'Register')));
+  }, busy ? 'Installing…' : skill === 'skip' ? 'Keep current settings' : 'Install')));
 }
 window.InstallTargets = InstallTargets;
 function InstallPanel({
   onClose
 }) {
+  const [connectionOpen, setConnectionOpen] = React.useState(false);
   return /*#__PURE__*/React.createElement("div", {
     onClick: onClose,
     style: {
@@ -277,7 +499,8 @@ function InstallPanel({
       fontWeight: 600,
       color: 'var(--text-hi)'
     }
-  }, "Register in your coding tools"), /*#__PURE__*/React.createElement("button", {
+  }, "Connect your coding agents"), /*#__PURE__*/React.createElement("button", {
+    "aria-label": "Close integration settings",
     onClick: onClose,
     style: {
       background: 'transparent',
@@ -290,9 +513,19 @@ function InstallPanel({
     }
   }, "\u2715")), /*#__PURE__*/React.createElement("div", {
     style: {
-      padding: 20
+      padding: 20,
+      display: 'grid',
+      gap: 16
     }
-  }, /*#__PURE__*/React.createElement(InstallTargets, null)), /*#__PURE__*/React.createElement("div", {
+  }, connectionOpen ? /*#__PURE__*/React.createElement(ConnectionSetup, {
+    onReady: () => setConnectionOpen(false)
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: () => setConnectionOpen(true),
+    style: {
+      justifySelf: 'start'
+    }
+  }, "Local or hosted connection"), /*#__PURE__*/React.createElement(InstallTargets, null))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 8,
@@ -305,6 +538,7 @@ function InstallPanel({
     onClick: onClose
   }, "Close")))));
 }
+window.InstallPanel = InstallPanel;
 function GettingStarted() {
   return window.fxHosted ? /*#__PURE__*/React.createElement(HostedGettingStarted, null) : /*#__PURE__*/React.createElement(LocalGettingStarted, null);
 }
@@ -312,21 +546,33 @@ function LocalGettingStarted() {
   const [hidden, setHidden] = React.useState(() => localStorage.getItem('fx-gs-dismissed') === '1');
   const [installOpen, setInstallOpen] = React.useState(false);
   const [modalProv, setModalProv] = React.useState(null);
+  const [hostedEndpoint, setHostedEndpoint] = React.useState(null);
   const [registered, setRegistered] = React.useState(null); // null until the targets probe lands
 
   React.useEffect(() => {
     if (hidden) return;
-    apiGet('/api/install/targets').then(d => {
+    let cancelled = false;
+    Promise.all([apiGet('/api/install/targets'), apiGet('/api/setup')]).then(([d, setup]) => {
+      if (cancelled) return;
+      setHostedEndpoint((setup === null || setup === void 0 ? void 0 : setup.mode) === 'hosted' ? setup.endpoint : null);
       if (d) {
         const skillInstalled = (Array.isArray(d.skills) ? d.skills : [d.skill]).some(skill => ['both', 'mcp', 'cli'].includes(skill));
         setRegistered(skillInstalled || (d.targets || []).some(t => t.installed));
       }
     });
-  }, [installOpen]); // re-check after the install panel closes
+    return () => {
+      cancelled = true;
+    };
+  }, [installOpen, hidden]); // Re-check after connection or installation settings close.
 
   if (hidden) return null;
   const accounts = window.FX.accounts || [];
-  const items = [{
+  const items = [...(hostedEndpoint ? [{
+    label: 'Connected to a hosted server',
+    hint: hostedEndpoint,
+    done: true,
+    action: () => setInstallOpen(true)
+  }] : [{
     label: 'Connect a provider',
     hint: 'search + read quota for the router',
     done: accounts.length > 0,
@@ -336,7 +582,7 @@ function LocalGettingStarted() {
     hint: 'gemini / grok / chatgpt login — unlocks deep research + images',
     done: accounts.some(a => a.web && a.loggedIn),
     action: () => setModalProv('gemini_web')
-  }, {
+  }]), {
     label: 'Register fetchira in your coding tools',
     hint: 'one click into Claude Code, Codex, Cursor, …',
     done: !!registered,
@@ -481,7 +727,7 @@ function HostedGettingStarted() {
       if (cancelled) return;
       const hasActiveKey = (data.keys || []).some(candidate => {
         if (candidate.revoked) return false;
-        return (candidate.scopes || []).includes('accounts:manage') && (!candidate.expiresAt || new Date(candidate.expiresAt).getTime() > Date.now());
+        return (candidate.scopes || []).includes('mcp') && (!candidate.expiresAt || new Date(candidate.expiresAt).getTime() > Date.now());
       });
       setVisibility(hasActiveKey ? 'hidden' : 'show');
     }).catch(() => {
@@ -503,7 +749,7 @@ function HostedGettingStarted() {
         body: {
           id,
           name: 'Local Fetchira',
-          scopes: ['mcp', 'usage:read', 'accounts:manage'],
+          scopes: ['mcp', 'usage:read'],
           rpm: 60,
           daily_limit: 0,
           monthly_limit: 0,
@@ -518,7 +764,7 @@ function HostedGettingStarted() {
       setBusy(false);
     }
   };
-  const command = `fetchira remote set ${endpoint} --key '${key || 'your-key'}'`;
+  const command = 'fetchira setup';
   const copy = async (value, name) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -580,7 +826,7 @@ function HostedGettingStarted() {
       fontSize: 12,
       lineHeight: 1.5
     }
-  }, "Install Fetchira locally, generate a scoped key, then run the command below. Your local MCP tools will route through this hosted server."), /*#__PURE__*/React.createElement("div", {
+  }, "Install Fetchira locally, generate a key, then run setup. Choose Connect to a server and enter this endpoint and key. Setup checks access before saving."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gap: 7
@@ -619,7 +865,13 @@ function HostedGettingStarted() {
       color: 'var(--text-faint)',
       font: '11px var(--font-mono)'
     }
-  }, "Run it in your terminal, then use ", /*#__PURE__*/React.createElement("code", null, "fetchira remote check"), " to verify version, schema and access.")), !key && /*#__PURE__*/React.createElement(Button, {
+  }, "Run it in your terminal, then use ", /*#__PURE__*/React.createElement("code", null, "fetchira remote check"), " to verify version, schema and access.")), key && /*#__PURE__*/React.createElement("div", {
+    className: "secret-row"
+  }, /*#__PURE__*/React.createElement("code", null, key), /*#__PURE__*/React.createElement(Button, {
+    variant: "secondary",
+    size: "sm",
+    onClick: () => copy(key, 'key')
+  }, copied === 'key' ? 'Copied' : 'Copy API key')), !key && /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: createKey,
     disabled: busy

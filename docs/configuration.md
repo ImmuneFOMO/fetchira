@@ -102,7 +102,7 @@ enabled = false
 | `NO KEY`, `NEEDS LOGIN`, or no usable accounts | Check the same `FETCHIRA_HOME` is used by the shell and agent; add the missing key or run `fetchira login LABEL`. |
 | Temporary `429` | Respect the returned retry delay or use another configured provider; do not reset monthly counters for a minute limit. |
 | Provider reports insufficient credits | Check `fetchira usage PROVIDER` and the provider dashboard; top up or choose another account/provider. |
-| CLI says it needs local accounts | Use MCP for the configured hosted endpoint, or disconnect/set a separate local home. |
+| Hosted call rejects a file attachment | Laptop attachments require local mode for both CLI and MCP. Disconnect the remote or use a separate local home. |
 | Unknown model or mode | Read `fetchira usage PROVIDER`; omit the model to use its default. |
 | Parse error during installation or configuration | Fix the named file; Fetchira refuses to overwrite malformed config. |
 | Agent cannot find MCP or the skill | Check the absolute binary/config path, selected skill variant, and restart the agent; see [setup](setup.md). |

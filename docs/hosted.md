@@ -140,7 +140,9 @@ docker compose --env-file .env.hosted -f docker-compose.hosted.yml exec fetchira
 
 If this key must run `fetchira remote login`, create it with `--accounts-manage` instead. On older binaries without that option, use the Keys UI.
 
-Connect a local Fetchira instance:
+Connect a local Fetchira instance with `fetchira setup`: choose **Connect to a server**,
+then enter the URL and key. Access and compatibility are verified before replacing saved settings.
+For scripted configuration, `remote set` saves immediately; check it before use:
 
 ```sh
 fetchira remote set https://fetchira.example.com/mcp --key 'fk_live_...'
@@ -153,7 +155,10 @@ For environment-backed storage, omit `--key` and set `api_key = "env:FETCHIRA_AP
 
 Add API-key providers from `/admin` (preferred). As a CLI fallback, configure them on the server with `fetchira add PROVIDER --key 'KEY'` while the server is stopped, then start or restart the hosted process. Keep `--key`; omitting it starts an interactive prompt. Add web-session providers from the admin UI and use its challenge flow below.
 
-The hosted bridge does not upload laptop file paths, so attachments and file Q&A require local mode. The six one-shot CLI commands also require local accounts. Hosted images are returned inline over HTTP and saved on the laptop by the stdio bridge; an image `path` refers to the laptop, never the server.
+All six one-shot CLI commands use the configured hosted server, just like the stdio MCP bridge.
+Neither interface uploads laptop file paths, so attachments and file Q&A require local mode.
+Hosted images and PDFs are returned inline over HTTP and saved on the laptop by the CLI or
+stdio bridge; an image `path` refers to the laptop, never the server.
 
 ## Bare-metal systemd
 

@@ -12,7 +12,9 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::invoke::{route, save_image, session_footer, CONTINUE, IMAGE_PENDING, IMAGE_READY};
+use crate::invoke::{
+    route, save_image, session_footer, validate_input, CONTINUE, IMAGE_PENDING, IMAGE_READY,
+};
 use crate::providers::{Capability, Input, ProviderKind};
 use crate::router::Router;
 
@@ -225,6 +227,8 @@ impl Fetchira {
         let (forced, session) = route(args.provider, args.session.clone())
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let input = search_input(args, session);
+        validate_input(Capability::Search, &input, forced, input.query.is_some())
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         // An attachment needs a web session that can upload; grok_web is the default carrier.
         let forced = forced.or_else(|| (!input.file.is_empty()).then_some(ProviderKind::GrokWeb));
         self.run_http(context, Capability::Search, input, forced)
@@ -244,6 +248,8 @@ impl Fetchira {
             mode: args.mode,
             ..Default::default()
         };
+        validate_input(Capability::Read, &input, args.provider, true)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         self.run_http(context, Capability::Read, input, args.provider)
             .await
     }
@@ -260,6 +266,13 @@ impl Fetchira {
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let mut input = search_input(args.base, session);
         input.depth = args.depth;
+        validate_input(
+            Capability::DeepResearch,
+            &input,
+            forced,
+            input.query.is_some(),
+        )
+        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         self.run_http(context, Capability::DeepResearch, input, forced)
             .await
     }
@@ -276,6 +289,8 @@ impl Fetchira {
             url: Some(args.url),
             ..Default::default()
         };
+        validate_input(Capability::Browser, &input, None, true)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         self.run_http(context, Capability::Browser, input, None)
             .await
     }
@@ -340,6 +355,8 @@ impl Fetchira {
                 .collect(),
             ..Default::default()
         };
+        validate_input(Capability::Image, &input, forced, true)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         validate_file_input(
             &input.file,
             context.extensions.get::<http::request::Parts>().is_some(),

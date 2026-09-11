@@ -51,6 +51,47 @@ impl SkillVariant {
     }
 }
 
+#[cfg(test)]
+fn skill_text(variant: SkillVariant) -> String {
+    let home = crate::cli::home();
+    let home = if home.is_absolute() {
+        home
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(home))
+            .unwrap_or_else(|_| crate::cli::home())
+    };
+    let Ok(bin) = std::env::current_exe() else {
+        return variant.text().to_string();
+    };
+    skill_text_for(variant, &home, &bin)
+}
+
+fn skill_text_for(variant: SkillVariant, home: &Path, bin: &Path) -> String {
+    let base = variant.text();
+    if !matches!(variant, SkillVariant::Both | SkillVariant::Cli) {
+        return base.to_string();
+    }
+    let home = shell_quote(&home.to_string_lossy());
+    let bin = shell_quote(&bin.to_string_lossy());
+    let command = if cfg!(windows) {
+        format!("$env:FETCHIRA_HOME = {home}; & {bin}")
+    } else {
+        format!("FETCHIRA_HOME={home} {bin}")
+    };
+    format!(
+        "{base}\n\n## Installation-specific command\n\nReplace the bare `fetchira` executable in the command forms above with `{command}` so the agent uses this installation's configured accounts and hosted connection. Keep the operation and flags after the executable."
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    if cfg!(windows) {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 pub(crate) struct SkillDestination {
     pub(crate) name: &'static str,
     pub(crate) parent: PathBuf,
@@ -204,26 +245,153 @@ fn codex_cleanup(root: &Path, active: &Path, agents: &Path, legacy: &Path) -> Ve
     paths
 }
 
-pub(crate) fn install_skills(home: &Path, variant: SkillVariant) -> Vec<SkillInstallResult> {
-    install_skills_with(home, variant, configured_codex_home())
+pub(crate) fn install_skills_for_agents(
+    home: &Path,
+    config_home: &Path,
+    bin: &Path,
+    variant: SkillVariant,
+    agents: &[String],
+) -> Vec<SkillInstallResult> {
+    install_skills_with_agents(
+        home,
+        config_home,
+        bin,
+        variant,
+        configured_codex_home(),
+        Some(agents),
+    )
 }
 
+/// Check skill roots before the caller changes any MCP configuration. Cursor can discover the
+/// common agent roots, so a different Fetchira variant outside the selected roots would make the
+/// resulting installation ambiguous. Selected roots are managed by `install_destination`, which
+/// archives an old variant and may therefore switch it safely.
+pub(crate) fn preflight_skills_for_agents(
+    home: &Path,
+    variant: SkillVariant,
+    agents: &[String],
+) -> anyhow::Result<()> {
+    if variant == SkillVariant::Skip || agents.is_empty() {
+        return Ok(());
+    }
+    let root = home
+        .canonicalize()
+        .unwrap_or_else(|_| home.to_path_buf())
+        .to_path_buf();
+    let shared_agents = root.join(".agents");
+    let destinations = skill_destinations_with(home, configured_codex_home());
+    let managed: Vec<PathBuf> = destinations
+        .iter()
+        .filter(|destination| destination_selected(destination, &shared_agents, agents))
+        .flat_map(|destination| {
+            std::iter::once(destination.parent.clone()).chain(destination.cleanup.iter().cloned())
+        })
+        .collect();
+    if managed.is_empty() {
+        return Ok(());
+    }
+    // These are the roots that can be loaded together by Cursor. Keep this list explicit so a
+    // user selecting one agent gets an actionable conflict before another config file is edited.
+    let visible = [".claude", ".cursor", ".agents", ".codex"]
+        .into_iter()
+        .map(|name| root.join(name));
+    let mut conflicts = Vec::new();
+    for visible_root in visible {
+        if managed.iter().any(|path| path == &visible_root) {
+            continue;
+        }
+        for existing in fetchira_variants(&visible_root)? {
+            let name = existing
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            if name != variant.folder() {
+                conflicts.push(format!("{} ({name})", existing.display()));
+            }
+        }
+    }
+    // Selected destinations can still fail before installation due to a symlink or a non-directory
+    // parent. Surface those errors during the same preflight, before any MCP target is changed.
+    for destination in destinations
+        .iter()
+        .filter(|destination| destination_selected(destination, &shared_agents, agents))
+    {
+        if let Some(error) = &destination.error {
+            bail!(
+                "cannot install {} for the selected agents: inspect {} first ({error})",
+                variant.folder(),
+                destination.parent.display()
+            );
+        }
+        for cleanup in &destination.cleanup {
+            if let Err(error) = fetchira_variants(cleanup) {
+                bail!(
+                    "cannot install {} for the selected agents: inspect {} first ({error})",
+                    variant.folder(),
+                    cleanup.display()
+                );
+            }
+        }
+    }
+    conflicts.sort();
+    conflicts.dedup();
+    if let Some(first) = conflicts.first() {
+        let more = conflicts.len().saturating_sub(1);
+        bail!(
+            "cannot install {}: a different Fetchira skill is visible outside the selected destinations at {first}{}; select that agent too or switch it first",
+            variant.folder(),
+            if more == 0 {
+                String::new()
+            } else {
+                format!(" and {more} more location(s)")
+            }
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn install_skills_with(
     home: &Path,
     variant: SkillVariant,
     codex_home: Option<PathBuf>,
 ) -> Vec<SkillInstallResult> {
+    let config_home = crate::cli::home();
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fetchira"));
+    install_skills_with_agents(home, &config_home, &bin, variant, codex_home, None)
+}
+
+fn install_skills_with_agents(
+    home: &Path,
+    config_home: &Path,
+    bin: &Path,
+    variant: SkillVariant,
+    codex_home: Option<PathBuf>,
+    selected_agents: Option<&[String]>,
+) -> Vec<SkillInstallResult> {
+    let shared_agents = home
+        .canonicalize()
+        .unwrap_or_else(|_| home.to_path_buf())
+        .join(".agents");
     skill_destinations_with(home, codex_home)
         .into_iter()
         .map(|dest| {
             let result = if variant == SkillVariant::Skip {
                 Ok("skipped".into())
+            } else if selected_agents
+                .is_some_and(|agents| !destination_selected(&dest, &shared_agents, agents))
+            {
+                Ok(format!(
+                    "skipped: {} was not selected",
+                    dest.parent.display()
+                ))
             } else if let Some(error) = dest.error {
                 Err(anyhow::anyhow!(error))
             } else if !dest.present {
                 Ok(format!("skipped: {} does not exist", dest.parent.display()))
             } else {
-                install_destination(&dest.parent, variant, &dest.cleanup)
+                let text = skill_text_for(variant, &crate::cli::absolute_path(config_home), bin);
+                install_destination(&dest.parent, variant, &dest.cleanup, &text)
             };
             match result {
                 Ok(msg) => SkillInstallResult {
@@ -239,6 +407,25 @@ fn install_skills_with(
             }
         })
         .collect()
+}
+
+fn destination_selected(
+    destination: &SkillDestination,
+    shared_agents: &Path,
+    agents: &[String],
+) -> bool {
+    let selected = |name: &str| agents.iter().any(|agent| agent == name);
+    match destination.name {
+        "Claude" => selected("Claude Code"),
+        "Cursor" => selected("Cursor"),
+        "Codex" => {
+            selected("Codex CLI") || (destination.parent == shared_agents && selected("Gemini CLI"))
+        }
+        "Gemini" => {
+            selected("Gemini CLI") || (destination.parent == shared_agents && selected("Codex CLI"))
+        }
+        _ => false,
+    }
 }
 
 fn fetchira_variants(parent: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -263,6 +450,7 @@ fn install_destination(
     parent: &Path,
     variant: SkillVariant,
     cleanup: &[PathBuf],
+    skill_text: &str,
 ) -> anyhow::Result<String> {
     let parent_present = directory(parent)?;
     // Validate every conflicting path before replacing a working installation. This includes
@@ -293,7 +481,7 @@ fn install_destination(
         && old[0] == selected
         && regular_file(&selected.join("SKILL.md"))?
         && regular_file(&selected.join("references.md"))?
-        && fs::read_to_string(selected.join("SKILL.md"))? == variant.text()
+        && fs::read_to_string(selected.join("SKILL.md"))? == skill_text
         && fs::read_to_string(selected.join("references.md"))? == SHARED
     {
         return Ok(format!("already installed {}", selected.display()));
@@ -319,7 +507,7 @@ fn install_destination(
     let mut moved: Vec<(PathBuf, PathBuf)> = vec![];
     let mut committed = false;
     let result = (|| -> anyhow::Result<()> {
-        fs::write(staging.join("SKILL.md"), variant.text())?;
+        fs::write(staging.join("SKILL.md"), skill_text)?;
         fs::write(staging.join("references.md"), SHARED)?;
         if old.contains(&selected) {
             let backup = archive.join(variant.folder());
@@ -402,7 +590,7 @@ mod tests {
         let original = home.join(".agents/skills/fetchira");
         assert_eq!(
             fs::read_to_string(original.join("SKILL.md")).unwrap(),
-            SkillVariant::Both.text()
+            skill_text(SkillVariant::Both)
         );
         assert_eq!(
             fs::read_to_string(original.join("references.md")).unwrap(),
@@ -463,6 +651,18 @@ mod tests {
     }
 
     #[test]
+    fn installed_cli_skills_pin_the_resolved_home_and_binary() {
+        let text = skill_text_for(
+            SkillVariant::Cli,
+            Path::new("/tmp/fetchira-config"),
+            Path::new("/opt/fetchira/bin/fetchira"),
+        );
+        assert!(text.contains("/tmp/fetchira-config"));
+        assert!(text.contains("/opt/fetchira/bin/fetchira"));
+        assert!(text.contains("Installation-specific command"));
+    }
+
+    #[test]
     fn documented_agents_root_is_shared_and_migrates_legacy_variants() {
         let home = std::env::temp_dir().join(format!(
             "fetchira-agents-skills-{}-{}",
@@ -511,6 +711,30 @@ mod tests {
             fs::read_to_string(archive.join("aliases/1/fetchira-mcp/custom.md")).unwrap(),
             "legacy gemini"
         );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn cursor_preflight_reports_a_conflicting_shared_variant() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-skills-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(home.join(".agents")).unwrap();
+        fs::create_dir_all(home.join(".cursor")).unwrap();
+        write_variant(&home.join(".agents"), SkillVariant::Mcp, "keep");
+        let agents = vec!["Cursor".to_string()];
+        let error = preflight_skills_for_agents(&home, SkillVariant::Cli, &agents)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("different Fetchira skill"), "{error}");
+        assert!(error.contains("fetchira-mcp"), "{error}");
+        assert!(error.contains("select that agent"), "{error}");
+        assert!(home.join(".agents/skills/fetchira-mcp/SKILL.md").is_file());
         fs::remove_dir_all(home).unwrap();
     }
 

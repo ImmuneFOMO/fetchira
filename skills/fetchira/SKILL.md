@@ -1,6 +1,6 @@
 ---
 name: fetchira
-description: Use Fetchira for current web search, URL reading, deep research, JavaScript page reading, image generation, and provider quota routing. Prefer its listed MCP tools and use the local CLI only when MCP is unavailable.
+description: Use Fetchira for current web search, URL reading, deep research, JavaScript page reading, image generation, and provider quota routing. Prefer its listed MCP tools and use the CLI only when MCP is unavailable.
 ---
 
 # Fetchira
@@ -37,8 +37,8 @@ fetchira usage [PROVIDER]
 
 Positional query and prompt words are joined. Flags may be mixed with words; `--` ends flag
 parsing. `deep_research` also accepts `dr`. `usage` is the compact quota snapshot, or a provider
-sheet when given a provider; `list` and `accounts` are the human account tables. CLI mode needs
-local accounts and rejects a configured remote endpoint.
+sheet when given a provider; `list` and `accounts` are the human account tables. CLI calls use
+local accounts or the configured hosted server automatically.
 
 ChatGPT research/image polls may omit CLI text when a polling session is supplied. For an MCP
 image poll, use `prompt: ""` if its listed schema requires the field.

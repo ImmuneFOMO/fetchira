@@ -265,6 +265,8 @@ function UpdateBanner({
   }, busy ? 'Updating…' : 'Update')));
 }
 function App() {
+  var _window$FX$setup2;
+  const [connectionOpen, setConnectionOpen] = React.useState(false);
   const [tab, setTab] = React.useState(new URLSearchParams(location.search).get('tab') || 'overview');
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   // null until the first live state answers; a fresh install (zero accounts) opens the
@@ -304,7 +306,10 @@ function App() {
         setOnline(true);
         window.FX = Object.assign({}, window.FX, await r.json());
         setPhase('live');
-        setOnboard(o => o === null ? (window.FX.accounts || []).length === 0 : o);
+        setOnboard(o => {
+          var _window$FX$setup;
+          return o === null ? (window.FX.accounts || []).length === 0 && ((_window$FX$setup = window.FX.setup) === null || _window$FX$setup === void 0 ? void 0 : _window$FX$setup.mode) !== 'hosted' : o;
+        });
         bump(n => n + 1);
       } catch (e) {
         setOnline(false);
@@ -353,18 +358,61 @@ function App() {
     items: tabs,
     value: tab,
     onChange: setTab
-  })), /*#__PURE__*/React.createElement("main", {
+  }), /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => setConnectionOpen(true),
+    style: {
+      marginLeft: 'auto'
+    }
+  }, "Setup & agents")), /*#__PURE__*/React.createElement("main", {
     style: {
       maxWidth: 'var(--container-max)',
       margin: '0 auto',
       padding: '20px'
     }
-  }, window.FX.update && /*#__PURE__*/React.createElement(UpdateBanner, {
+  }, ((_window$FX$setup2 = window.FX.setup) === null || _window$FX$setup2 === void 0 ? void 0 : _window$FX$setup2.mode) === 'hosted' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: 12,
+      padding: 14,
+      marginBottom: 16,
+      border: '1px solid var(--border-hairline)',
+      borderRadius: 'var(--r-sm)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: 'var(--text-hi)',
+      fontSize: 13,
+      overflowWrap: 'anywhere'
+    }
+  }, "Connected to ", window.FX.setup.endpoint), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: 'var(--text-mid)',
+      fontSize: 12,
+      marginTop: 4
+    }
+  }, "CLI and MCP use this server. Accounts and activity below belong to this computer. Run ", /*#__PURE__*/React.createElement("code", null, "fetchira usage"), " for server quotas.")), /*#__PURE__*/React.createElement(Button, {
+    variant: "secondary",
+    onClick: () => setConnectionOpen(true)
+  }, "Connection settings")), window.FX.update && /*#__PURE__*/React.createElement(UpdateBanner, {
     u: window.FX.update,
     pending: window.FX.update_pending
   }), phase === 'loading' ? /*#__PURE__*/React.createElement(Loading, null) : tab === 'overview' ? /*#__PURE__*/React.createElement(window.OverviewTab, null) : tab === 'accounts' ? /*#__PURE__*/React.createElement(window.AccountsTab, {
     onAdd: () => setModal(true)
-  }) : /*#__PURE__*/React.createElement(window.ActivityTab, null)), modal && /*#__PURE__*/React.createElement(window.AddAccountModal, {
+  }) : /*#__PURE__*/React.createElement(window.ActivityTab, null)), connectionOpen && /*#__PURE__*/React.createElement(window.InstallPanel, {
+    onClose: () => {
+      setConnectionOpen(false);
+      window.fxRefresh();
+    }
+  }), modal && /*#__PURE__*/React.createElement(window.AddAccountModal, {
     onClose: () => setModal(false)
   }));
 }
@@ -389,11 +437,12 @@ window.apiPost = async function (path, body) {
     if (window.fxSetOffline) window.fxSetOffline(true);
     throw new Error('UI server offline — run `fetchira ui` in your terminal');
   }
+  const text = await r.text();
   let data = null;
   try {
-    data = await r.json();
+    data = JSON.parse(text);
   } catch (e) {}
-  if (!r.ok) throw new Error(data && data.error || 'request failed (' + r.status + ')');
+  if (!r.ok) throw new Error(data && data.error || text || 'request failed (' + r.status + ')');
   return data;
 };
 window.apiGet = async function (path) {

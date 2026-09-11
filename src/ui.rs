@@ -5,11 +5,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -17,13 +17,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router as AxumRouter};
 use chrono::{DateTime, Datelike, Utc};
+use rand::{rngs::OsRng, RngCore};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use crate::cli;
-use crate::config;
+use crate::config::{self, Config};
 use crate::providers::{Capability, Input, ProviderKind};
 use crate::router::Router;
 use crate::usage::{DebugRow, RouteRow, Store};
@@ -65,7 +66,10 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let inner = build_inner(home, &store).await?;
     // A post-update re-exec passes the old token and port through so the open tab keeps working.
-    let token = std::env::var("FETCHIRA_UI_TOKEN").unwrap_or_else(|_| gen_token());
+    let token = match std::env::var("FETCHIRA_UI_TOKEN") {
+        Ok(token) if !token.is_empty() => token,
+        _ => gen_token()?,
+    };
     let port = std::env::var("FETCHIRA_UI_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -133,6 +137,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/account/test", post(api_test))
         .route("/api/priority", post(api_priority))
         .route("/api/try", post(api_try))
+        .route("/api/setup", get(api_setup).post(api_setup_save))
         .route("/api/install/targets", get(api_install_targets))
         .route("/api/install", post(api_install))
         .route("/api/update", post(api_update))
@@ -197,12 +202,73 @@ async fn bind_local(port: u16) -> std::io::Result<tokio::net::TcpListener> {
     }
 }
 
-fn gen_token() -> String {
+fn gen_token() -> anyhow::Result<String> {
     let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
+    OsRng
+        .try_fill_bytes(&mut buf)
+        .context("generate dashboard token")?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn is_loopback_authority(raw: &str) -> bool {
+    if raw.is_empty() || raw.chars().any(char::is_whitespace) {
+        return false;
     }
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    let (host, port) = if let Some(rest) = raw.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        let suffix = &rest[end + 1..];
+        let port = match suffix {
+            "" => None,
+            suffix => suffix.strip_prefix(':').filter(|port| !port.is_empty()),
+        };
+        if !suffix.is_empty() && port.is_none() {
+            return false;
+        }
+        (Some(&rest[..end]), port)
+    } else if raw.matches(':').count() == 1 {
+        let (host, port) = raw.rsplit_once(':').unwrap();
+        (Some(host), Some(port))
+    } else {
+        (Some(raw), None)
+    };
+    if let Some(port) = port {
+        if port.is_empty() || port.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    host.is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+fn is_loopback_origin(raw: &str) -> bool {
+    let Ok(origin) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    origin.scheme() == "http"
+        && origin.username().is_empty()
+        && origin.password().is_none()
+        && origin.query().is_none()
+        && origin.fragment().is_none()
+        && (origin.path().is_empty() || origin.path() == "/")
+        && origin
+            .host_str()
+            .is_some_and(|host| is_loopback_authority(&format_host(host, origin.port())))
+}
+
+fn format_host(host: &str, port: Option<u16>) -> String {
+    let host = host.trim_matches(['[', ']']);
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    port.map_or(host.clone(), |port| format!("{host}:{port}"))
 }
 
 /// Loopback dashboard holds quota data → require a per-session token and a loopback Host
@@ -212,7 +278,7 @@ fn guard(st: &AppState, headers: &HeaderMap) -> Option<Response> {
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if !(host.starts_with("127.0.0.1") || host.starts_with("localhost")) {
+    if !is_loopback_authority(host) {
         return Some((StatusCode::FORBIDDEN, "bad host").into_response());
     }
     let tok = headers
@@ -232,7 +298,7 @@ fn guard_mut(st: &AppState, headers: &HeaderMap) -> Option<Response> {
         return Some(r);
     }
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) {
-        if !(origin.starts_with("http://127.0.0.1") || origin.starts_with("http://localhost")) {
+        if !is_loopback_origin(origin) {
             return Some((StatusCode::FORBIDDEN, "bad origin").into_response());
         }
     }
@@ -249,6 +315,9 @@ async fn api_state(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     };
     match built {
         Ok(mut v) => {
+            if let Ok(cfg) = cli::load_or_empty(&st.home) {
+                v["setup"] = setup_snapshot(&cfg);
+            }
             if let Some(u) = crate::update::ui_banner(&st.home).await {
                 v["update"] = u;
             }
@@ -273,7 +342,7 @@ async fn api_events(
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if !(host.starts_with("127.0.0.1") || host.starts_with("localhost")) {
+    if !is_loopback_authority(host) {
         return (StatusCode::FORBIDDEN, "bad host").into_response();
     }
     if q.get("token").map(String::as_str) != Some(st.token.as_str()) {
@@ -642,16 +711,184 @@ async fn api_try(
     }
 }
 
+#[derive(Deserialize)]
+struct SetupReq {
+    mode: String,
+    endpoint: Option<String>,
+    #[serde(alias = "apiKey")]
+    api_key: Option<String>,
+    #[serde(default)]
+    clear_remote: bool,
+}
+
+fn setup_snapshot(cfg: &Config) -> Value {
+    let endpoint = cfg.remote.endpoint.clone();
+    json!({
+        "mode": if endpoint.is_some() { "hosted" } else { "local" },
+        "configured": endpoint.is_some() && cfg.remote.api_key.is_some(),
+        "endpoint": endpoint,
+    })
+}
+
+async fn api_setup(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(resp) = guard(&st, &headers) {
+        return resp;
+    }
+    match cli::load_or_empty(&st.home) {
+        Ok(cfg) => Json(setup_snapshot(&cfg)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn api_setup_save(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetupReq>,
+) -> Response {
+    if let Some(resp) = guard_mut(&st, &headers) {
+        return resp;
+    }
+    match req.mode.as_str() {
+        "local" => {
+            let cfg = match cli::load_or_empty(&st.home) {
+                Ok(cfg) => cfg,
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            };
+            if (cfg.remote.endpoint.is_some() || cfg.remote.api_key.is_some()) && !req.clear_remote
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "confirm clearing the saved hosted server URL and API key",
+                )
+                    .into_response();
+            }
+            if let Err(e) = cli::use_local(&st.home) {
+                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+            }
+            rebuild(&st).await;
+            match cli::load_or_empty(&st.home) {
+                Ok(cfg) => Json(json!({
+                    "ok": true,
+                    "message": "using local provider accounts",
+                    "setup": setup_snapshot(&cfg),
+                }))
+                .into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+        "hosted" => {
+            let Some(endpoint) = req
+                .endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                return (StatusCode::BAD_REQUEST, "hosted endpoint is required").into_response();
+            };
+            let current = match cli::load_or_empty(&st.home) {
+                Ok(cfg) => cfg,
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            };
+            let reuse = req
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+                && current.remote.endpoint.as_deref().map(str::trim) == Some(endpoint);
+            let message = if reuse {
+                if current.remote.api_key.is_none() {
+                    return (StatusCode::BAD_REQUEST, "hosted API key is required").into_response();
+                }
+                // Verify the stored reference in place. Passing env:SECRET through the literal
+                // API-key path would reject a valid reference before it can be resolved.
+                match crate::remote::verify(&current).await {
+                    Ok(message) => message,
+                    Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+                }
+            } else {
+                let Some(api_key) = req
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "hosted API key is required when changing the endpoint",
+                    )
+                        .into_response();
+                };
+                match cli::configure_remote(&st.home, endpoint, api_key).await {
+                    Ok(message) => message,
+                    Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+                }
+            };
+            rebuild(&st).await;
+            match cli::load_or_empty(&st.home) {
+                Ok(cfg) => Json(json!({
+                    "ok": true,
+                    "message": message,
+                    "setup": setup_snapshot(&cfg),
+                }))
+                .into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
+        _ => (StatusCode::BAD_REQUEST, "mode must be local or hosted").into_response(),
+    }
+}
+
 async fn api_install_targets(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(r) = guard(&st, &headers) {
         return r;
     }
-    let targets: Vec<Value> = cli::mcp_target_list()
+    let targets = cli::mcp_target_list();
+    let skill_destinations = crate::skills::skill_destinations(&user_home());
+    let agents: Vec<Value> = targets
+        .iter()
+        .map(|target| {
+            let skill_supported = agent_skill_supported(target.name);
+            let skill_installed =
+                skill_supported && agent_skill_installed(target.name, &skill_destinations);
+            json!({
+                "name": target.name,
+                "present": target.present,
+                "mcp": true,
+                "skill": skill_supported,
+                "skillSupported": skill_supported,
+                "skillInstalled": skill_installed,
+                "installed": target.installed || skill_installed,
+            })
+        })
+        .collect();
+    let targets: Vec<Value> = targets
         .iter()
         .map(|t| json!({ "name": t.name, "present": t.present, "installed": t.installed }))
         .collect();
-    let (skill, skills) = installed_skill_status(&user_home());
-    Json(json!({ "targets": targets, "skill": skill, "skills": skills })).into_response()
+    let (skill, installed_skills) = installed_skill_status(&user_home());
+    Json(json!({
+        "targets": targets,
+        "agents": agents,
+        "skill": skill,
+        "skills": installed_skills,
+    }))
+    .into_response()
+}
+
+fn agent_skill_installed(name: &str, destinations: &[crate::skills::SkillDestination]) -> bool {
+    let names: &[&str] = match name {
+        "Claude Code" | "Claude Desktop" => &["Claude"],
+        "Codex CLI" | "Gemini CLI" => &["Codex", "Gemini"],
+        "Cursor" => &["Cursor"],
+        _ => &[],
+    };
+    destinations
+        .iter()
+        .any(|destination| names.contains(&destination.name) && !destination.variants.is_empty())
+}
+
+fn agent_skill_supported(name: &str) -> bool {
+    matches!(name, "Claude Code" | "Codex CLI" | "Gemini CLI" | "Cursor")
 }
 
 #[derive(Deserialize)]
@@ -673,39 +910,21 @@ async fn api_install(
         Ok(variant) => variant,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
-    let bin = if req.targets.is_empty() {
-        String::new()
-    } else {
-        match std::env::current_exe() {
-            Ok(p) => p.to_string_lossy().into_owned(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        }
-    };
-    let all = cli::mcp_target_list();
-    let mut results: Vec<Value> = req
-        .targets
-        .iter()
-        .map(|name| match all.iter().find(|t| t.name == name) {
-            Some(t) => match (t.run)(&bin) {
-                Ok(msg) => json!({ "name": name, "ok": true, "msg": msg }),
-                Err(e) => json!({ "name": name, "ok": false, "msg": e.to_string() }),
-            },
-            None => json!({ "name": name, "ok": false, "msg": "unknown target" }),
-        })
-        .collect();
-    if let Some(variant) = variant {
-        results.extend(
-            crate::skills::install_skills(&user_home(), variant)
-                .into_iter()
-                .map(|result| {
-                    json!({
-                        "name": format!("skill:{}", result.name),
-                        "ok": result.ok,
-                        "msg": result.msg,
-                    })
-                }),
-        );
+    if variant == Some(crate::skills::SkillVariant::Skip) {
+        return Json(json!({ "results": [], "skill": req.skill })).into_response();
     }
+    let bin = match cli::installation_binary() {
+        Ok(path) => path,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let results =
+        match cli::install_integrations(&user_home(), &st.home, &bin, &req.targets, variant) {
+            Ok(results) => results
+                .into_iter()
+                .map(|result| json!({ "name": result.name, "ok": result.ok, "msg": result.msg }))
+                .collect::<Vec<_>>(),
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        };
     Json(json!({ "results": results, "skill": req.skill })).into_response()
 }
 
@@ -937,15 +1156,20 @@ fn ago(ts: &str) -> String {
 }
 
 async fn static_handler(uri: Uri) -> Response {
-    let mut path = uri.path().trim_start_matches('/').to_string();
+    let path = uri.path().trim_start_matches('/');
     if path.is_empty() {
-        path = "ui_kits/dashboard/index.html".to_string();
+        let mut location = String::from("/ui_kits/dashboard/index.html");
+        if let Some(query) = uri.query() {
+            location.push('?');
+            location.push_str(query);
+        }
+        return axum::response::Redirect::temporary(&location).into_response();
     }
-    match Assets::get(&path) {
+    match Assets::get(path) {
         // no-cache: a restarted/upgraded server must not run against stale cached JSX.
         Some(c) => (
             [
-                (header::CONTENT_TYPE, mime_for(&path)),
+                (header::CONTENT_TYPE, mime_for(path)),
                 (header::CACHE_CONTROL, "no-cache"),
             ],
             c.data.into_owned(),
@@ -1798,6 +2022,16 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn root_redirect_keeps_token_and_asset_base() {
+        let response = static_handler("/?token=example".parse().unwrap()).await;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/ui_kits/dashboard/index.html?token=example"
+        );
+    }
+
     #[test]
     fn install_skill_is_optional_and_validated() {
         let omitted: InstallReq = serde_json::from_str(r#"{"targets":[]}"#).unwrap();
@@ -1809,6 +2043,56 @@ mod tests {
             Some(crate::skills::SkillVariant::Cli)
         );
         assert!(parse_install_skill(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn dashboard_accepts_only_exact_loopback_hosts_and_origins() {
+        for host in [
+            "localhost",
+            "localhost:7878",
+            "127.0.0.1",
+            "127.0.0.1:7878",
+            "[::1]:7878",
+        ] {
+            assert!(is_loopback_authority(host), "{host}");
+        }
+        for host in [
+            "localhost.attacker.test",
+            "localhost:bad",
+            "127.0.0.1.attacker.test",
+            "[::1]attacker.test",
+            "[::1]evil",
+            "[::1]@attacker.test",
+            "[2001:db8::1]:7878",
+        ] {
+            assert!(!is_loopback_authority(host), "{host}");
+        }
+        assert!(is_loopback_origin("http://localhost:7878"));
+        assert!(is_loopback_origin("http://[::1]:7878/"));
+        for origin in [
+            "http://localhost.attacker.test:7878",
+            "http://127.0.0.1.attacker.test:7878",
+            "http://localhost:7878/evil",
+            "https://localhost:7878",
+        ] {
+            assert!(!is_loopback_origin(origin), "{origin}");
+        }
+    }
+
+    #[test]
+    fn dashboard_token_uses_os_randomness() {
+        let first = gen_token().unwrap();
+        let second = gen_token().unwrap();
+        assert_eq!(first.len(), 32);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn install_target_capabilities_distinguish_skills_from_mcp() {
+        assert!(agent_skill_supported("Codex CLI"));
+        assert!(agent_skill_supported("Gemini CLI"));
+        assert!(!agent_skill_supported("Claude Desktop"));
+        assert!(!agent_skill_supported("VS Code"));
     }
 
     #[test]

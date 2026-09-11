@@ -30,7 +30,21 @@ A source build needs Rust, cmake, Perl, pkg-config and a C/C++ toolchain, and in
 `~/.cargo/bin`. From an existing checkout, use `cargo install --locked --path .`. Check
 `fetchira --version` if a documented command is missing from an older installed release.
 
-`fetchira ui` opens the local dashboard and keeps running; use another terminal for CLI setup:
+Run the guided setup:
+
+```sh
+fetchira setup
+```
+
+1. Choose **On this computer** to use local API keys and browser sessions, or **Connect to a
+   server** to use an existing hosted Fetchira.
+2. For hosted access, enter the server URL and API key. Fetchira checks access and compatibility
+   before saving; existing local accounts stay in your configuration. Switching back to local
+   clears the saved server URL and key, so keep the key if you plan to reconnect.
+3. Choose **CLI only**, **MCP**, or **MCP with CLI fallback**, then select your agents.
+   **Later** leaves integrations unchanged.
+
+`fetchira ui` opens the dashboard. To configure local providers directly:
 
 ```sh
 fetchira providers                # see every provider and its capability
@@ -61,13 +75,15 @@ The provider's own plan and quota are authoritative; free tiers and prices chang
 
 ## Use it
 
-The binary speaks MCP over stdio. For a human in a terminal, the interactive installer can register it with detected coding tools:
+After configuring local or hosted access, choose how your agents invoke Fetchira:
 
 ```sh
 fetchira install
 ```
 
-The picker writes the selected clients' configs and is not suitable for an agent. Restart the selected tool after registration.
+The interactive picker installs the selected skill and, for MCP choices, registers the server
+in the selected clients. CLI only installs shell instructions without registering MCP.
+Restart the selected agent after installation.
 
 You can also paste the snippet for your client. Use the absolute path from `command -v fetchira` (Homebrew: `/opt/homebrew/bin/fetchira` or `/usr/local/bin/fetchira`; `curl | sh`: `$HOME/.local/bin/fetchira`; `cargo install`: `$HOME/.cargo/bin/fetchira`).
 
@@ -77,17 +93,26 @@ You can also paste the snippet for your client. Use the absolute path from `comm
 
 - `fetchira` — MCP first, CLI fallback (the default)
 - `fetchira-mcp` — MCP tools only
-- `fetchira-cli` — local CLI only
+- `fetchira-cli` — CLI only, using local accounts or a hosted server
 
-The installer asks for the variant after the MCP client selection; leave that selection empty to skip MCP.
-Skill texts are embedded in the binary; no Git checkout is needed. Installation roots:
+Choose the integration first, then select detected agents. **Later** leaves integrations unchanged.
+Skill texts are embedded in the binary; no Git checkout is needed. Installed CLI instructions
+include the executable and configuration directory, so agents use the same setup as MCP.
+Installation roots:
 
 | Agent | Skill directory |
 |---|---|
-| Claude | `~/.claude/skills` |
+| Claude Code | `~/.claude/skills` |
 | Cursor | `~/.cursor/skills` |
 | Codex | `~/.agents/skills`; a custom `CODEX_HOME` uses `$CODEX_HOME/skills` |
 | Gemini | Shares `~/.agents/skills` when available; otherwise `~/.gemini/skills` |
+
+[Cursor also discovers](https://cursor.com/docs/context/skills) skills in `.agents`, `.claude`,
+and `.codex` user directories. These shared discovery paths can make an installed skill
+available to more than the selected agent.
+If a conflicting Fetchira variant is found in an unselected shared discovery directory,
+installation stops before registering MCP. Select the agent that owns that directory too
+to migrate its skill safely.
 
 The agent parent directory must exist. Detecting `~/.codex` also permits creating the current
 `~/.agents/skills` directory. Existing Fetchira variants under the legacy `~/.codex/skills`
@@ -101,9 +126,10 @@ reinstall does not create another backup. Symlinked skill destinations are repor
 installation instead of being replaced. The shared reference covers provider options, session
 affinity, Gemini plan→run, ChatGPT polling and model catalog, file attachments, and errors.
 
-The dashboard's install form has the same variant choice. A CLI-only install can be registered
-without selecting any MCP client. The MCP server and CLI use the same router and provider
-capabilities; only the transport differs.
+The dashboard offers the same connection and integration choices. CLI and MCP provide the
+same six operations in local and hosted mode, including sessions and saved artifacts.
+Hosted laptop attachments are unsupported through both interfaces. The local dashboard shows
+this computer’s accounts and activity; use `fetchira usage` for the configured server’s quotas.
 
 **Claude Code**
 

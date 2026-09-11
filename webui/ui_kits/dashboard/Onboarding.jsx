@@ -191,6 +191,7 @@ function Onboarding({ onDone }) {
 
 function LocalOnboarding({ onDone }) {
   const [modalProv, setModalProv] = React.useState(null);
+  const [connection, setConnection] = React.useState(() => window.FX.setup?.mode === 'hosted' ? 'hosted' : null);
   const catalog = obCatalog();
   const accounts = window.FX.accounts || [];
   const connected = accounts.length;
@@ -211,10 +212,18 @@ function LocalOnboarding({ onDone }) {
       </div>
       <div style={{ fontFamily: 'var(--font-ui)', fontSize: 14, color: 'var(--text-mid)', lineHeight: 1.55, maxWidth: 620 }}>
         fetchira gives your AI tools web search, scraping and deep research — routed across
-        free-tier providers with quota-aware failover. Connect <b style={{ color: 'var(--text-hi)' }}>one</b> provider
-        to start; everything else can wait.
+        providers with quota-aware failover. Use accounts on this computer or connect to an existing server.
       </div>
 
+      <Card pad={16} style={{ marginTop: 22 }}>
+        {connection === null ? <window.ConnectionSetup onReady={setConnection} /> :
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <span style={{ color: 'var(--text-hi)', fontSize: 13 }}>{connection === 'hosted' ? 'Connected to your server' : 'Using accounts on this computer'}</span>
+            <Button variant="ghost" onClick={() => setConnection(null)}>Change</Button>
+          </div>}
+      </Card>
+
+      {connection === 'local' && <>
       <SectionLabel>free api keys — no credit card, ~60 seconds</SectionLabel>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
         {keys.map((p) => <KeyProviderCard key={p.id} p={p} onOpenModal={setModalProv} />)}
@@ -225,16 +234,18 @@ function LocalOnboarding({ onDone }) {
         {webs.map((p) => <WebProviderCard key={p.id} p={p} onOpenModal={setModalProv} />)}
       </div>
 
-      {connected > 0 && (
+      </>}
+
+      {(connection === 'hosted' || (connection === 'local' && connected > 0)) && (
         <div style={{ marginTop: 26, display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <TrySearch />
+          {connection === 'local' && <TrySearch />}
           <Card raised pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <StatusDot tone="accent" size={7} />
               <span style={{ fontFamily: 'var(--font-display)', fontSize: 15, fontWeight: 600, color: 'var(--text-hi)' }}>Add fetchira to your coding agents</span>
             </div>
             <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>
-              Register the MCP server so your agents route their web research through the providers you just connected.
+              Choose CLI only, MCP, or MCP with CLI fallback, then select your agents.
             </span>
             <window.InstallTargets />
           </Card>
@@ -243,11 +254,11 @@ function LocalOnboarding({ onDone }) {
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 30, paddingTop: 16, borderTop: '1px solid var(--border-faint)' }}>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: connected ? 'var(--lime-500)' : 'var(--text-faint)' }}>
-          {connected ? `${connected} ${connected === 1 ? 'provider' : 'providers'} connected` : 'nothing connected yet'}
+          {connection === 'hosted' ? 'hosted connection ready' : connected ? `${connected} ${connected === 1 ? 'provider' : 'providers'} connected` : 'nothing connected yet'}
         </span>
         <div style={{ display: 'flex', gap: 8 }}>
           <Button variant="ghost" onClick={onDone}>Skip for now</Button>
-          <Button variant="primary" onClick={onDone} disabled={!connected}>Go to dashboard →</Button>
+          <Button variant="primary" onClick={onDone} disabled={connection !== 'hosted' && !(connection === 'local' && connected)}>Go to dashboard →</Button>
         </div>
       </div>
 
@@ -282,7 +293,7 @@ function HostedOnboarding({ onDone }) {
     await navigator.clipboard?.writeText(value);
     if (kind === 'setup') setCommandCopied(true);
   };
-  const command = `fetchira remote set ${endpoint} --key '${key || 'your key'}'`;
+  const command = 'fetchira setup';
   const checkCommand = 'fetchira remote check';
   const keyId = key ? key.split('_')[2] : '';
   const refreshConnection = React.useCallback(async () => {
@@ -320,8 +331,9 @@ function HostedOnboarding({ onDone }) {
     <Card pad={16} style={{ display: 'grid', gap: 12 }}>
       <div style={{ color: 'var(--text-lo)', fontSize: 12 }}>The CLI checks the server protocol and schema before every MCP connection.</div>
       <div className="secret-row"><code>{endpoint}</code><Button variant="secondary" size="sm" onClick={() => copy(endpoint)}>Copy endpoint</Button></div>
-      <div style={{ display: 'grid', gap: 8 }}><div style={{ color: 'var(--text-faint)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>RUN THIS LOCALLY</div><div className="secret-row"><code>{command}</code><Button variant="secondary" size="sm" disabled={!key} onClick={() => copy(command, 'setup')}>{commandCopied ? 'Copied' : 'Copy command'}</Button></div><span style={{ color: 'var(--text-faint)', font: '11px var(--font-mono)' }}>{key ? 'Paste this into your local terminal first.' : 'Generate an API key below to enable this command.'}</span></div>
+      <div style={{ display: 'grid', gap: 8 }}><div style={{ color: 'var(--text-faint)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>RUN THIS LOCALLY</div><div className="secret-row"><code>{command}</code><Button variant="secondary" size="sm" disabled={!key} onClick={() => copy(command, 'setup')}>{commandCopied ? 'Copied' : 'Copy command'}</Button></div><span style={{ color: 'var(--text-faint)', font: '11px var(--font-mono)' }}>{key ? 'Choose Connect to a server, then enter the endpoint and API key shown here. Setup verifies access before saving.' : 'Generate an API key below to begin setup.'}</span></div>
       {commandCopied && <div style={{ display: 'grid', gap: 8, padding: '12px 0 0', borderTop: '1px solid var(--border-faint)' }}><div style={{ color: 'var(--lime-500)', font: '600 10px var(--font-mono)', letterSpacing: '.1em' }}>VERIFY CONNECTION</div><div style={{ color: 'var(--text-mid)', fontSize: 12 }}>After the setup command finishes, copy and paste this command into the same terminal:</div><div className="secret-row"><code>{checkCommand}</code><Button variant="secondary" size="sm" onClick={() => copy(checkCommand)}>Copy check command</Button></div><Button variant="ghost" size="sm" onClick={checkNow} disabled={checkingConnection}>{checkingConnection ? 'Checking…' : connectionReady ? 'Connected ✓' : 'Check connection'}</Button></div>}
+      {key && <div className="secret-row"><code>{key}</code><Button variant="secondary" size="sm" onClick={() => copy(key)}>Copy API key</Button></div>}
       {!key && <Button variant="primary" onClick={createKey} disabled={busy}>{busy ? 'Generating…' : 'Generate API key'}</Button>}
       {error && <div role="alert" style={{ color: 'var(--red-500)', font: '12px var(--font-mono)' }}>{error}</div>}
     </Card>

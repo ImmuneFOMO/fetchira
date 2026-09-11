@@ -56,6 +56,12 @@ def main():
                         assert time.monotonic() < deadline, 'dashboard startup timed out'
                         time.sleep(0.05)
                 assert initial['skills'] == []
+                assert initial.get('setup') is None or initial['setup']['mode'] == 'local'
+                status, result = request('/api/setup', {'mode': 'hosted', 'endpoint': 'http://example.org/mcp', 'api_key': 'bad'})
+                assert status == 400 and 'API key' in result
+                assert not (home / 'data/fetchira.toml').exists()
+                status, result = request('/api/setup', {'mode': 'local'})
+                assert status == 200 and result['setup']['mode'] == 'local', result
                 assert request('/api/install', {'targets': [], 'skill': 'cli'}, token='wrong')[0] == 401
                 # Invalid skill must be rejected before even a selected MCP target writes.
                 assert request('/api/install', {'targets': ['Codex CLI'], 'skill': 'bad'})[0] == 400
@@ -65,23 +71,40 @@ def main():
                 assert not (home / '.codex/skills').exists()
                 status, result = request('/api/install', {'targets': [], 'skill': 'cli'})
                 assert status == 200 and all(r['ok'] for r in result['results']), result
-                for parent in ('.claude', '.cursor', '.agents'):
-                    folder = home / parent / 'skills/fetchira-cli'
-                    assert 'name: fetchira-cli' in (folder / 'SKILL.md').read_text()
-                    assert '## Sessions' in (folder / 'references.md').read_text()
-                assert not (home / '.codex/skills/fetchira-cli').exists()
-                assert not (home / '.gemini/skills/fetchira-cli').exists()
-                assert not (home / '.codex/config.toml').exists()
+                assert not (home / '.agents/skills/fetchira-cli').exists()
+                chosen = ['Codex CLI']
+                status, result = request('/api/install', {'targets': chosen, 'skill': 'cli'})
+                assert status == 200 and all(r['ok'] for r in result['results']), result
+                folder = home / '.agents/skills/fetchira-cli'
+                skill_text = (folder / 'SKILL.md').read_text()
+                assert 'name: fetchira-cli' in skill_text
+                assert str(binary) in skill_text and str(home / 'data') in skill_text
+                assert '## Sessions' in (folder / 'references.md').read_text()
+                for parent in ('.claude', '.cursor', '.codex', '.gemini'):
+                    assert not (home / parent / 'skills/fetchira-cli').exists()
+                assert not (home / '.codex/config.toml').exists(), 'CLI-only must not register MCP'
                 status, detection = request('/api/install/targets')
                 assert status == 200 and detection['skills'] == ['cli']
-                custom = home / '.agents/skills/fetchira-cli/custom.md'
-                custom.write_text('keep this user file')
-                status, result = request('/api/install', {'targets': [], 'skill': 'both'})
+                status, result = request('/api/install', {'targets': chosen, 'skill': 'cli'})
                 assert status == 200 and all(r['ok'] for r in result['results']), result
-                assert not (home / '.agents/skills/fetchira-cli').exists()
+                assert not (home / '.agents/fetchira-skill-backups').exists(), 'unchanged install must be idempotent'
+                # Unselected shared-root conflicts must fail before writing MCP configs.
+                status, result = request('/api/install', {'targets': ['Cursor'], 'skill': 'mcp'})
+                assert status == 400, result
+                assert not (home / '.cursor/mcp.json').exists()
+                assert (folder / 'SKILL.md').read_text() == skill_text
+                custom = folder / 'custom.md'
+                custom.write_text('keep this user file')
+                status, result = request('/api/install', {'targets': chosen, 'skill': 'both'})
+                assert status == 200 and all(r['ok'] for r in result['results']), result
+                assert not folder.exists()
                 assert (home / '.agents/skills/fetchira/SKILL.md').is_file()
-                assert any(p.read_text() == 'keep this user file' for p in (home / '.agents').rglob('custom.md'))
-                assert request('/api/install', {'targets': [], 'skill': 'skip'})[0] == 200
+                assert any(p.read_text() == 'keep this user file' for p in (home / '.agents/fetchira-skill-backups').rglob('custom.md'))
+                config_before = (home / '.codex/config.toml').read_bytes()
+                assert str(home / 'data').encode() in config_before
+                assert str(binary).encode() in config_before
+                assert request('/api/install', {'targets': chosen, 'skill': 'skip'})[0] == 200
+                assert (home / '.codex/config.toml').read_bytes() == config_before
                 assert request('/api/install/targets')[1]['skills'] == ['both']
                 print('install API passed: auth, validation, compatibility, CLI-only, switch, skip, detection')
             finally:

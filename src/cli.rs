@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
-use inquire::{Confirm, MultiSelect, Select, Text};
+use inquire::{Confirm, MultiSelect, Password, Select, Text};
 use serde_json::{json, Value};
 
 use crate::config::{self, Account, Config};
@@ -27,6 +27,47 @@ pub fn home() -> PathBuf {
         })
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("fetchira")
+}
+
+pub(crate) fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+/// Prefer the stable launcher visible to users on PATH (for example a Homebrew shim) over the
+/// versioned path returned by `current_exe`; fall back to the running executable when no launcher
+/// is available.
+pub(crate) fn installation_binary() -> anyhow::Result<String> {
+    let current = std::env::current_exe()?;
+    if let Some(name) = current.file_name() {
+        if let Some(path) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&path) {
+                let candidate = directory.join(name);
+                if candidate.is_file()
+                    && candidate.canonicalize().ok() == current.canonicalize().ok()
+                {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if std::fs::metadata(&candidate)
+                            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                            .unwrap_or(false)
+                        {
+                            return Ok(candidate.to_string_lossy().into_owned());
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    return Ok(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    Ok(current.to_string_lossy().into_owned())
 }
 
 fn cfg_path(home: &Path) -> PathBuf {
@@ -773,6 +814,33 @@ impl std::fmt::Display for PChoice {
 /// Interactive TUI: a menu of arrow-key actions over a live status board. Esc / Quit exits.
 pub async fn setup(home: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(home).ok();
+    let mode = match Select::new(
+        "Where should Fetchira run? (Esc to exit)",
+        vec![SetupMode::Local, SetupMode::Hosted],
+    )
+    .prompt()
+    {
+        Ok(mode) => mode,
+        Err(_) => return Ok(()),
+    };
+    if mode == SetupMode::Hosted {
+        setup_hosted(home).await?;
+        install_tools(home)?;
+        return Ok(());
+    }
+    let cfg = load_or_empty(home)?;
+    if cfg.remote.endpoint.is_some() || cfg.remote.api_key.is_some() {
+        let confirmed =
+            Confirm::new("Clear the saved hosted server URL and API key and use local accounts?")
+                .with_default(false)
+                .prompt()
+                .unwrap_or(false);
+        if !confirmed {
+            println!("Kept the hosted connection; setup was not changed.");
+            return Ok(());
+        }
+    }
+    use_local_config(home)?;
     loop {
         print_status(home).await?;
         let action = Select::new(
@@ -799,13 +867,84 @@ pub async fn setup(home: &Path) -> anyhow::Result<()> {
         .prompt()
         .unwrap_or(false)
     {
-        let _ = install_tools();
+        install_tools(home)?;
     }
     println!(
         "\nConfigure anytime with `fetchira setup`.  Config: {}",
         home.display()
     );
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupMode {
+    Local,
+    Hosted,
+}
+
+impl std::fmt::Display for SetupMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => write!(
+                f,
+                "On this computer \x1b[2m— use local provider accounts\x1b[0m"
+            ),
+            Self::Hosted => write!(
+                f,
+                "Connect to a server \x1b[2m— use its URL and API key\x1b[0m"
+            ),
+        }
+    }
+}
+
+fn use_local_config(home: &Path) -> anyhow::Result<()> {
+    let mut cfg = load_or_empty(home)?;
+    if cfg.remote.endpoint.is_some() || cfg.remote.api_key.is_some() {
+        cfg.remote = Default::default();
+        config::save(&cfg, &cfg_path(home))?;
+        println!("Using local provider accounts; hosted connection cleared.");
+    }
+    Ok(())
+}
+
+async fn setup_hosted(home: &Path) -> anyhow::Result<()> {
+    let endpoint = Text::new("Hosted MCP endpoint (for example, https://host.example/mcp):")
+        .prompt()
+        .context("hosted endpoint is required")?;
+    let api_key = Password::new("Hosted API key:")
+        .without_confirmation()
+        .prompt()
+        .context("hosted API key is required")?;
+    let message = configure_remote(home, &endpoint, &api_key).await?;
+    println!("✓ {message}");
+    Ok(())
+}
+
+/// Verify a hosted endpoint and key before replacing the remote connection in the config.
+/// Provider accounts stay untouched so switching between local and hosted is reversible.
+pub async fn configure_remote(
+    home: &Path,
+    endpoint: &str,
+    api_key: &str,
+) -> anyhow::Result<String> {
+    let endpoint = endpoint.trim();
+    let api_key = api_key.trim();
+    if endpoint.is_empty() {
+        bail!("hosted endpoint is empty");
+    }
+    crate::remote::validate_api_key(api_key)?;
+    let mut cfg = load_or_empty(home)?;
+    cfg.remote.endpoint = Some(endpoint.to_string());
+    cfg.remote.api_key = Some(api_key.to_string());
+    let message = crate::remote::verify(&cfg).await?;
+    // `remote::set` normalizes the endpoint using the same parser as the transport and reloads
+    // the existing config, preserving all local accounts and unrelated settings.
+    crate::remote::set(home, endpoint.to_string(), Some(api_key.to_string()))?;
+    Ok(message)
+}
+
+pub fn use_local(home: &Path) -> anyhow::Result<()> {
+    use_local_config(home)
 }
 
 /// Clear the screen and print the current accounts + remaining quota (the TUI's status board).
@@ -1058,10 +1197,155 @@ async fn remove_flow(home: &Path) -> anyhow::Result<()> {
 
 // ── Register the MCP server into coding tools ──────────────────────────────────────────────
 
-/// `fetchira install` — independently choose MCP registrations and an agent skill.
-pub fn install_tools() -> anyhow::Result<()> {
-    let bin = std::env::current_exe()?.to_string_lossy().into_owned();
+#[derive(Clone, Copy)]
+enum Integration {
+    Both,
+    Mcp,
+    Cli,
+    Skip,
+}
+
+impl std::fmt::Display for Integration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Both => write!(
+                f,
+                "MCP with CLI fallback \x1b[2m— register MCP and install both transports\x1b[0m"
+            ),
+            Self::Mcp => write!(
+                f,
+                "MCP \x1b[2m— register MCP and install the MCP skill\x1b[0m"
+            ),
+            Self::Cli => write!(
+                f,
+                "CLI only \x1b[2m— install the shell skill without MCP\x1b[0m"
+            ),
+            Self::Skip => write!(f, "Later \x1b[2m— leave integrations unchanged\x1b[0m"),
+        }
+    }
+}
+
+pub(crate) struct IntegrationResult {
+    pub(crate) name: String,
+    pub(crate) ok: bool,
+    pub(crate) msg: String,
+}
+
+pub(crate) fn install_integrations(
+    agent_home: &Path,
+    config_home: &Path,
+    bin: &str,
+    target_names: &[String],
+    skill: Option<crate::skills::SkillVariant>,
+) -> anyhow::Result<Vec<IntegrationResult>> {
+    if skill == Some(crate::skills::SkillVariant::Skip) {
+        return Ok(Vec::new());
+    }
+    let all = mcp_target_list();
+    let mut targets = Vec::with_capacity(target_names.len());
+    for name in target_names {
+        let target = all
+            .iter()
+            .find(|target| target.name == name)
+            .with_context(|| format!("unknown install target '{name}'"))?;
+        targets.push(target);
+    }
+    if let Some(variant) = skill {
+        crate::skills::preflight_skills_for_agents(agent_home, variant, target_names)?;
+    }
+    let mut results = Vec::new();
+    if !matches!(skill, Some(crate::skills::SkillVariant::Cli)) {
+        for target in targets {
+            match (target.run)(config_home, bin) {
+                Ok(msg) => results.push(IntegrationResult {
+                    name: target.name.to_string(),
+                    ok: true,
+                    msg,
+                }),
+                Err(e) => results.push(IntegrationResult {
+                    name: target.name.to_string(),
+                    ok: false,
+                    msg: e.to_string(),
+                }),
+            }
+        }
+    }
+    if let Some(variant) = skill {
+        results.extend(
+            crate::skills::install_skills_for_agents(
+                agent_home,
+                config_home,
+                Path::new(bin),
+                variant,
+                target_names,
+            )
+            .into_iter()
+            .map(|result| IntegrationResult {
+                name: format!("skill:{}", result.name),
+                ok: result.ok,
+                msg: result.msg,
+            }),
+        );
+    }
+    Ok(results)
+}
+
+/// `fetchira install` — choose one agent integration, then select detected MCP targets if needed.
+pub fn install_tools(config_home: &Path) -> anyhow::Result<()> {
+    let integration = match Select::new(
+        "How should your agents use Fetchira? (Esc to exit)",
+        vec![
+            Integration::Both,
+            Integration::Mcp,
+            Integration::Cli,
+            Integration::Skip,
+        ],
+    )
+    .prompt()
+    {
+        Ok(choice) => choice,
+        Err(_) => return Ok(()),
+    };
+    if matches!(integration, Integration::Skip) {
+        println!("Skipped; no MCP registrations or skills were changed.");
+        return Ok(());
+    }
+
+    let skill = match integration {
+        Integration::Both => crate::skills::SkillVariant::Both,
+        Integration::Mcp => crate::skills::SkillVariant::Mcp,
+        Integration::Cli => crate::skills::SkillVariant::Cli,
+        Integration::Skip => unreachable!(),
+    };
+    let bin = installation_binary()?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME is required to install agent skills")?;
+    let targets = choose_install_targets(matches!(integration, Integration::Cli))?;
+    let results = install_integrations(&home, config_home, &bin, &targets, Some(skill))?;
+    let mut changed = false;
+    for result in results {
+        println!(
+            "  {} {:14} {}",
+            if result.ok { "✓" } else { "✗" },
+            result.name,
+            result.msg
+        );
+        changed |= result.ok && !result.msg.starts_with("skipped:");
+    }
+    if changed {
+        println!("\nRestart the agent to load the selected integrations.");
+    }
+    Ok(())
+}
+
+fn choose_install_targets(skill_only: bool) -> anyhow::Result<Vec<String>> {
     let targets = mcp_target_list();
+    let targets: Vec<_> = targets
+        .into_iter()
+        .filter(|target| !skill_only || agent_skill_supported(target.name))
+        .collect();
     let opts: Vec<String> = targets
         .iter()
         .map(|t| format!("{}{}", t.name, if t.present { "  (detected)" } else { "" }))
@@ -1074,57 +1358,31 @@ pub fn install_tools() -> anyhow::Result<()> {
         .collect();
 
     let chosen = match MultiSelect::new(
-        "Register MCP in which tools? (Space toggles, empty selection skips MCP)",
+        if skill_only {
+            "Install the skill for which agents? (Space toggles)"
+        } else {
+            "Register MCP in which tools? (Space toggles)"
+        },
         opts.clone(),
     )
     .with_default(&preselect)
     .prompt()
     {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(Vec::new()),
     };
-
-    let skill = match Select::new(
-        "Agent skill?",
-        vec!["both (MCP + CLI)", "MCP only", "CLI only", "skip"],
-    )
-    .prompt()
-    {
-        Ok("both (MCP + CLI)") => crate::skills::SkillVariant::Both,
-        Ok("MCP only") => crate::skills::SkillVariant::Mcp,
-        Ok("CLI only") => crate::skills::SkillVariant::Cli,
-        _ => crate::skills::SkillVariant::Skip,
-    };
-
-    println!();
-    for label in &chosen {
-        let idx = opts.iter().position(|o| o == label).unwrap_or(0);
-        match (targets[idx].run)(&bin) {
-            Ok(msg) => println!("  ✓ {:14} {msg}", targets[idx].name),
-            Err(e) => println!("  ✗ {:14} {e}", targets[idx].name),
-        }
-    }
-    if skill != crate::skills::SkillVariant::Skip {
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .context("HOME is required to install agent skills")?;
-        for result in crate::skills::install_skills(&home, skill) {
-            println!(
-                "  {} {:14} skill: {}",
-                if result.ok { "✓" } else { "✗" },
-                result.name,
-                result.msg
-            );
-        }
-    }
-    if !chosen.is_empty() || skill != crate::skills::SkillVariant::Skip {
-        println!("\nRestart the agent to load the selected integrations.");
-    }
-    Ok(())
+    Ok(chosen
+        .iter()
+        .filter_map(|label| opts.iter().position(|option| option == label))
+        .map(|index| targets[index].name.to_string())
+        .collect())
 }
 
-type RunFn = Box<dyn Fn(&str) -> anyhow::Result<String> + Send>;
+fn agent_skill_supported(name: &str) -> bool {
+    matches!(name, "Claude Code" | "Codex CLI" | "Gemini CLI" | "Cursor")
+}
+
+type RunFn = Box<dyn Fn(&Path, &str) -> anyhow::Result<String> + Send>;
 
 pub(crate) struct McpTarget {
     pub(crate) name: &'static str,
@@ -1151,8 +1409,26 @@ pub(crate) fn mcp_target_list() -> Vec<McpTarget> {
 }
 
 fn has_fetchira(path: &Path) -> bool {
-    std::fs::read_to_string(path)
-        .is_ok_and(|s| s.contains("\"fetchira\"") || s.contains("[mcp_servers.fetchira]"))
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+        let Ok(doc) = toml::from_str::<toml::Value>(&text) else {
+            return false;
+        };
+        return doc
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("fetchira"))
+            .is_some();
+    }
+    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    ["mcpServers", "servers", "mcp"].iter().any(|section| {
+        doc.get(*section)
+            .and_then(Value::as_object)
+            .is_some_and(|servers| servers.contains_key("fetchira"))
+    })
 }
 
 fn mac_or_xdg(mac: PathBuf, xdg: PathBuf) -> PathBuf {
@@ -1222,8 +1498,8 @@ fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path, codex: &Path) -> Vec<McpTarg
     ]
 }
 
-fn boxed(path: PathBuf, f: fn(&Path, &str) -> anyhow::Result<String>) -> RunFn {
-    Box::new(move |bin| f(&path, bin))
+fn boxed(path: PathBuf, f: fn(&Path, &Path, &str) -> anyhow::Result<String>) -> RunFn {
+    Box::new(move |config_home, bin| f(&path, config_home, bin))
 }
 
 fn which(cmd: &str) -> bool {
@@ -1254,48 +1530,52 @@ fn write_obj(path: &Path, obj: &serde_json::Map<String, Value>) -> anyhow::Resul
     Ok(format!("wrote {}", path.display()))
 }
 
+fn registered_env(config_home: &Path) -> Value {
+    json!({ "FETCHIRA_HOME": absolute_path(config_home) })
+}
+
 /// The common `{ "mcpServers": { "fetchira": { "command": … } } }` shape (Cursor, Windsurf,
 /// Gemini CLI, Claude Desktop).
-fn reg_mcp_servers(path: &Path, bin: &str) -> anyhow::Result<String> {
+fn reg_mcp_servers(path: &Path, config_home: &Path, bin: &str) -> anyhow::Result<String> {
     let mut obj = read_obj(path)?;
     let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
     let m = servers
         .as_object_mut()
         .context("mcpServers must be a JSON object")?;
-    m.insert("fetchira".into(), json!({ "command": bin }));
+    let mut server = json!({ "command": bin });
+    server["env"] = registered_env(config_home);
+    m.insert("fetchira".into(), server);
     write_obj(path, &obj)
 }
 
 /// VS Code: `{ "servers": { "fetchira": { "type": "stdio", "command": … } } }`.
-fn reg_vscode(path: &Path, bin: &str) -> anyhow::Result<String> {
+fn reg_vscode(path: &Path, config_home: &Path, bin: &str) -> anyhow::Result<String> {
     let mut obj = read_obj(path)?;
     let servers = obj.entry("servers").or_insert_with(|| json!({}));
     let m = servers
         .as_object_mut()
         .context("servers must be a JSON object")?;
-    m.insert(
-        "fetchira".into(),
-        json!({ "type": "stdio", "command": bin }),
-    );
+    let mut server = json!({ "type": "stdio", "command": bin });
+    server["env"] = registered_env(config_home);
+    m.insert("fetchira".into(), server);
     write_obj(path, &obj)
 }
 
 /// OpenCode: `{ "mcp": { "fetchira": { "type": "local", "command": [bin], "enabled": true } } }`.
-fn reg_opencode(path: &Path, bin: &str) -> anyhow::Result<String> {
+fn reg_opencode(path: &Path, config_home: &Path, bin: &str) -> anyhow::Result<String> {
     let mut obj = read_obj(path)?;
     obj.entry("$schema")
         .or_insert_with(|| json!("https://opencode.ai/config.json"));
     let mcp = obj.entry("mcp").or_insert_with(|| json!({}));
     let m = mcp.as_object_mut().context("mcp must be a JSON object")?;
-    m.insert(
-        "fetchira".into(),
-        json!({ "type": "local", "command": [bin], "enabled": true }),
-    );
+    let mut server = json!({ "type": "local", "command": [bin], "enabled": true });
+    server["environment"] = registered_env(config_home);
+    m.insert("fetchira".into(), server);
     write_obj(path, &obj)
 }
 
 /// Codex CLI: TOML `[mcp_servers.fetchira] command = … args = []`.
-fn reg_codex(path: &Path, bin: &str) -> anyhow::Result<String> {
+fn reg_codex(path: &Path, config_home: &Path, bin: &str) -> anyhow::Result<String> {
     let mut doc: toml::Table = match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
@@ -1310,6 +1590,12 @@ fn reg_codex(path: &Path, bin: &str) -> anyhow::Result<String> {
     let mut e = toml::Table::new();
     e.insert("command".into(), toml::Value::String(bin.to_string()));
     e.insert("args".into(), toml::Value::Array(vec![]));
+    let mut env = toml::Table::new();
+    env.insert(
+        "FETCHIRA_HOME".into(),
+        toml::Value::String(absolute_path(config_home).to_string_lossy().into_owned()),
+    );
+    e.insert("env".into(), toml::Value::Table(env));
     t.insert("fetchira".into(), toml::Value::Table(e));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -1319,22 +1605,92 @@ fn reg_codex(path: &Path, bin: &str) -> anyhow::Result<String> {
 }
 
 /// Claude Code: use its CLI so the config + health check are handled natively.
-fn reg_claude_code(bin: &str) -> anyhow::Result<String> {
-    let out = std::process::Command::new("claude")
-        .args(["mcp", "add", "fetchira", "-s", "user", "--", bin])
-        .output();
+fn reg_claude_code(config_home: &Path, bin: &str) -> anyhow::Result<String> {
+    // Claude Code stores user-scoped MCP servers in ~/.claude.json. Update only Fetchira's entry
+    // when the file exists; refusing an invalid file keeps unrelated or malformed user state
+    // intact instead of handing it to a merge command that may rewrite the whole file.
+    if let Some(path) = user_claude_config() {
+        if path.is_file() {
+            let mut obj = read_obj(&path).with_context(|| {
+                format!(
+                    "cannot refresh Claude MCP config {}; repair the JSON first",
+                    path.display()
+                )
+            })?;
+            let servers = obj
+                .entry("mcpServers")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .with_context(|| {
+                    format!(
+                        "cannot refresh Claude MCP config {}; mcpServers must be an object",
+                        path.display()
+                    )
+                })?;
+            servers.insert(
+                "fetchira".into(),
+                json!({
+                    "type": "stdio",
+                    "command": bin,
+                    "args": [],
+                    "env": registered_env(config_home),
+                }),
+            );
+            return write_obj(&path, &obj);
+        }
+    }
+
+    // Fall back to Claude's own commands when its user config is absent or has an unknown shape.
+    // Remove first so an existing entry cannot leave a stale executable behind. Keep a byte-for-
+    // byte snapshot and restore it if the replacement fails.
+    let config_path = user_claude_config();
+    let original = config_path
+        .as_ref()
+        .filter(|path| path.is_file())
+        .map(std::fs::read)
+        .transpose()?;
+    let existing = std::process::Command::new("claude")
+        .args(["mcp", "get", "fetchira"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if existing {
+        let removed = std::process::Command::new("claude")
+            .args(["mcp", "remove", "fetchira", "-s", "user"])
+            .output()?;
+        if !removed.status.success() {
+            bail!("claude mcp remove fetchira failed");
+        }
+    }
+    let mut command = std::process::Command::new("claude");
+    command.args(["mcp", "add", "fetchira", "-s", "user"]);
+    let env = format!(
+        "FETCHIRA_HOME={}",
+        absolute_path(config_home).to_string_lossy()
+    );
+    command.args(["-e", &env]);
+    let out = command.args(["--", bin]).output();
     match out {
         Ok(o) if o.status.success() => Ok("claude mcp add fetchira (user scope)".into()),
         Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr);
-            if err.contains("already exists") {
-                Ok("already registered".into())
-            } else {
-                bail!("claude mcp add failed: {}", err.trim())
+            if let (Some(path), Some(contents)) = (config_path, original) {
+                let _ = std::fs::write(path, contents);
             }
+            let err = String::from_utf8_lossy(&o.stderr);
+            bail!("claude mcp add failed: {}", err.trim())
         }
-        Err(_) => bail!("`claude` CLI not on PATH"),
+        Err(error) => {
+            if let (Some(path), Some(contents)) = (config_path, original) {
+                let _ = std::fs::write(path, contents);
+            }
+            bail!("cannot run `claude mcp add`: {error}");
+        }
     }
+}
+
+fn user_claude_config() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".claude.json"))
 }
 
 pub fn help() {
@@ -1352,7 +1708,7 @@ pub fn help() {
            fetchira setup               guided setup: pick providers, enter keys, log in\n  \
            fetchira providers           list all available providers\n  \
            fetchira list                show your accounts + remaining quota\n  \
-           fetchira install             choose MCP registrations and an agent skill (both / MCP / CLI / skip)\n  \
+         fetchira install             choose one agent integration (MCP + CLI fallback / MCP / CLI / later)\n  \
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
@@ -1371,7 +1727,7 @@ pub fn help() {
            fetchira help                this message\n\n\
          Tool flags: fetchira <command> --help. Flags may mix with words; -- ends flags.\n\
          Quote queries, file paths, and session tokens. ChatGPT research/image poll sessions may omit text.\n\
-         CLI tools require local accounts; hosted endpoints remain MCP-only.\n\n\
+         CLI tools use local accounts or the configured hosted endpoint.\n\n\
          Config lives in $FETCHIRA_HOME or ~/.config/fetchira (fetchira.toml + usage.db)."
     );
 }
@@ -1414,7 +1770,7 @@ mod tests {
             let targets = mcp_targets(&home, &appsup, &xdg, &home.join("custom-codex"));
             let target = targets.iter().find(|t| t.name == name).unwrap();
             assert!(!target.installed);
-            (target.run)("/bin/fetchira").unwrap();
+            (target.run)(Path::new("/tmp/fetchira-config"), "/bin/fetchira").unwrap();
             assert!(has_fetchira(&path), "wrong config path for {name}");
             let targets = mcp_targets(&home, &appsup, &xdg, &home.join("custom-codex"));
             let target = targets.iter().find(|t| t.name == name).unwrap();
@@ -1432,12 +1788,89 @@ mod tests {
             r#"{"mcpServers":{"other":{"command":"x"}},"theme":"dark"}"#,
         )
         .unwrap();
-        reg_mcp_servers(&path, "/bin/fetchira").unwrap();
+        reg_mcp_servers(&path, Path::new("/tmp/fetchira-config"), "/bin/fetchira").unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["mcpServers"]["fetchira"]["command"], "/bin/fetchira");
         assert_eq!(v["mcpServers"]["other"]["command"], "x"); // untouched
         assert_eq!(v["theme"], "dark"); // untouched
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn install_detection_checks_the_client_server_map() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-detection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let json_path = home.join("mcp.json");
+        std::fs::write(&json_path, r#"{"note":"fetchira","mcpServers":{}}"#).unwrap();
+        assert!(!has_fetchira(&json_path));
+        std::fs::write(
+            &json_path,
+            r#"{"mcpServers":{"fetchira":{"command":"/bin/fetchira"}}}"#,
+        )
+        .unwrap();
+        assert!(has_fetchira(&json_path));
+
+        let toml_path = home.join("config.toml");
+        std::fs::write(&toml_path, "note = 'fetchira'\n[mcp_servers.other]\n").unwrap();
+        assert!(!has_fetchira(&toml_path));
+        std::fs::write(
+            &toml_path,
+            "[mcp_servers.fetchira]\ncommand = '/bin/fetchira'\n",
+        )
+        .unwrap();
+        assert!(has_fetchira(&toml_path));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn claude_config_refresh_preserves_other_servers() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-claude-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join(".claude.json");
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "mcpServers".into(),
+            json!({
+                "other": { "command": "other" },
+                "fetchira": { "command": "/old/fetchira", "args": [] }
+            }),
+        );
+        std::fs::write(&path, serde_json::to_string(&obj).unwrap()).unwrap();
+        let mut parsed = read_obj(&path).unwrap();
+        let servers = parsed
+            .get_mut("mcpServers")
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        let entry = servers
+            .get_mut("fetchira")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        entry.insert("command".into(), json!("/new/fetchira"));
+        entry.insert("args".into(), json!([]));
+        entry.insert("env".into(), registered_env(&home));
+        write_obj(&path, &parsed).unwrap();
+        let updated = read_obj(&path).unwrap();
+        assert_eq!(
+            updated["mcpServers"]["fetchira"]["command"],
+            "/new/fetchira"
+        );
+        assert_eq!(updated["mcpServers"]["other"]["command"], "other");
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
@@ -1458,7 +1891,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken = [");
         for (register, contents) in [
             (
-                reg_mcp_servers as fn(&Path, &str) -> anyhow::Result<String>,
+                reg_mcp_servers as fn(&Path, &Path, &str) -> anyhow::Result<String>,
                 "{invalid",
             ),
             (reg_mcp_servers, "{\"mcpServers\":[]}"),
@@ -1468,7 +1901,10 @@ mod tests {
             (reg_codex, "mcp_servers = 42"),
         ] {
             std::fs::write(&path, contents).unwrap();
-            assert!(register(&path, "/bin/fetchira").is_err(), "{contents}");
+            assert!(
+                register(&path, &home, "/bin/fetchira").is_err(),
+                "{contents}"
+            );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
         }
         std::fs::remove_dir_all(home).unwrap();

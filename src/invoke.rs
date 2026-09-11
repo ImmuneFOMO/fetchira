@@ -58,6 +58,51 @@ pub(crate) fn validate_search_input(input: &Input) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate the shared MCP/CLI input contract before a request reaches a provider.
+pub(crate) fn validate_input(
+    cap: Capability,
+    input: &Input,
+    provider: Option<ProviderKind>,
+    text_supplied: bool,
+) -> anyhow::Result<()> {
+    match cap {
+        Capability::Read | Capability::Browser => {
+            if input
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .is_none()
+            {
+                bail!("expected exactly one URL");
+            }
+        }
+        Capability::Search | Capability::DeepResearch | Capability::Image => {
+            let empty = input
+                .query
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(str::is_empty);
+            if empty
+                && !allows_empty_query_parts(provider, cap, input.session.as_deref(), text_supplied)
+            {
+                bail!(
+                    "missing {}",
+                    if cap == Capability::Image {
+                        "prompt"
+                    } else {
+                        "query"
+                    }
+                );
+            }
+        }
+    }
+    if matches!(cap, Capability::Search | Capability::DeepResearch) {
+        validate_search_input(input)?;
+    }
+    Ok(())
+}
+
 fn parse_provider(s: &str) -> anyhow::Result<ProviderKind> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .with_context(|| format!("unknown provider '{s}' (try `fetchira providers`)"))
@@ -138,6 +183,8 @@ struct Request {
     capability: Option<Capability>, // None is the usage snapshot, not a provider call.
     input: Input,
     provider: Option<ProviderKind>,
+    /// Keep the prefixed form for a hosted MCP call; local routing consumes the prefix.
+    remote_session: Option<String>,
     path: Option<PathBuf>,
 }
 
@@ -153,6 +200,7 @@ fn parse_args(command: &str, mut args: impl Iterator<Item = String>) -> anyhow::
         capability: cap,
         input: Input::default(),
         provider: None,
+        remote_session: None,
         path: None,
     };
     let mut words = Vec::new();
@@ -206,6 +254,7 @@ fn parse_args(command: &str, mut args: impl Iterator<Item = String>) -> anyhow::
             _ => unreachable!(),
         }
     }
+    req.remote_session = session.clone();
     (req.provider, req.input.session) = route(req.provider, session)?;
     match cap {
         None => {
@@ -222,9 +271,6 @@ fn parse_args(command: &str, mut args: impl Iterator<Item = String>) -> anyhow::
         }
         Some(_) => {
             let query = words.join(" ");
-            if query.trim().is_empty() && !allows_empty_query(&req, !words.is_empty()) {
-                bail!("missing {}", if image { "prompt" } else { "query" });
-            }
             req.input.query = (!words.is_empty()).then_some(query);
         }
     }
@@ -232,25 +278,28 @@ fn parse_args(command: &str, mut args: impl Iterator<Item = String>) -> anyhow::
     if cap == Some(Capability::Search) && !req.input.file.is_empty() {
         req.provider = req.provider.or(Some(ProviderKind::GrokWeb));
     }
-    if search {
-        validate_search_input(&req.input)?;
+    if let Some(cap) = cap {
+        validate_input(cap, &req.input, req.provider, !words.is_empty())?;
     }
     Ok(req)
 }
 
-fn allows_empty_query(req: &Request, text_supplied: bool) -> bool {
-    let Some(session) = req.input.session.as_deref() else {
+fn allows_empty_query_parts(
+    provider: Option<ProviderKind>,
+    capability: Capability,
+    session: Option<&str>,
+    text_supplied: bool,
+) -> bool {
+    let Some(session) = session else {
         return false;
     };
     let opaque = crate::router::decode_session_affinity(session).map(|(_, opaque)| opaque);
     let token = opaque.as_deref().unwrap_or(session);
-    match (req.provider, req.capability) {
-        (Some(ProviderKind::ChatgptWeb), Some(Capability::DeepResearch)) => {
-            token.starts_with("dr|poll|")
-        }
-        (Some(ProviderKind::ChatgptWeb), Some(Capability::Image)) => token.starts_with("img|poll|"),
+    match (provider, capability) {
+        (Some(ProviderKind::ChatgptWeb), Capability::DeepResearch) => token.starts_with("dr|poll|"),
+        (Some(ProviderKind::ChatgptWeb), Capability::Image) => token.starts_with("img|poll|"),
         // Gemini treats an explicitly empty follow-up as "start" for its research plan.
-        (Some(ProviderKind::GeminiWeb), Some(Capability::DeepResearch)) => {
+        (Some(ProviderKind::GeminiWeb), Capability::DeepResearch) => {
             text_supplied && token.starts_with("dr|")
         }
         _ => false,
@@ -273,6 +322,152 @@ fn reply_text(reply: Reply, cap: Capability, path: Option<&Path>) -> anyhow::Res
     Ok(text)
 }
 
+fn remote_arguments(req: &Request) -> rmcp::model::JsonObject {
+    let mut args = serde_json::Map::new();
+    let insert = |args: &mut serde_json::Map<String, serde_json::Value>, key: &str, value| {
+        args.insert(key.to_string(), value);
+    };
+    if let Some(provider) = req.provider {
+        insert(&mut args, "provider", serde_json::json!(provider));
+    }
+    if let Some(session) = req.remote_session.as_deref() {
+        insert(&mut args, "session", serde_json::json!(session));
+    }
+    match req.capability {
+        Some(Capability::Search | Capability::DeepResearch) => {
+            if let Some(query) = req.input.query.as_deref() {
+                insert(&mut args, "query", serde_json::json!(query));
+            }
+            if let Some(max_results) = req.input.max_results {
+                insert(&mut args, "max_results", serde_json::json!(max_results));
+            }
+            for (key, value) in [
+                ("model", req.input.model.as_deref()),
+                ("mode", req.input.mode.as_deref()),
+                ("topic", req.input.topic.as_deref()),
+                ("recency", req.input.recency.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    insert(&mut args, key, serde_json::json!(value));
+                }
+            }
+            if let Some(domains) = req.input.domains.as_ref() {
+                insert(&mut args, "domains", serde_json::json!(domains));
+            }
+            if req.capability == Some(Capability::DeepResearch) {
+                if let Some(depth) = req.input.depth.as_deref() {
+                    insert(&mut args, "depth", serde_json::json!(depth));
+                }
+            }
+        }
+        Some(Capability::Read | Capability::Browser) => {
+            insert(
+                &mut args,
+                "url",
+                serde_json::json!(req.input.url.as_deref().unwrap_or_default()),
+            );
+            if req.capability == Some(Capability::Read) {
+                if let Some(mode) = req.input.mode.as_deref() {
+                    insert(&mut args, "mode", serde_json::json!(mode));
+                }
+            }
+        }
+        Some(Capability::Image) => {
+            // MCP's image schema requires prompt even for a provider poll. An empty prompt
+            // preserves the poll token while matching the provider's empty follow-up behavior.
+            insert(
+                &mut args,
+                "prompt",
+                serde_json::json!(req.input.query.as_deref().unwrap_or_default()),
+            );
+        }
+        None => {}
+    }
+    args
+}
+
+fn remote_result_text(
+    result: rmcp::model::CallToolResult,
+    path: Option<&Path>,
+) -> anyhow::Result<String> {
+    if result.is_error == Some(true) {
+        let message = result
+            .content
+            .iter()
+            .filter_map(|content| content.raw.as_text().map(|text| text.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if message.is_empty() {
+            bail!("remote tool failed");
+        }
+        bail!("{message}");
+    }
+    let mut text = Vec::new();
+    let mut saved = None;
+    for content in result.content {
+        match content.raw {
+            rmcp::model::RawContent::Text(content) => text.push(content.text),
+            rmcp::model::RawContent::Image(content) => {
+                if saved.is_some() {
+                    bail!("hosted tool returned multiple artifacts");
+                }
+                saved = Some(save_image(
+                    &OutImage {
+                        mime: content.mime_type,
+                        b64: content.data,
+                    },
+                    path,
+                )?);
+            }
+            rmcp::model::RawContent::Resource(content) => match content.resource {
+                rmcp::model::ResourceContents::TextResourceContents { text: body, .. } => {
+                    text.push(body)
+                }
+                rmcp::model::ResourceContents::BlobResourceContents {
+                    blob, mime_type, ..
+                } => {
+                    if saved.is_some() {
+                        bail!("hosted tool returned multiple artifacts");
+                    }
+                    saved = Some(save_image(
+                        &OutImage {
+                            mime: mime_type.unwrap_or_else(|| "application/octet-stream".into()),
+                            b64: blob,
+                        },
+                        path,
+                    )?);
+                }
+            },
+            rmcp::model::RawContent::Audio(_) => {
+                bail!("hosted tool returned an unsupported audio artifact");
+            }
+            rmcp::model::RawContent::ResourceLink(link) => {
+                text.push(format!("resource: {}", link.uri));
+            }
+        }
+    }
+    if let Some(saved) = saved {
+        if !text.is_empty() {
+            text.insert(0, saved);
+            return Ok(text.join("\n"));
+        }
+        return Ok(saved);
+    }
+    Ok(text.join("\n"))
+}
+
+async fn run_remote(cfg: &crate::config::Config, req: &Request) -> anyhow::Result<String> {
+    if !req.input.file.is_empty() {
+        bail!("File attachments require local stdio mode; hosted HTTP does not upload local files or accept server filesystem paths.");
+    }
+    let Some(capability) = req.capability else {
+        let result = crate::remote::call_tool(cfg, "usage", remote_arguments(req)).await?;
+        return remote_result_text(result, None);
+    };
+    let result = crate::remote::call_tool(cfg, capability.as_str(), remote_arguments(req)).await?;
+    remote_result_text(result, req.path.as_deref())
+}
+
 pub async fn run(
     home: &Path,
     command: &str,
@@ -286,7 +481,9 @@ pub async fn run(
     let req = parse(command, args.into_iter())?;
     let cfg = crate::cli::load_or_empty(home)?;
     if cfg.remote.endpoint.is_some() {
-        bail!("CLI tools need local accounts; this configuration uses a hosted endpoint. Use MCP for hosted Fetchira, or a local FETCHIRA_HOME.");
+        let text = run_remote(&cfg, &req).await?;
+        println!("{text}");
+        return Ok(());
     }
     let store = crate::usage::Store::open(&crate::config::resolve_db(home, &cfg.db_path)).await?;
     let router = Router::build(cfg, store).await?;
@@ -423,6 +620,155 @@ mod tests {
         assert!(text.starts_with("still generating"));
         assert!(text.contains("⟦session: chatgpt_web:token"));
         assert!(!text.contains("saved:"));
+    }
+
+    #[test]
+    fn hosted_arguments_keep_mcp_names_and_prefixed_session() {
+        let req = request(
+            "deep_research",
+            &[
+                "battery",
+                "recycling",
+                "--provider",
+                "tavily",
+                "--max",
+                "7",
+                "--session",
+                "tavily:opaque-token",
+                "--model",
+                "research",
+                "--mode",
+                "expert",
+                "--topic",
+                "news",
+                "--recency",
+                "week",
+                "--domain",
+                "nature.com",
+                "--depth",
+                "deep",
+            ],
+        )
+        .unwrap();
+        let args = remote_arguments(&req);
+        assert_eq!(args["query"], "battery recycling");
+        assert_eq!(args["provider"], "tavily");
+        assert_eq!(args["session"], "tavily:opaque-token");
+        assert_eq!(args["max_results"], 7);
+        assert_eq!(args["model"], "research");
+        assert_eq!(args["mode"], "expert");
+        assert_eq!(args["topic"], "news");
+        assert_eq!(args["recency"], "week");
+        assert_eq!(args["domains"], serde_json::json!(["nature.com"]));
+        assert_eq!(args["depth"], "deep");
+        assert!(!args.contains_key("file"));
+    }
+
+    #[test]
+    fn hosted_image_poll_uses_empty_schema_prompt() {
+        let req = request(
+            "create_image",
+            &["--session", "chatgpt_web:img|poll|cid|prompt"],
+        )
+        .unwrap();
+        let args = remote_arguments(&req);
+        assert_eq!(args["prompt"], "");
+        assert_eq!(args["session"], "chatgpt_web:img|poll|cid|prompt");
+    }
+
+    #[test]
+    fn hosted_arguments_cover_read_browser_and_usage() {
+        let read = request(
+            "read",
+            &[
+                "https://example.test",
+                "--provider",
+                "steel",
+                "--mode",
+                "pdf",
+            ],
+        )
+        .unwrap();
+        let args = remote_arguments(&read);
+        assert_eq!(args["url"], "https://example.test");
+        assert_eq!(args["provider"], "steel");
+        assert_eq!(args["mode"], "pdf");
+
+        let browser = request("browser", &["https://example.test"]).unwrap();
+        let args = remote_arguments(&browser);
+        assert_eq!(args["url"], "https://example.test");
+        assert_eq!(args.len(), 1);
+
+        let usage = request("usage", &["serper"]).unwrap();
+        let args = remote_arguments(&usage);
+        assert_eq!(args["provider"], "serper");
+        assert_eq!(args.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hosted_calls_reject_local_file_attachments() {
+        let req = request("search", &["question", "--file", "./notes.txt"]).unwrap();
+        let error = run_remote(&crate::config::Config::default(), &req)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("File attachments require local stdio mode"));
+    }
+
+    #[test]
+    fn hosted_artifact_is_saved_and_text_is_preserved() {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira-cli-hosted-image-{}.png",
+            std::process::id()
+        ));
+        let result = rmcp::model::CallToolResult::success(vec![
+            rmcp::model::Content::image(
+                base64::engine::general_purpose::STANDARD.encode(b"hosted image"),
+                "image/png",
+            ),
+            rmcp::model::Content::text("⟦session: chatgpt_web:token — continue⟧"),
+        ]);
+        let text = remote_result_text(result, Some(&path)).unwrap();
+        assert!(text.starts_with("saved: "));
+        assert!(text.contains("⟦session: chatgpt_web:token"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"hosted image");
+        let req = request(
+            "create_image",
+            &["prompt", "--path", path.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(!remote_arguments(&req).contains_key("path"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hosted_pdf_resource_is_saved_as_pdf() {
+        let path = std::env::temp_dir().join(format!(
+            "fetchira-cli-hosted-pdf-{}.pdf",
+            std::process::id()
+        ));
+        let result = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::resource(
+            rmcp::model::ResourceContents::blob(
+                base64::engine::general_purpose::STANDARD.encode(b"%PDF-hosted"),
+                "fetchira:///artifact.pdf",
+            )
+            .with_mime_type("application/pdf"),
+        )]);
+        let text = remote_result_text(result, Some(&path)).unwrap();
+        assert!(text.starts_with("saved: "));
+        assert_eq!(std::fs::read(&path).unwrap(), b"%PDF-hosted");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hosted_tool_error_becomes_cli_error() {
+        let result =
+            rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text("provider failed")]);
+        assert_eq!(
+            remote_result_text(result, None).unwrap_err().to_string(),
+            "provider failed"
+        );
     }
 
     #[test]

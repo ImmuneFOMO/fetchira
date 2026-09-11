@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use rmcp::transport::{
@@ -7,8 +8,8 @@ use rmcp::transport::{
 };
 use rmcp::{
     model::{
-        ClientNotification, ClientRequest, Content, RawContent, ResourceContents, ServerInfo,
-        ServerResult,
+        CallToolRequestParams, CallToolResult, ClientNotification, ClientRequest, Content,
+        RawContent, ResourceContents, ServerInfo, ServerResult,
     },
     service::{NotificationContext, RequestContext},
     transport::stdio,
@@ -49,7 +50,11 @@ pub async fn verify(cfg: &Config) -> anyhow::Result<String> {
         .as_deref()
         .context("remote endpoint is not configured")?;
     let base = server_base(endpoint)?;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let key = cfg
         .remote
         .api_key
@@ -108,10 +113,13 @@ pub fn set(home: &Path, endpoint: String, api_key: Option<String>) -> anyhow::Re
         Config::default()
     };
     let endpoint = normalize_endpoint(&endpoint)?;
+    let endpoint_changed = cfg.remote.endpoint.as_deref() != Some(endpoint.as_str());
     cfg.remote.endpoint = Some(endpoint);
     if let Some(api_key) = api_key {
         validate_api_key(&api_key)?;
         cfg.remote.api_key = Some(api_key);
+    } else if endpoint_changed {
+        cfg.remote.api_key = None;
     }
     config::save(&cfg, &path)?;
     println!(
@@ -147,13 +155,39 @@ pub fn transport(cfg: &Config) -> anyhow::Result<StreamableHttpClientTransport<r
         .as_deref()
         .context("remote API key is not configured")?;
     let key = config::resolve_secret(key)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let transport = StreamableHttpClientTransport::with_client(
-        reqwest::Client::new(),
+        client,
         StreamableHttpClientTransportConfig::with_uri(Arc::<str>::from(endpoint))
             .auth_header(key)
             .reinit_on_expired_session(true),
     );
     Ok(transport)
+}
+
+/// Call one hosted MCP tool and close the short-lived client connection.
+pub async fn call_tool(
+    cfg: &Config,
+    name: &str,
+    arguments: rmcp::model::JsonObject,
+) -> anyhow::Result<CallToolResult> {
+    verify(cfg).await?;
+    let client = ().serve(transport(cfg)?).await.context("remote MCP handshake failed")?;
+    let result = client
+        .peer()
+        .call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(arguments))
+        .await
+        .context("remote MCP tool call failed");
+    let _ = client.cancel().await;
+    result
+}
+
+/// Validate a prospective remote configuration before persisting it.
+pub async fn validate_config(cfg: &Config) -> anyhow::Result<String> {
+    verify(cfg).await
 }
 
 /// Run the local stdio side as an MCP server and forward its requests to the hosted MCP peer.
@@ -430,8 +464,14 @@ fn normalize_endpoint(endpoint: &str) -> anyhow::Result<String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
-fn validate_api_key(key: &str) -> anyhow::Result<()> {
-    if !key.starts_with("fk_live_") || key.chars().any(char::is_whitespace) {
+pub(crate) fn validate_api_key(key: &str) -> anyhow::Result<()> {
+    if key.is_empty() || key.chars().any(char::is_whitespace) {
+        bail!("invalid Fetchira API key (expected fk_live_*)");
+    }
+    // Keep supported secret references (`env:NAME` and `enc:...`) in the config while
+    // validating the resolved credential that the transport will actually send.
+    let resolved = config::resolve_secret(key).context("invalid Fetchira API key")?;
+    if !resolved.starts_with("fk_live_") || resolved.chars().any(char::is_whitespace) {
         bail!("invalid Fetchira API key (expected fk_live_*)");
     }
     Ok(())
@@ -551,6 +591,14 @@ pub async fn login(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{http::StatusCode, routing::get, Json, Router as AxumRouter};
+    use rmcp::model::ServerCapabilities;
+    use rmcp::service::{NotificationContext, RequestContext};
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use rmcp::{RoleServer, Service};
+    use serde_json::json;
 
     #[test]
     fn bridge_preserves_hosted_protocol_errors() {
@@ -599,5 +647,130 @@ mod tests {
         version.min_client_schema_version = None;
         version.max_client_schema_version = None;
         assert!(validate_compatibility(&version).is_err());
+    }
+
+    #[test]
+    fn changing_remote_endpoint_drops_implicit_old_key() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-remote-set-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+
+        set(
+            &home,
+            "https://old.example.test/mcp".into(),
+            Some("fk_live_old".into()),
+        )
+        .unwrap();
+        set(&home, "https://old.example.test".into(), None).unwrap();
+        let cfg = config::load(home.join("fetchira.toml").to_str().unwrap()).unwrap();
+        assert_eq!(cfg.remote.api_key.as_deref(), Some("fk_live_old"));
+
+        set(&home, "https://new.example.test".into(), None).unwrap();
+        let cfg = config::load(home.join("fetchira.toml").to_str().unwrap()).unwrap();
+        assert!(cfg.remote.api_key.is_none());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[derive(Clone)]
+    struct EchoMcp {
+        seen: Arc<tokio::sync::Mutex<Option<rmcp::model::JsonObject>>>,
+    }
+
+    impl Service<RoleServer> for EchoMcp {
+        async fn handle_request(
+            &self,
+            request: ClientRequest,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ServerResult, ErrorData> {
+            match request {
+                ClientRequest::InitializeRequest(_) => Ok(ServerResult::InitializeResult(
+                    ServerInfo::new(ServerCapabilities::builder().enable_tools().build()),
+                )),
+                ClientRequest::CallToolRequest(request) => {
+                    *self.seen.lock().await = request.params.arguments;
+                    Ok(ServerResult::CallToolResult(CallToolResult::success(vec![
+                        Content::text("hosted echo"),
+                    ])))
+                }
+                _ => Err(ErrorData::internal_error("unexpected test request", None)),
+            }
+        }
+
+        async fn handle_notification(
+            &self,
+            _notification: ClientNotification,
+            _context: NotificationContext<RoleServer>,
+        ) -> Result<(), ErrorData> {
+            Ok(())
+        }
+
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_call_preflights_and_uses_streamable_http() {
+        let seen = Arc::new(tokio::sync::Mutex::new(None));
+        let mcp = StreamableHttpService::new(
+            {
+                let seen = seen.clone();
+                move || Ok(EchoMcp { seen: seen.clone() })
+            },
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig::default(),
+        );
+        let app = AxumRouter::new()
+            .route(
+                "/version",
+                get(|| async {
+                    Json(json!({
+                        "server_version": "test",
+                        "protocol_version": crate::hosted::PROTOCOL_VERSION,
+                        "schema_version": crate::usage::SCHEMA,
+                        "min_client_schema_version": 1,
+                        "max_client_schema_version": crate::usage::SCHEMA
+                    }))
+                }),
+            )
+            .route("/auth/check", get(|| async { StatusCode::OK }))
+            .route("/remote/check", get(|| async { StatusCode::OK }))
+            .nest_service("/mcp", mcp);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut cfg = Config::default();
+        cfg.remote.endpoint = Some(format!("http://{addr}/mcp"));
+        cfg.remote.api_key = Some("fk_live_test".into());
+        let mut args = rmcp::model::JsonObject::new();
+        args.insert("query".into(), json!("hosted parity"));
+        let result = call_tool(&cfg, "search", args).await.unwrap();
+        assert_eq!(result.content[0].raw.as_text().unwrap().text, "hosted echo");
+        assert_eq!(
+            seen.lock().await.as_ref().unwrap()["query"],
+            "hosted parity"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn hosted_call_rejects_missing_key_before_handshake() {
+        let mut cfg = Config::default();
+        cfg.remote.endpoint = Some("http://127.0.0.1:9/mcp".into());
+        let error = call_tool(&cfg, "usage", rmcp::model::JsonObject::new())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("remote API key is not configured"));
     }
 }

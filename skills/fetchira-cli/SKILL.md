@@ -1,6 +1,6 @@
 ---
 name: fetchira-cli
-description: Use the local Fetchira CLI for current web search, URL reading, deep research, JavaScript page reading, image generation, and provider usage through a shell.
+description: Use the Fetchira CLI for current web search, URL reading, deep research, JavaScript page reading, image generation, and provider usage through a shell.
 ---
 
 # Fetchira CLI
@@ -24,12 +24,12 @@ fetchira usage [PROVIDER]
 
 Positional query and prompt words are joined. Flags may be mixed with them; `--` ends flag
 parsing. `deep_research` also accepts `dr`. Quote every query, URL, path, and session token. CLI
-mode needs local accounts and rejects a configured remote endpoint. For a JavaScript-heavy page use
+calls use local accounts or the configured hosted server automatically. For a JavaScript-heavy page use
 `browser`; use a separate listed browser-control capability for interaction with the user's
 existing browser.
 
 For a ChatGPT research/image poll, text may be omitted: `fetchira deep_research --session 'TOKEN'`
 or `fetchira create_image --session 'TOKEN'`. Other calls need a query or prompt.
 
-For setup, use `fetchira providers`, then `fetchira add PROVIDER --key KEY` for a key account or
+For local setup, use `fetchira providers`, then `fetchira add PROVIDER --key KEY` for a key account or
 `fetchira add PROVIDER` for a browser account. Do not run interactive setup or login unattended.

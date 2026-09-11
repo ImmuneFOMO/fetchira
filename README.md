@@ -3,7 +3,7 @@
 # Fetchira
 
 Web search, page reading, deep research and image generation through one router. Use the
-local CLI or connect your agent through MCP. Bring an API key or a supported web session;
+CLI or connect your agent through MCP. Bring an API key or a supported web session;
 Fetchira routes requests across your configured accounts and providers.
 
 ## Start locally
@@ -34,8 +34,9 @@ Get a Serper key at [serper.dev](https://serper.dev), or run `fetchira providers
 another provider. Each provider has its own plan and quota; paid features can consume a
 paid balance. For browser login instead of an API key, run `fetchira add gemini_web`.
 
-MCP is optional. For an agent, run `fetchira install` to choose MCP clients and a skill
-(MCP first with CLI fallback, MCP only, or CLI only), then restart the agent.
+MCP is optional. Run `fetchira setup` to choose local accounts or an existing hosted server.
+For an agent, `fetchira install` offers CLI only, MCP, or MCP with CLI fallback, then installs
+the matching skill in your selected agents. Restart the agent after installation.
 `fetchira ui` opens the local dashboard.
 
 ![Local dashboard](docs/dashboard.png)
@@ -47,22 +48,22 @@ MCP is optional. For an agent, run `fetchira install` to choose MCP clients and 
 | Install, connect an agent, or choose a skill | [Setup](docs/setup.md) |
 | Search, research, generate images, or continue a session from a shell | [CLI](docs/cli.md) |
 | Manage accounts, quotas, proxies, or troubleshoot a failure | [Configuration](docs/configuration.md) |
-| Share one private server through authenticated MCP | [Hosted deployment](docs/hosted.md) |
+| Share one private server through CLI or MCP | [Hosted deployment](docs/hosted.md) |
 | Build, test, contribute, or release | [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) |
 
 ## Hosted
 
-Run Fetchira on your server with Docker Compose or systemd. One administrator owns the
-provider accounts and issues scoped keys to trusted users. Agents connect through the local
-stdio bridge to the server's authenticated Streamable HTTP endpoint:
+To use an existing server, get its URL and API key from the administrator. Run
+`fetchira setup` and choose **Connect to a server** to verify access before saving.
+For scripted setup, save the connection and check it:
 
 ```sh
 fetchira remote set https://fetchira.example.com/mcp --key 'fk_live_...'
 fetchira remote check
 ```
 
-[Deploy the server first](docs/hosted.md). Hosted mode requires a persistent encryption key
-and HTTPS outside loopback. Local file attachments and one-shot CLI commands require local
-mode; generated hosted images are saved on the laptop by the MCP bridge.
+CLI and MCP both use the configured server; generated images and PDFs are saved on your
+computer. Laptop file attachments require local mode through either interface.
+See [hosted deployment](docs/hosted.md) to run your own server.
 
 [Apache-2.0 license](LICENSE) · [Report a security issue](SECURITY.md)

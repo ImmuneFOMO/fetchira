@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("install") => {
             require_no_args(&mut args, "usage: fetchira install")?;
-            return cli::install_tools();
+            return cli::install_tools(&home);
         }
         Some("add") => return cli::add(&home, args).await,
         Some(command @ ("remove" | "rm")) => {

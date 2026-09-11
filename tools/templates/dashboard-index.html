@@ -138,6 +138,7 @@ function UpdateBanner({ u, pending }) {
 }
 
 function App() {
+  const [connectionOpen, setConnectionOpen] = React.useState(false);
   const [tab, setTab] = React.useState(new URLSearchParams(location.search).get('tab') || 'overview');
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
   // null until the first live state answers; a fresh install (zero accounts) opens the
@@ -173,7 +174,7 @@ function App() {
         setOnline(true);
         window.FX = Object.assign({}, window.FX, await r.json());
         setPhase('live');
-        setOnboard((o) => o === null ? (window.FX.accounts || []).length === 0 : o);
+        setOnboard((o) => o === null ? (window.FX.accounts || []).length === 0 && window.FX.setup?.mode !== 'hosted' : o);
         bump((n) => n + 1);
       } catch (e) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); }
     };
@@ -204,9 +205,17 @@ function App() {
 
       <div style={{ position: 'sticky', top: 'var(--topbar-h)', zIndex: 15, background: 'rgba(10,12,17,0.8)', backdropFilter: 'blur(12px)', borderBottom: '1px solid var(--border-faint)', padding: '10px 20px', display: 'flex', alignItems: 'center' }}>
         <Tabs items={tabs} value={tab} onChange={setTab} />
+        <Button variant="ghost" size="sm" onClick={() => setConnectionOpen(true)} style={{ marginLeft: 'auto' }}>Setup & agents</Button>
       </div>
 
       <main style={{ maxWidth: 'var(--container-max)', margin: '0 auto', padding: '20px' }}>
+        {window.FX.setup?.mode === 'hosted' && <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12, padding: 14, marginBottom: 16, border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ color: 'var(--text-hi)', fontSize: 13, overflowWrap: 'anywhere' }}>Connected to {window.FX.setup.endpoint}</div>
+            <div style={{ color: 'var(--text-mid)', fontSize: 12, marginTop: 4 }}>CLI and MCP use this server. Accounts and activity below belong to this computer. Run <code>fetchira usage</code> for server quotas.</div>
+          </div>
+          <Button variant="secondary" onClick={() => setConnectionOpen(true)}>Connection settings</Button>
+        </div>}
         {window.FX.update && <UpdateBanner u={window.FX.update} pending={window.FX.update_pending} />}
         {phase === 'loading' ? <Loading />
           : tab === 'overview' ? <window.OverviewTab />
@@ -214,6 +223,7 @@ function App() {
           : <window.ActivityTab />}
       </main>
 
+      {connectionOpen && <window.InstallPanel onClose={() => { setConnectionOpen(false); window.fxRefresh(); }} />}
       {modal && <window.AddAccountModal onClose={() => setModal(false)} />}
     </React.Fragment>
   );
@@ -237,9 +247,10 @@ window.apiPost = async function (path, body) {
     if (window.fxSetOffline) window.fxSetOffline(true);
     throw new Error('UI server offline — run `fetchira ui` in your terminal');
   }
+  const text = await r.text();
   let data = null;
-  try { data = await r.json(); } catch (e) {}
-  if (!r.ok) throw new Error((data && data.error) || ('request failed (' + r.status + ')'));
+  try { data = JSON.parse(text); } catch (e) {}
+  if (!r.ok) throw new Error((data && data.error) || text || ('request failed (' + r.status + ')'));
   return data;
 };
 window.apiGet = async function (path) {

@@ -55,8 +55,15 @@ pub async fn call(
     let image = matches!(cap, Capability::Image);
     let mode = select(cap, input);
 
+    let (conversation, parent) = match input.session.as_deref() {
+        Some(session) => match session.split_once('|') {
+            Some((conversation, parent)) => (Some(conversation), Some(parent)),
+            None => (Some(session), None),
+        },
+        None => (None, None),
+    };
     // Resume an existing conversation, or start a new one.
-    let url = match input.session.as_deref() {
+    let url = match conversation {
         Some(conv) => format!("{base}/rest/app-chat/conversations/{conv}/responses"),
         None => format!("{base}/rest/app-chat/conversations/new"),
     };
@@ -68,7 +75,7 @@ pub async fn call(
         file_ids.push(upload(base, client, &p.to_string_lossy()).await?);
     }
 
-    let body = json!({
+    let mut body = json!({
         "temporary": false,
         "message": query,
         "fileAttachments": file_ids,
@@ -91,8 +98,11 @@ pub async fn call(
         "collectionIds": [],
         "disabledConnectorIds": [],
         "modeId": mode,
-    })
-    .to_string();
+    });
+    if let Some(parent) = parent {
+        body["parentResponseId"] = json!(parent);
+    }
+    let body = body.to_string();
 
     let mut resp = send(base, client, &url, path, &body).await?;
     // A 403 is grok's app anti-bot — usually a rotated build/seed. Drop the cached statsig and retry.
@@ -145,16 +155,23 @@ pub async fn call(
             e => e,
         });
     }
-    parse(&text).map_err(|e| match e {
-        // A non-auth status whose body isn't the expected stream: surface a snippet so the debug
-        // log shows what grok actually sent (anti-bot HTML, a changed shape, an empty body…).
-        Error::BadResponse(_) => Error::Provider {
-            provider: "grok_web",
-            status,
-            body: format!("unexpected response shape: {}", snippet(&text)),
-        },
-        e => e,
-    })
+    parse_with_conversation(&text, conversation)
+        .map(|mut out| {
+            if out.session.is_none() {
+                out.session = input.session.clone();
+            }
+            out
+        })
+        .map_err(|e| match e {
+            // A non-auth status whose body isn't the expected stream: surface a snippet so the debug
+            // log shows what grok actually sent (anti-bot HTML, a changed shape, an empty body…).
+            Error::BadResponse(_) => Error::Provider {
+                provider: "grok_web",
+                status,
+                body: format!("unexpected response shape: {}", snippet(&text)),
+            },
+            e => e,
+        })
 }
 
 /// Extract the generated image(s) from the ndjson stream and download the first as bytes. grok
@@ -820,11 +837,17 @@ fn select(cap: Capability, input: &Input) -> &'static str {
 /// Parse newline-delimited JSON. Prefer the terminal `modelResponse.message`; otherwise
 /// concatenate streamed string `token`s. Collect `webSearchResults` as sources and the
 /// `conversationId` as the resume token.
+#[cfg(test)]
 fn parse(ndjson: &str) -> Result<Outcome> {
+    parse_with_conversation(ndjson, None)
+}
+
+fn parse_with_conversation(ndjson: &str, conversation: Option<&str>) -> Result<Outcome> {
     let mut tokens = String::new();
     let mut final_msg: Option<String> = None;
     let mut sources: Vec<String> = Vec::new();
-    let mut conv: Option<String> = None;
+    let mut conv: Option<String> = conversation.map(str::to_owned);
+    let mut response_id: Option<String> = None;
 
     for line in ndjson.lines() {
         let line = line.trim();
@@ -851,11 +874,20 @@ fn parse(ndjson: &str) -> Result<Outcome> {
         if conv.is_none() {
             conv = find_str(&v, "conversationId");
         }
-        let resp = match v.get("result").and_then(|r| r.get("response")) {
-            Some(r) => r,
-            None => continue,
+        let Some(result) = v.get("result") else {
+            continue;
         };
-        if let Some(tok) = resp.get("token").and_then(|t| t.as_str()) {
+        // Continuations omit the new-conversation `response` envelope.
+        let resp = result.get("response").unwrap_or(result);
+        let model = resp.get("modelResponse").unwrap_or(&Value::Null);
+        if let Some(id) = model.get("responseId").and_then(Value::as_str) {
+            response_id = Some(id.to_string());
+        }
+        if let Some(tok) = resp
+            .get("token")
+            .or_else(|| model.get("token"))
+            .and_then(|t| t.as_str())
+        {
             tokens.push_str(tok);
         }
         if let Some(m) = resp
@@ -867,6 +899,7 @@ fn parse(ndjson: &str) -> Result<Outcome> {
         }
         if let Some(results) = resp
             .get("webSearchResults")
+            .or_else(|| model.get("webSearchResults"))
             .and_then(|w| w.get("results"))
             .and_then(|r| r.as_array())
         {
@@ -885,7 +918,10 @@ fn parse(ndjson: &str) -> Result<Outcome> {
         return Err(Error::BadResponse("grok_web"));
     }
     let mut out = Outcome::new(with_sources(strip_render(&answer), &sources), 1);
-    out.session = conv;
+    out.session = conv.map(|conv| match response_id {
+        Some(id) => format!("{conv}|{id}"),
+        None => conv,
+    });
     Ok(out)
 }
 
@@ -949,6 +985,38 @@ mod tests {
         assert!(out.text.starts_with("Hello world, final."));
         assert!(out.text.contains("x.ai"));
         assert_eq!(out.session.as_deref(), Some("conv-99"));
+    }
+
+    #[test]
+    fn parses_continuation_without_response_envelope() {
+        let lines = [
+            r#"{"result":{"userResponse":{"message":"Repeat my answer","sender":"human"}}}"#,
+            r#"{"result":{"modelResponse":{"token":"Partial "}}}"#,
+            r#"{"result":{"modelResponse":{"message":"Final answer","webSearchResults":{"results":[{"url":"https://example.com"}]}}}}"#,
+        ].join("\n");
+        let out = parse(&lines).unwrap();
+        assert!(out.text.starts_with("Final answer"));
+        assert!(out.text.contains("https://example.com"));
+        assert!(!out.text.contains("Repeat my answer"));
+        assert!(parse(lines.lines().next().unwrap()).is_err());
+    }
+
+    #[test]
+    fn continuation_token_tracks_the_latest_assistant_parent() {
+        let first = r#"{"result":{"response":{"conversationId":"conv","modelResponse":{"responseId":"reply-1","message":"Mango"}}}}"#;
+        assert_eq!(
+            parse(first).unwrap().session.as_deref(),
+            Some("conv|reply-1")
+        );
+        let next =
+            r#"{"result":{"modelResponse":{"responseId":"reply-2","message":"Mango dessert"}}}"#;
+        assert_eq!(
+            parse_with_conversation(next, Some("conv"))
+                .unwrap()
+                .session
+                .as_deref(),
+            Some("conv|reply-2")
+        );
     }
 
     #[test]

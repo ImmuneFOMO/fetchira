@@ -1,8 +1,9 @@
-# Local CLI
+# CLI
 
 [Home](../README.md) · [Setup and agent integration](setup.md) · [Configuration](configuration.md) · [Hosted](hosted.md)
 
-The six one-shot commands use the same router as MCP. Configure at least one local provider first:
+The six one-shot commands expose the same operations as MCP, locally or through a configured
+hosted server. Run `fetchira setup` to choose either mode, or add a local provider directly:
 
 ```sh
 fetchira add serper --key 'YOUR_KEY'
@@ -23,7 +24,8 @@ fetchira create_image PROMPT... [--provider P] [--path DEST] [--session S] [--fi
 fetchira usage [PROVIDER]
 ```
 
-CLI calls use local accounts and reject a configured remote endpoint. They print provider text to
+CLI calls use local accounts unless a remote endpoint is configured, in which case they call
+that server through the same MCP connection as the stdio bridge. They print provider text to
 stdout, diagnostics to stderr, and append the same `⟦session: …⟧` footer as MCP. `deep_research`
 also accepts `dr`; positional query and prompt words are joined, flags may be mixed with them,
 and `--` ends flag parsing. Repeat `--domain` and `--file`; prefix an excluded domain with `-`
@@ -82,7 +84,7 @@ Completed images, screenshots and PDFs are saved under the Fetchira home `images
 unless `create_image --path DEST` chooses a destination. An explicit existing destination
 is overwritten. The CLI prints `saved: /absolute/path` and never emits base64 image bytes.
 
-The `--file` option attaches local files only to providers that support uploads. It does not
-upload files to hosted Fetchira. Once a remote endpoint is configured, all six commands
-reject that configuration; use MCP, `fetchira remote disconnect`, or a separate local
-`FETCHIRA_HOME`.
+The `--file` option attaches local files only to providers that support uploads. Hosted calls
+reject laptop file attachments through both CLI and MCP; neither interface uploads them.
+Use `fetchira remote disconnect` or a separate local `FETCHIRA_HOME` for file Q&A.
+Hosted images and PDFs are saved on your computer; `--path` never names a server file.

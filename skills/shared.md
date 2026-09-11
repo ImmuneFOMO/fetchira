@@ -31,8 +31,9 @@ without the brackets or hint. Do not decode or rewrite it. A session carries pro
 account affinity, and takes precedence over a new provider choice.
 
 Use the returned session for follow-up questions, Gemini research runs, ChatGPT research polling,
-and image edits. If a call is pending, repeat the same capability with that session until it
-returns the result, following any returned retry delay. Keep its provider unchanged.
+and image edits. If a call is pending, continue the same capability with the newest session,
+following any returned retry delay. Stop on a terminal error or cancellation; if repeated polls
+show no progress, report the pending state and retain the token. Keep its provider unchanged.
 
 ## Deep research
 
@@ -57,7 +58,8 @@ deep research ignores `model`, and ChatGPT image generation has no model selecto
 
 File attachments need local mode and provider support; use an absolute readable path. Search
 attachments default to `grok_web` when no provider is forced; research and image calls keep their
-own priority order. Local CLI, local stdio and the local hosted bridge write completed images to
+own priority order. Hosted calls reject laptop attachments through both interfaces. CLI and
+local stdio (including connections to a hosted server) write completed images and PDFs to
 the requested path or Fetchira's image folder. Direct hosted HTTP returns inline artifacts and
 never writes a caller-supplied server path. Pending results return a status and session.
 
@@ -71,7 +73,3 @@ that provider. An empty result or failed `read` is not evidence: cite only URLs 
 successful search/read/browser call, verify a URL with `read` before relying on it, and say when a
 source could not be verified. Do not claim a result for an error or pending operation, and do not
 silently switch away from a session's provider.
-
-An empty search or a fetched error page (such as 404) provides no evidence. Cite actual source
-URLs from results you inspected; if a source could not be verified, say so instead of guessing
-its URL or presenting it as checked.

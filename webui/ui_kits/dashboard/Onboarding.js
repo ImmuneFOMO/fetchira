@@ -460,6 +460,10 @@ function LocalOnboarding({
   onDone
 }) {
   const [modalProv, setModalProv] = React.useState(null);
+  const [connection, setConnection] = React.useState(() => {
+    var _window$FX$setup;
+    return ((_window$FX$setup = window.FX.setup) === null || _window$FX$setup === void 0 ? void 0 : _window$FX$setup.mode) === 'hosted' ? 'hosted' : null;
+  });
   const catalog = obCatalog();
   const accounts = window.FX.accounts || [];
   const connected = accounts.length;
@@ -512,11 +516,29 @@ function LocalOnboarding({
       lineHeight: 1.55,
       maxWidth: 620
     }
-  }, "fetchira gives your AI tools web search, scraping and deep research \u2014 routed across free-tier providers with quota-aware failover. Connect ", /*#__PURE__*/React.createElement("b", {
+  }, "fetchira gives your AI tools web search, scraping and deep research \u2014 routed across providers with quota-aware failover. Use accounts on this computer or connect to an existing server."), /*#__PURE__*/React.createElement(Card, {
+    pad: 16,
     style: {
-      color: 'var(--text-hi)'
+      marginTop: 22
     }
-  }, "one"), " provider to start; everything else can wait."), /*#__PURE__*/React.createElement(SectionLabel, null, "free api keys \u2014 no credit card, ~60 seconds"), /*#__PURE__*/React.createElement("div", {
+  }, connection === null ? /*#__PURE__*/React.createElement(window.ConnectionSetup, {
+    onReady: setConnection
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-hi)',
+      fontSize: 13
+    }
+  }, connection === 'hosted' ? 'Connected to your server' : 'Using accounts on this computer'), /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: () => setConnection(null)
+  }, "Change"))), connection === 'local' && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionLabel, null, "free api keys \u2014 no credit card, ~60 seconds"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
@@ -536,14 +558,14 @@ function LocalOnboarding({
     key: p.id,
     p: p,
     onOpenModal: setModalProv
-  }))), connected > 0 && /*#__PURE__*/React.createElement("div", {
+  })))), (connection === 'hosted' || connection === 'local' && connected > 0) && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 26,
       display: 'flex',
       flexDirection: 'column',
       gap: 14
     }
-  }, /*#__PURE__*/React.createElement(TrySearch, null), /*#__PURE__*/React.createElement(Card, {
+  }, connection === 'local' && /*#__PURE__*/React.createElement(TrySearch, null), /*#__PURE__*/React.createElement(Card, {
     raised: true,
     pad: 16,
     style: {
@@ -573,7 +595,7 @@ function LocalOnboarding({
       fontSize: 12,
       color: 'var(--text-lo)'
     }
-  }, "Register the MCP server so your agents route their web research through the providers you just connected."), /*#__PURE__*/React.createElement(window.InstallTargets, null))), /*#__PURE__*/React.createElement("div", {
+  }, "Choose CLI only, MCP, or MCP with CLI fallback, then select your agents."), /*#__PURE__*/React.createElement(window.InstallTargets, null))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -588,7 +610,7 @@ function LocalOnboarding({
       fontSize: 12,
       color: connected ? 'var(--lime-500)' : 'var(--text-faint)'
     }
-  }, connected ? `${connected} ${connected === 1 ? 'provider' : 'providers'} connected` : 'nothing connected yet'), /*#__PURE__*/React.createElement("div", {
+  }, connection === 'hosted' ? 'hosted connection ready' : connected ? `${connected} ${connected === 1 ? 'provider' : 'providers'} connected` : 'nothing connected yet'), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 8
@@ -599,7 +621,7 @@ function LocalOnboarding({
   }, "Skip for now"), /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: onDone,
-    disabled: !connected
+    disabled: connection !== 'hosted' && !(connection === 'local' && connected)
   }, "Go to dashboard \u2192"))), modalProv && /*#__PURE__*/React.createElement(window.AddAccountModal, {
     initialProvider: modalProv,
     onClose: () => {
@@ -650,7 +672,7 @@ function HostedOnboarding({
     await ((_navigator$clipboard = navigator.clipboard) === null || _navigator$clipboard === void 0 ? void 0 : _navigator$clipboard.writeText(value));
     if (kind === 'setup') setCommandCopied(true);
   };
-  const command = `fetchira remote set ${endpoint} --key '${key || 'your key'}'`;
+  const command = 'fetchira setup';
   const checkCommand = 'fetchira remote check';
   const keyId = key ? key.split('_')[2] : '';
   const refreshConnection = React.useCallback(async () => {
@@ -765,7 +787,7 @@ function HostedOnboarding({
       color: 'var(--text-faint)',
       font: '11px var(--font-mono)'
     }
-  }, key ? 'Paste this into your local terminal first.' : 'Generate an API key below to enable this command.')), commandCopied && /*#__PURE__*/React.createElement("div", {
+  }, key ? 'Choose Connect to a server, then enter the endpoint and API key shown here. Setup verifies access before saving.' : 'Generate an API key below to begin setup.')), commandCopied && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'grid',
       gap: 8,
@@ -794,7 +816,13 @@ function HostedOnboarding({
     size: "sm",
     onClick: checkNow,
     disabled: checkingConnection
-  }, checkingConnection ? 'Checking…' : connectionReady ? 'Connected ✓' : 'Check connection')), !key && /*#__PURE__*/React.createElement(Button, {
+  }, checkingConnection ? 'Checking…' : connectionReady ? 'Connected ✓' : 'Check connection')), key && /*#__PURE__*/React.createElement("div", {
+    className: "secret-row"
+  }, /*#__PURE__*/React.createElement("code", null, key), /*#__PURE__*/React.createElement(Button, {
+    variant: "secondary",
+    size: "sm",
+    onClick: () => copy(key)
+  }, "Copy API key")), !key && /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: createKey,
     disabled: busy

@@ -15,6 +15,11 @@ parser.add_argument("--home", required=True, type=Path)
 parser.add_argument("--search-provider", help="Optional real provider call; consumes quota")
 parser.add_argument("--read-provider", help="Optional real page read; consumes quota")
 parser.add_argument("--check-hosted-file-guard", action="store_true")
+parser.add_argument(
+    "--check-input-validation",
+    action="store_true",
+    help="Require the current server to reject invalid tool parameters",
+)
 args = parser.parse_args()
 if not (args.home / "fetchira.toml").is_file():
     parser.error("--home must contain a configured fetchira.toml (an empty file tests no providers)")
@@ -71,6 +76,19 @@ with tempfile.TemporaryFile() as log:
             tool["name"] for tool in tools["tools"]
         }
         print("PASS initialize + six tools", flush=True)
+        if args.check_input_validation:
+            for tool, arguments, message in [
+                ("search", {"query": "input validation", "topic": "blogs"}, "topic must be"),
+                ("read", {"url": "  "}, "exactly one URL"),
+                ("deep_research", {"query": "input validation", "depth": "shallow"}, "depth must be"),
+            ]:
+                error = request(
+                    "tools/call",
+                    {"name": tool, "arguments": arguments},
+                    expected_error=True,
+                )
+                assert error["code"] == -32602 and message in error["message"], error
+            print("PASS invalid parameters are rejected by tool handlers", flush=True)
         if args.check_hosted_file_guard:
             for tool in ["search", "deep_research", "create_image"]:
                 arguments = {"file": ["/nonexistent/fetchira-mcp-smoke.txt"]}

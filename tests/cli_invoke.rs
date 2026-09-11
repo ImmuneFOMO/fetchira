@@ -147,7 +147,7 @@ fn one_shot_contract_without_live_providers() {
         let out = run(&args);
         assert_eq!(out.status.code(), Some(1));
         assert!(out.stdout.is_empty());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("CLI tools need local accounts"));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("remote API key is not configured"));
         assert!(!home.join("usage.db").exists());
     }
     std::fs::write(home.join("fetchira.toml"), "").unwrap();
