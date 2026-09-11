@@ -112,15 +112,7 @@ pub fn set(home: &Path, endpoint: String, api_key: Option<String>) -> anyhow::Re
     } else {
         Config::default()
     };
-    let endpoint = normalize_endpoint(&endpoint)?;
-    let endpoint_changed = cfg.remote.endpoint.as_deref() != Some(endpoint.as_str());
-    cfg.remote.endpoint = Some(endpoint);
-    if let Some(api_key) = api_key {
-        validate_api_key(&api_key)?;
-        cfg.remote.api_key = Some(api_key);
-    } else if endpoint_changed {
-        cfg.remote.api_key = None;
-    }
+    apply_connection(&mut cfg, &endpoint, api_key)?;
     config::save(&cfg, &path)?;
     println!(
         "saved remote endpoint{}",
@@ -130,6 +122,23 @@ pub fn set(home: &Path, endpoint: String, api_key: Option<String>) -> anyhow::Re
             ""
         }
     );
+    Ok(())
+}
+
+fn apply_connection(
+    cfg: &mut Config,
+    endpoint: &str,
+    api_key: Option<String>,
+) -> anyhow::Result<()> {
+    let endpoint = normalize_endpoint(endpoint)?;
+    let endpoint_changed = cfg.remote.endpoint.as_deref() != Some(endpoint.as_str());
+    cfg.remote.endpoint = Some(endpoint);
+    if let Some(api_key) = api_key {
+        validate_api_key(&api_key)?;
+        cfg.remote.api_key = Some(api_key);
+    } else if endpoint_changed {
+        cfg.remote.api_key = None;
+    }
     Ok(())
 }
 
@@ -651,30 +660,17 @@ mod tests {
 
     #[test]
     fn changing_remote_endpoint_drops_implicit_old_key() {
-        let home = std::env::temp_dir().join(format!(
-            "fetchira-remote-set-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&home).unwrap();
-
-        set(
-            &home,
-            "https://old.example.test/mcp".into(),
+        let mut cfg = Config::default();
+        apply_connection(
+            &mut cfg,
+            "https://old.example.test/mcp",
             Some("fk_live_old".into()),
         )
         .unwrap();
-        set(&home, "https://old.example.test".into(), None).unwrap();
-        let cfg = config::load(home.join("fetchira.toml").to_str().unwrap()).unwrap();
+        apply_connection(&mut cfg, "https://old.example.test", None).unwrap();
         assert_eq!(cfg.remote.api_key.as_deref(), Some("fk_live_old"));
-
-        set(&home, "https://new.example.test".into(), None).unwrap();
-        let cfg = config::load(home.join("fetchira.toml").to_str().unwrap()).unwrap();
+        apply_connection(&mut cfg, "https://new.example.test", None).unwrap();
         assert!(cfg.remote.api_key.is_none());
-        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[derive(Clone)]

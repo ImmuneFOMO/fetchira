@@ -2,7 +2,7 @@
 //! and replaces the running binary in place. Also a passive "new version available" check,
 //! surfaced in the CLI (stderr, TTY only — never in MCP stdio) and in the web dashboard.
 //!
-//! A Homebrew-managed copy is left alone: we detect it and point at `brew upgrade` instead.
+//! Homebrew-managed copies update through Homebrew; standalone copies use release archives.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,116 @@ use semver::Version;
 
 const REPO: &str = "ImmuneFOMO/fetchira";
 const CHECK_INTERVAL: u64 = 24 * 60 * 60; // throttle the passive check to once a day
+
+pub(crate) fn refresh_integrations(
+    agent_home: &Path,
+    home: &Path,
+    bin: &str,
+) -> Vec<crate::cli::IntegrationResult> {
+    let mut results = crate::skills::refresh_existing(agent_home, home, Path::new(bin), true)
+        .into_iter()
+        .map(|result| crate::cli::IntegrationResult {
+            name: result.name.into(),
+            ok: result.ok,
+            msg: result.msg,
+        })
+        .collect::<Vec<_>>();
+    results.extend(crate::cli::repair_mcp_launchers(home, bin));
+    results
+}
+
+pub fn refresh_skills(home: &Path) -> anyhow::Result<()> {
+    let agent_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME is required to refresh agent skills")?;
+    let bin = crate::cli::installation_binary()?;
+    let results = refresh_integrations(&agent_home, home, &bin);
+    if results.is_empty() {
+        println!("Your existing agent integrations are up to date.");
+    }
+    let failed = results.iter().any(|result| !result.ok);
+    for result in results {
+        println!("{}: {}", result.name, result.msg);
+    }
+    if failed {
+        anyhow::bail!("some skills could not be refreshed; existing integrations were preserved where refresh failed");
+    }
+    println!("Restart your agents to load updated skills and launchers. Your integration choices are unchanged.");
+    Ok(())
+}
+
+/// A local, once-per-version notice also reaches users who upgraded through Homebrew.
+pub fn integration_nudge(home: &Path) {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return;
+    }
+    let marker = home.join("agent-upgrade-notice");
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+        return;
+    }
+    let agent_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let Ok(bin) = crate::cli::installation_binary() else {
+        return;
+    };
+    let skills = crate::skills::refresh_existing(&agent_home, home, Path::new(&bin), false);
+    let targets: Vec<_> = crate::cli::mcp_target_list()
+        .into_iter()
+        .filter(|target| target.installed)
+        .map(|target| target.name)
+        .collect();
+    if skills.is_empty() && targets.is_empty() {
+        return;
+    }
+    if let Err(error) = finish_upgrade(home) {
+        eprintln!("Agent upgrade: {error}");
+    }
+}
+
+/// Executed by the newly installed binary, so embedded skills come from the new release.
+pub fn finish_upgrade(home: &Path) -> anyhow::Result<()> {
+    refresh_skills(home)?;
+    let targets: Vec<_> = crate::cli::mcp_target_list()
+        .into_iter()
+        .filter(|target| target.installed)
+        .map(|target| target.name)
+        .collect();
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !targets.is_empty() {
+        println!(
+            "Fetchira MCP is installed in {}. CLI-only provides the same operations.",
+            targets.join(", ")
+        );
+        if inquire::Confirm::new("Review agent setup or switch to CLI-only now?")
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false)
+        {
+            crate::cli::install_tools(home)?;
+        }
+    }
+    crate::config::write_atomic(
+        &home.join("agent-upgrade-notice"),
+        env!("CARGO_PKG_VERSION"),
+        false,
+    )?;
+    Ok(())
+}
+
+async fn finish_in_new_binary(home: &Path, binary: &str) -> anyhow::Result<()> {
+    let status = tokio::process::Command::new(binary)
+        .arg("--finish-upgrade")
+        .env("FETCHIRA_HOME", crate::cli::absolute_path(home))
+        .status()
+        .await
+        .context("updated binary could not finish agent setup")?;
+    anyhow::ensure!(
+        status.success(),
+        "binary updated, but agent setup did not finish"
+    );
+    Ok(())
+}
 
 fn current() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0))
@@ -51,11 +161,62 @@ fn is_brew_managed() -> bool {
 }
 
 fn update_cmd() -> &'static str {
-    if is_brew_managed() {
-        "brew upgrade fetchira"
+    "fetchira update"
+}
+
+async fn upgrade_with_brew() -> anyhow::Result<Outcome> {
+    let binary = crate::cli::installation_binary()?;
+    let sibling = Path::new(&binary)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("brew");
+    let brew = if sibling.is_file() {
+        sibling.as_path()
     } else {
-        "fetchira update"
+        Path::new("brew")
+    };
+    run_brew_upgrade(brew, Path::new(&binary)).await
+}
+
+async fn run_brew_upgrade(brew: &Path, binary: &Path) -> anyhow::Result<Outcome> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(600),
+        tokio::process::Command::new(brew)
+            .args(["upgrade", "ImmuneFOMO/tap/fetchira"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("Homebrew update timed out after 10 minutes")?
+    .context("could not start Homebrew to update Fetchira")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Homebrew update failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let checked = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(binary)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("updated Homebrew binary did not respond")??;
+    anyhow::ensure!(
+        checked.status.success(),
+        "Homebrew binary failed its version check"
+    );
+    let version = String::from_utf8_lossy(&checked.stdout);
+    let version = version
+        .split_whitespace()
+        .last()
+        .context("Homebrew binary returned no version")?;
+    let version = Version::parse(version).context("Homebrew binary returned an invalid version")?;
+    if version <= current() {
+        anyhow::bail!("Homebrew has not installed a newer Fetchira yet. Your current version is intact; retry Update when the tap has the release.");
     }
+    Ok(Outcome::Updated(version.to_string()))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -167,7 +328,6 @@ pub async fn refresh(home: &Path) {
 }
 
 pub enum Outcome {
-    Brew,
     UpToDate,
     Updated(String),
     /// The release changes the DB schema and old-version fetchira processes are still
@@ -193,9 +353,6 @@ async fn fetch_schema(client: &reqwest::Client, tag: &str) -> Option<i64> {
 /// Shared by `fetchira update`, the dashboard's Update button, and the idle waiter
 /// (`force` skips the schema gate — the waiter only runs once every process has exited).
 pub async fn perform(home: &Path, force: bool) -> anyhow::Result<Outcome> {
-    if is_brew_managed() {
-        return Ok(Outcome::Brew);
-    }
     let client = client(Duration::from_secs(60)).context("could not build http client")?;
     let (tag, latest) = fetch_latest(&client)
         .await
@@ -216,6 +373,9 @@ pub async fn perform(home: &Path, force: bool) -> anyhow::Result<Outcome> {
                 }
             }
         }
+    }
+    if is_brew_managed() {
+        return upgrade_with_brew().await;
     }
     let triple = target_triple().context(
         "no prebuilt binary for this platform — reinstall via install.sh or `cargo install`",
@@ -271,6 +431,7 @@ pub fn pending(home: &Path) -> Option<serde_json::Value> {
 /// `fetchira update --when-idle`: wait until every other fetchira process has exited, then
 /// update. Spawned detached by the dashboard; runs in the foreground from a terminal.
 pub async fn wait_idle(home: &Path) -> anyhow::Result<()> {
+    let binary = crate::cli::installation_binary()?;
     if pending(home).is_some() {
         println!("an idle update is already pending");
         return Ok(());
@@ -303,7 +464,10 @@ pub async fn wait_idle(home: &Path) -> anyhow::Result<()> {
     };
     let _ = std::fs::remove_file(marker_path(home));
     match res? {
-        Outcome::Updated(v) => println!("updated fetchira to {v}"),
+        Outcome::Updated(v) => {
+            println!("updated fetchira to {v}");
+            finish_in_new_binary(home, &binary).await?;
+        }
         Outcome::UpToDate => println!("already up to date"),
         _ => {}
     }
@@ -312,33 +476,61 @@ pub async fn wait_idle(home: &Path) -> anyhow::Result<()> {
 
 /// `fetchira update [--when-idle]` — the CLI face of `perform`.
 pub async fn run(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
-    if args.next().as_deref() == Some("--when-idle") {
+    let when_idle = match args.next().as_deref() {
+        None => false,
+        Some("--when-idle") => true,
+        Some(_) => anyhow::bail!("usage: fetchira update [--when-idle]"),
+    };
+    anyhow::ensure!(
+        args.next().is_none(),
+        "usage: fetchira update [--when-idle]"
+    );
+    if when_idle {
         return wait_idle(home).await;
     }
+    let binary = crate::cli::installation_binary()?;
     println!("fetchira {}", current());
-    match perform(home, false).await? {
-        Outcome::Brew => println!("installed via Homebrew — run `brew upgrade fetchira`"),
-        Outcome::UpToDate => println!("already up to date"),
-        Outcome::Updated(v) => println!("updated fetchira to {v} — restart any running instances"),
-        Outcome::Blocked { latest, instances } => {
-            println!(
+    loop {
+        match perform(home, false).await? {
+            Outcome::UpToDate => {
+                println!("already up to date");
+                finish_upgrade(home)?;
+            }
+            Outcome::Updated(v) => {
+                println!("updated fetchira to {v}");
+                finish_in_new_binary(home, &binary).await?;
+            }
+            Outcome::Blocked { latest, instances } => {
+                println!(
                 "fetchira {latest} changes the database format; {} fetchira process(es) are still running:",
                 instances.len()
             );
-            for i in &instances {
-                println!(
-                    "  {:>7}  {:<4} {:<9} {}",
-                    i.pid,
-                    i.mode,
-                    i.version.as_deref().unwrap_or("?"),
-                    i.hint
-                        .as_deref()
-                        .unwrap_or("restart the tool — MCP servers respawn on launch"),
-                );
+                for i in &instances {
+                    println!(
+                        "  {:>7}  {:<4} {:<9} {}",
+                        i.pid,
+                        i.mode,
+                        i.version.as_deref().unwrap_or("?"),
+                        i.hint
+                            .as_deref()
+                            .unwrap_or("restart the tool — MCP servers respawn on launch"),
+                    );
+                }
+                if std::io::stdin().is_terminal()
+                    && std::io::stdout().is_terminal()
+                    && inquire::Confirm::new(
+                        "Close or restart the listed processes, then retry the update here?",
+                    )
+                    .with_default(true)
+                    .prompt()
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                println!("Update paused; existing data and integrations are unchanged.");
             }
-            println!("restart them and re-run `fetchira update`,");
-            println!("or run `fetchira update --when-idle` to update once they all exit.");
         }
+        break;
     }
     Ok(())
 }
@@ -501,6 +693,48 @@ fn finalize(bin: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn brew_upgrade_checks_formula_result_and_new_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = create_update_dir().unwrap();
+        let brew = root.join("brew");
+        let binary = root.join("fetchira");
+        let script = |path: &Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        script(
+            &brew,
+            "#!/bin/sh\n[ \"$1\" = upgrade ] && [ \"$2\" = ImmuneFOMO/tap/fetchira ]\n",
+        );
+        script(
+            &binary,
+            "#!/bin/sh\n[ \"$1\" = --version ] || exit 1\nprintf 'fetchira 99.0.0\\n'\n",
+        );
+        assert!(
+            matches!(run_brew_upgrade(&brew, &binary).await.unwrap(), Outcome::Updated(version) if version == "99.0.0")
+        );
+        script(&binary, "#!/bin/sh\nprintf 'fetchira 0.0.1\\n'\n");
+        assert!(run_brew_upgrade(&brew, &binary)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("not installed a newer"));
+        script(
+            &brew,
+            "#!/bin/sh\necho 'fixture brew failure' >&2\nexit 1\n",
+        );
+        assert!(run_brew_upgrade(&brew, &binary)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("fixture brew failure"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

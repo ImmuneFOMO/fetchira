@@ -61,7 +61,9 @@ function ConnectionSetup({
       }, mode === 'hosted' ? {
         endpoint: endpoint.trim(),
         api_key: apiKey
-      } : {}));
+      } : {
+        clear_remote: clearConfirmed
+      }));
       setApiKey('');
       onReady(result.setup.mode);
     } catch (e) {
@@ -236,8 +238,11 @@ function InstallTargets({
   const [picked, setPicked] = React.useState({});
   const [skill, setSkill] = React.useState('both');
   const [installedSkill, setInstalledSkill] = React.useState(null);
+  const [removeMcp, setRemoveMcp] = React.useState(false);
+  const [outdatedSkills, setOutdatedSkills] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
   const [results, setResults] = React.useState(null);
+  const [lastAction, setLastAction] = React.useState('install');
   const [failed, setFailed] = React.useState(false);
   const loadTargets = () => {
     setFailed(false);
@@ -248,12 +253,17 @@ function InstallTargets({
       }
       const ts = d.agents || [];
       setTargets(ts);
+      setOutdatedSkills(d.outdatedSkills || []);
       const installed = Array.isArray(d.skills) ? d.skills : [d.skill];
       const current = ['both', 'mcp', 'cli', 'skip'].find(value => installed.includes(value));
-      if (current) setInstalledSkill(current);
+      if (current) {
+        setInstalledSkill(current);
+        if (new Set(installed.filter(value => ['both', 'mcp', 'cli'].includes(value))).size === 1) setSkill(current);
+      }
       const pre = {};
+      const hasInstalled = ts.some(t => t.installed);
       ts.forEach(t => {
-        if (t.present) pre[t.name] = true;
+        if (hasInstalled ? t.installed : t.present) pre[t.name] = true;
       });
       setPicked(pre);
     });
@@ -264,10 +274,12 @@ function InstallTargets({
     if (busy || skill !== 'skip' && !names.length) return;
     setBusy(true);
     setResults(null);
+    setLastAction('install');
     try {
       const data = await window.apiPost('/api/install', {
         targets: names,
-        skill
+        skill,
+        remove_mcp: skill === 'cli' && removeMcp
       });
       setResults(data.results || []);
       if (onDone && (data.results || []).every(r => r.ok)) onDone();
@@ -281,8 +293,28 @@ function InstallTargets({
       setBusy(false);
     }
   };
+  const refresh = async () => {
+    if (busy) return;
+    setBusy(true);
+    setLastAction('refresh');
+    try {
+      const data = await window.apiPost('/api/install/refresh', {});
+      setResults(data.results || []);
+    } catch (e) {
+      setResults([{
+        name: 'error',
+        ok: false,
+        msg: String(e.message || e)
+      }]);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const existingMcp = (targets || []).filter(t => picked[t.name] && t.skillSupported && t.mcpInstalled);
   const retry = () => {
-    if (!busy) install();
+    if (!busy) {
+      if (lastAction === 'refresh') refresh();else install();
+    }
   };
   const failedResult = results && results.some(r => !r.ok);
   return /*#__PURE__*/React.createElement("div", {
@@ -354,7 +386,21 @@ function InstallTargets({
       fontSize: 12,
       color: 'var(--text-lo)'
     }
-  }, skill === 'skip' ? 'Your integration settings are unchanged.' : 'Restart the agent to load the selected integrations.')) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("fieldset", {
+  }, lastAction === 'refresh' ? 'Skills and launchers refreshed; your integration choices are unchanged. Restart your agents.' : skill === 'skip' ? 'Your integration settings are unchanged.' : 'Restart the agent to load the selected integrations.')) : /*#__PURE__*/React.createElement(React.Fragment, null, outdatedSkills.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gap: 8,
+      color: 'var(--text-mid)',
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Updated skills are available for ", outdatedSkills.map(item => item.name).join(', '), ". Keep your current integration and back up previous files."), /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: refresh,
+    disabled: busy,
+    style: {
+      justifySelf: 'start'
+    }
+  }, "Refresh existing skills")), /*#__PURE__*/React.createElement("fieldset", {
     disabled: busy,
     style: {
       border: 0,
@@ -387,7 +433,10 @@ function InstallTargets({
     name: "fetchira-skill",
     value: variant.value,
     checked: skill === variant.value,
-    onChange: () => setSkill(variant.value)
+    onChange: () => {
+      setSkill(variant.value);
+      setRemoveMcp(false);
+    }
   }), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'block'
@@ -427,10 +476,16 @@ function InstallTargets({
   }, /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
     checked: !!picked[t.name],
-    onChange: e => setPicked(p => _objectSpread(_objectSpread({}, p), {}, {
-      [t.name]: e.target.checked
-    }))
-  }), t.name, t.present ? /*#__PURE__*/React.createElement(Badge, {
+    onChange: e => {
+      setPicked(p => _objectSpread(_objectSpread({}, p), {}, {
+        [t.name]: e.target.checked
+      }));
+      setRemoveMcp(false);
+    }
+  }), t.name, t.mcpInstalled ? /*#__PURE__*/React.createElement(Badge, {
+    tone: "accent",
+    variant: "outline"
+  }, "MCP installed") : null, t.present ? /*#__PURE__*/React.createElement(Badge, {
     tone: "accent",
     variant: "outline"
   }, "detected") : null, skill !== 'cli' && !t.skillSupported && /*#__PURE__*/React.createElement("span", {
@@ -443,7 +498,21 @@ function InstallTargets({
       color: 'var(--text-mid)',
       fontSize: 12
     }
-  }, "Codex and Gemini may share a skill directory. Cursor also reads other agents\u2019 skill folders, so a skill can be available to several agents.")), /*#__PURE__*/React.createElement(Button, {
+  }, "Codex and Gemini may share a skill directory. Cursor also reads other agents\u2019 skill folders, so a skill can be available to several agents.")), skill === 'cli' && existingMcp.length > 0 && /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 8,
+      color: 'var(--text-mid)',
+      fontSize: 12,
+      lineHeight: 1.5
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: removeMcp,
+    disabled: busy,
+    onChange: event => setRemoveMcp(event.target.checked)
+  }), /*#__PURE__*/React.createElement("span", null, "Remove Fetchira MCP from ", existingMcp.map(target => target.name).join(', '), " after the CLI skill installs. Back up the configs and keep other tools. If unchecked, existing MCP tools remain available.")), /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: install,
     disabled: busy || skill !== 'skip' && !targets.some(t => picked[t.name] && (skill !== 'cli' || t.skillSupported)),
@@ -540,7 +609,79 @@ function InstallPanel({
 }
 window.InstallPanel = InstallPanel;
 function GettingStarted() {
-  return window.fxHosted ? /*#__PURE__*/React.createElement(HostedGettingStarted, null) : /*#__PURE__*/React.createElement(LocalGettingStarted, null);
+  return window.fxHosted ? /*#__PURE__*/React.createElement(HostedGettingStarted, null) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(UpgradeNotice, null), /*#__PURE__*/React.createElement(LocalGettingStarted, null));
+}
+
+// Upgrade guidance remains visible even when the old getting-started checklist was dismissed.
+function UpgradeNotice() {
+  const [data, setData] = React.useState(null);
+  const [open, setOpen] = React.useState(false);
+  const [dismissed, setDismissed] = React.useState(false);
+  const [refreshResults, setRefreshResults] = React.useState(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    apiGet('/api/install/targets').then(result => {
+      if (!cancelled && result) {
+        setData(result);
+        setDismissed(localStorage.getItem('fx-agent-upgrade-' + result.version) === 'dismissed');
+        if (((result.outdatedSkills || []).length || result.upgradePending) && !refreshResults) {
+          window.apiPost('/api/install/refresh', {}).then(updated => {
+            if (!cancelled) setRefreshResults(updated.results || []);
+          }).catch(error => {
+            if (!cancelled) setRefreshResults([{
+              name: 'Skills',
+              ok: false,
+              msg: String(error.message || error)
+            }]);
+          });
+        }
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+  const stale = ((data === null || data === void 0 ? void 0 : data.outdatedSkills) || []).length > 0;
+  const legacyMcp = ((data === null || data === void 0 ? void 0 : data.agents) || []).filter(target => target.mcpInstalled && target.skillSupported && !target.skillInstalled);
+  if (!data || dismissed || !stale && !legacyMcp.length && !refreshResults && !data.upgradePending) return null;
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Card, {
+    pad: 16,
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-hi)',
+      fontWeight: 600
+    }
+  }, "Finish your Fetchira update"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-mid)',
+      fontSize: 13,
+      lineHeight: 1.5
+    }
+  }, refreshResults ? refreshResults.every(item => item.ok) ? 'Your existing skills and launchers are up to date. Changed files were backed up; your integration choices are unchanged.' : 'Some skills need attention. Review the results in agent setup; your existing files are preserved.' : stale ? 'Refreshing your existing agent skills and backing up previous files…' : `Fetchira MCP is installed in ${legacyMcp.map(target => target.name).join(', ')}. Add the current skill or switch to CLI-only.`, " Switching to CLI-only is optional; MCP is removed only with your confirmation."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Button, {
+    variant: "primary",
+    onClick: () => setOpen(true)
+  }, "Review agent setup"), /*#__PURE__*/React.createElement(Button, {
+    variant: "ghost",
+    onClick: () => {
+      localStorage.setItem('fx-agent-upgrade-' + data.version, 'dismissed');
+      setDismissed(true);
+    }
+  }, "Later")))), open && /*#__PURE__*/React.createElement(InstallPanel, {
+    onClose: () => setOpen(false)
+  }));
 }
 function LocalGettingStarted() {
   const [hidden, setHidden] = React.useState(() => localStorage.getItem('fx-gs-dismissed') === '1');

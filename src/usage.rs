@@ -136,6 +136,25 @@ async fn usage_has_exhausted_kind(pool: &SqlitePool) -> Result<bool> {
 
 impl Store {
     pub async fn open(path: &str) -> Result<Self> {
+        // Changing journal mode or upgrading a legacy schema can return SQLITE_BUSY immediately
+        // despite busy_timeout. Another CLI/MCP process may be opening the same database.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match Self::open_once(path).await {
+                Err(Error::Db(sqlx::Error::Database(error)))
+                    if error.code().is_some_and(|code| {
+                        code.parse::<i32>()
+                            .is_ok_and(|code| matches!(code & 0xff, 5 | 6))
+                    }) && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn open_once(path: &str) -> Result<Self> {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -154,7 +173,7 @@ impl Store {
             )));
         }
         let peers = if v < SCHEMA && v > 0 {
-            crate::instances::running(&crate::cli::home(), &[std::process::id()]).len()
+            crate::instances::running_in_home(&crate::cli::home(), &[std::process::id()]).len()
         } else {
             0
         };

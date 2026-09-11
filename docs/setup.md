@@ -91,6 +91,10 @@ You can also paste the snippet for your client. Use the absolute path from `comm
 
 `fetchira install` offers three variants:
 
+Already installed? `fetchira install --refresh` updates existing skills without changing their
+variant; it also repairs outdated Homebrew MCP launchers. See [upgrading from 0.1.13](configuration.md#upgrading-from-0113-to-0114)
+for migration and optional MCP-to-CLI conversion.
+
 - `fetchira` — MCP first, CLI fallback (the default)
 - `fetchira-mcp` — MCP tools only
 - `fetchira-cli` — CLI only, using local accounts or a hosted server

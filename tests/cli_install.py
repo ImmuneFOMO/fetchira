@@ -106,7 +106,37 @@ def main():
                 assert request('/api/install', {'targets': chosen, 'skill': 'skip'})[0] == 200
                 assert (home / '.codex/config.toml').read_bytes() == config_before
                 assert request('/api/install/targets')[1]['skills'] == ['both']
-                print('install API passed: auth, validation, compatibility, CLI-only, switch, skip, detection')
+                # Explicit refresh keeps MCP byte-for-byte and preserves customized instructions.
+                old_skill = home / '.agents/skills/fetchira'
+                (old_skill / 'SKILL.md').write_text('old single-file Fetchira skill')
+                (old_skill / 'references.md').unlink()
+                status, detection = request('/api/install/targets')
+                assert status == 200 and detection['outdatedSkills']
+                assert request('/api/install/refresh', {}, token='wrong')[0] == 401
+                status, result = request('/api/install/refresh', {})
+                assert status == 200 and all(r['ok'] for r in result['results']), result
+                assert (home / '.codex/config.toml').read_bytes() == config_before
+                assert (old_skill / 'references.md').exists()
+                assert request('/api/install/targets')[1]['outdatedSkills'] == []
+                # CLI-only without opt-in must leave an existing registration untouched.
+                status, result = request('/api/install', {'targets': chosen, 'skill': 'cli'})
+                assert status == 200 and all(r['ok'] for r in result['results']), result
+                assert (home / '.codex/config.toml').read_bytes() == config_before
+                assert request('/api/install', {'targets': chosen, 'skill': 'mcp', 'remove_mcp': True})[0] == 400
+                # Only Fetchira is removed; unrelated TOML data and the original backup survive.
+                config_file = home / '.codex/config.toml'
+                config_file.write_text(config_file.read_text() + '\n[mcp_servers.other]\ncommand = "keep-me"\n')
+                before_conversion = config_file.read_bytes()
+                status, result = request('/api/install', {'targets': chosen, 'skill': 'cli', 'remove_mcp': True})
+                assert status == 200 and all(r['ok'] for r in result['results']), result
+                import tomllib
+                converted = tomllib.loads(config_file.read_text())
+                assert 'fetchira' not in converted['mcp_servers']
+                assert converted['mcp_servers']['other']['command'] == 'keep-me'
+                assert (home / '.agents/skills/fetchira-cli/SKILL.md').exists()
+                assert any(p.read_bytes() == before_conversion for p in home.rglob('*.bak'))
+                assert not next(t for t in request('/api/install/targets')[1]['agents'] if t['name'] == 'Codex CLI')['mcpInstalled']
+                print('install API passed: auth, validation, compatibility, refresh, opt-in conversion, preservation, detection')
             finally:
                 process.terminate()
                 try:

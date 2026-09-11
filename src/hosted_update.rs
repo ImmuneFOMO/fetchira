@@ -73,6 +73,7 @@ pub async fn perform(
         .map_err(|_| anyhow::anyhow!("timed out draining active requests"))?
         .map_err(|_| anyhow::anyhow!("server is shutting down"))?
     };
+    let binary = crate::cli::installation_binary()?;
     let backup = backup_db(home, db_path).await?;
     match crate::update::perform(home, true).await? {
         crate::update::Outcome::Updated(version) => {
@@ -82,7 +83,7 @@ pub async fn perform(
             );
             #[cfg(unix)]
             {
-                restart_self(&message);
+                restart_self(&binary, &message);
             }
             #[cfg(not(unix))]
             {
@@ -92,7 +93,6 @@ pub async fn perform(
         crate::update::Outcome::UpToDate => {
             Ok(format!("already up to date; backup {}", backup.display()))
         }
-        crate::update::Outcome::Brew => anyhow::bail!("Homebrew-managed server: use brew upgrade"),
         crate::update::Outcome::Blocked { latest, .. } => {
             anyhow::bail!("update to {latest} is blocked by running instances")
         }
@@ -100,12 +100,8 @@ pub async fn perform(
 }
 
 #[cfg(unix)]
-fn restart_self(message: &str) -> ! {
+fn restart_self(exe: &str, message: &str) -> ! {
     use std::os::unix::process::CommandExt;
-    let Ok(exe) = std::env::current_exe() else {
-        eprintln!("{message}");
-        std::process::exit(1);
-    };
     eprintln!("{message}");
     let err = std::process::Command::new(exe)
         .args(std::env::args_os().skip(1))

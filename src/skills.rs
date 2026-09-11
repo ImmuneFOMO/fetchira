@@ -262,6 +262,59 @@ pub(crate) fn install_skills_for_agents(
     )
 }
 
+/// Refresh only existing skills, preserving their transport choice and archiving custom files.
+pub(crate) fn refresh_existing(
+    home: &Path,
+    config_home: &Path,
+    bin: &Path,
+    apply: bool,
+) -> Vec<SkillInstallResult> {
+    refresh_destinations(skill_destinations(home), config_home, bin, apply)
+}
+
+fn refresh_destinations(
+    destinations: Vec<SkillDestination>,
+    config_home: &Path,
+    bin: &Path,
+    apply: bool,
+) -> Vec<SkillInstallResult> {
+    destinations.into_iter().filter_map(|dest| {
+        let inspect = || -> anyhow::Result<Option<(SkillVariant, String)>> {
+            if let Some(error) = &dest.error { bail!("{error}"); }
+            let mut old = fetchira_variants(&dest.parent)?;
+            for alias in &dest.cleanup { old.extend(fetchira_variants(alias)?); }
+            if old.is_empty() { return Ok(None); }
+            let variants: Vec<_> = VARIANTS.into_iter().filter(|variant| {
+                old.iter().any(|path| path.file_name().and_then(|name| name.to_str()) == Some(variant.folder()))
+            }).collect();
+            if variants.len() != 1 {
+                bail!("conflicting Fetchira skills at {}; run `fetchira install` to choose one integration", dest.parent.display());
+            }
+            let variant = variants[0];
+            let text = skill_text_for(variant, &crate::cli::absolute_path(config_home), bin);
+            let selected = dest.parent.join("skills").join(variant.folder());
+            if old.len() == 1 && old[0] == selected
+                && regular_file(&selected.join("SKILL.md"))?
+                && regular_file(&selected.join("references.md"))?
+                && fs::read_to_string(selected.join("SKILL.md"))? == text
+                && fs::read_to_string(selected.join("references.md"))? == SHARED {
+                return Ok(None);
+            }
+            Ok(Some((variant, text)))
+        };
+        let result = match inspect() {
+            Ok(None) => return None,
+            Ok(Some((variant, text))) if apply => install_destination(&dest.parent, variant, &dest.cleanup, &text),
+            Ok(Some(_)) => Ok(format!("update available at {}", dest.parent.display())),
+            Err(error) => Err(error),
+        };
+        Some(SkillInstallResult { name: dest.name, ok: result.is_ok(), msg: match result {
+            Ok(message) => message,
+            Err(error) => format!("{error:#}"),
+        }})
+    }).collect()
+}
+
 /// Check skill roots before the caller changes any MCP configuration. Cursor can discover the
 /// common agent roots, so a different Fetchira variant outside the selected roots would make the
 /// resulting installation ambiguous. Selected roots are managed by `install_destination`, which
@@ -570,6 +623,61 @@ fn install_destination(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refresh_preserves_transport_migrates_old_skill_and_does_not_install_new_agents() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-refresh-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let legacy = home.join(".codex/skills/fetchira-cli");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(home.join(".cursor")).unwrap();
+        fs::write(legacy.join("SKILL.md"), "old single-file skill").unwrap();
+        fs::write(legacy.join("custom.md"), "user notes").unwrap();
+        let run = |apply| {
+            refresh_destinations(
+                skill_destinations_with(&home, None),
+                &home.join("config"),
+                Path::new("/usr/local/bin/fetchira"),
+                apply,
+            )
+        };
+        assert_eq!(run(false).len(), 1);
+        assert!(legacy.exists());
+        let refreshed = run(true);
+        assert_eq!(refreshed.len(), 1);
+        assert!(refreshed[0].ok, "{}", refreshed[0].msg);
+        assert!(!legacy.exists());
+        assert!(!home.join(".cursor/skills").exists());
+        let current = home.join(".agents/skills/fetchira-cli");
+        assert_eq!(
+            fs::read_to_string(current.join("references.md")).unwrap(),
+            SHARED
+        );
+        assert!(fs::read_to_string(current.join("SKILL.md"))
+            .unwrap()
+            .contains("/usr/local/bin/fetchira"));
+        assert!(run(true).is_empty());
+        let archive = fs::read_dir(home.join(".agents/fetchira-skill-backups"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let saved = archive.join("aliases/0/fetchira-cli");
+        assert_eq!(
+            fs::read_to_string(saved.join("custom.md")).unwrap(),
+            "user notes"
+        );
+        fs::create_dir_all(home.join(".codex/skills/fetchira-mcp")).unwrap();
+        let conflicted = run(true);
+        assert!(!conflicted[0].ok);
+        assert!(conflicted[0].msg.contains("conflicting"));
+        assert!(current.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn install_switch_skip_and_conflict_preserve_files() {
         let home = std::env::temp_dir().join(format!(

@@ -219,6 +219,9 @@ pub fn load(path: &str) -> Result<Config> {
 
 /// Replace the config atomically; a failed write must preserve the previous credentials.
 pub fn save(cfg: &Config, path: &Path) -> Result<()> {
+    if !cfg.remote.is_empty() {
+        crate::instances::ensure_remote_config_compatible(path.parent().unwrap_or(Path::new(".")))?;
+    }
     let txt = toml::to_string_pretty(cfg).map_err(|e| Error::Config(format!("serialize: {e}")))?;
     write_atomic(path, &txt, true)
 }

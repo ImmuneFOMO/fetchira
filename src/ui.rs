@@ -139,6 +139,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/try", post(api_try))
         .route("/api/setup", get(api_setup).post(api_setup_save))
         .route("/api/install/targets", get(api_install_targets))
+        .route("/api/install/refresh", post(api_refresh_skills))
         .route("/api/install", post(api_install))
         .route("/api/update", post(api_update))
         .route("/api/update/idle", post(api_update_idle))
@@ -857,6 +858,7 @@ async fn api_install_targets(State(st): State<Arc<AppState>>, headers: HeaderMap
                 "skill": skill_supported,
                 "skillSupported": skill_supported,
                 "skillInstalled": skill_installed,
+                "mcpInstalled": target.installed,
                 "installed": target.installed || skill_installed,
             })
         })
@@ -866,25 +868,63 @@ async fn api_install_targets(State(st): State<Arc<AppState>>, headers: HeaderMap
         .map(|t| json!({ "name": t.name, "present": t.present, "installed": t.installed }))
         .collect();
     let (skill, installed_skills) = installed_skill_status(&user_home());
+    let outdated = cli::installation_binary()
+        .map(|bin| crate::skills::refresh_existing(&user_home(), &st.home, Path::new(&bin), false))
+        .unwrap_or_default();
+    let upgrade_pending = std::fs::read_to_string(st.home.join("agent-upgrade-notice"))
+        .ok()
+        .as_deref()
+        != Some(env!("CARGO_PKG_VERSION"))
+        && (!outdated.is_empty() || targets.iter().any(|target| target["installed"] == true));
     Json(json!({
         "targets": targets,
         "agents": agents,
         "skill": skill,
         "skills": installed_skills,
+        "upgradePending": upgrade_pending,
+        "outdatedSkills": outdated.iter().map(|result| json!({"name": result.name, "ok": result.ok, "msg": result.msg})).collect::<Vec<_>>(),
+        "version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
 }
 
-fn agent_skill_installed(name: &str, destinations: &[crate::skills::SkillDestination]) -> bool {
-    let names: &[&str] = match name {
-        "Claude Code" | "Claude Desktop" => &["Claude"],
-        "Codex CLI" | "Gemini CLI" => &["Codex", "Gemini"],
-        "Cursor" => &["Cursor"],
-        _ => &[],
+async fn api_refresh_skills(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(response) = guard_mut(&st, &headers) {
+        return response;
+    }
+    let bin = match cli::installation_binary() {
+        Ok(bin) => bin,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
     };
-    destinations
-        .iter()
-        .any(|destination| names.contains(&destination.name) && !destination.variants.is_empty())
+    let results = crate::update::refresh_integrations(&user_home(), &st.home, &bin);
+    if results.iter().all(|result| result.ok) {
+        let _ = config::write_atomic(
+            &st.home.join("agent-upgrade-notice"),
+            env!("CARGO_PKG_VERSION"),
+            false,
+        );
+    }
+    Json(json!({"results": results.into_iter().map(|result| json!({"name": result.name, "ok": result.ok, "msg": result.msg})).collect::<Vec<_>>()})).into_response()
+}
+
+fn agent_skill_installed(name: &str, destinations: &[crate::skills::SkillDestination]) -> bool {
+    let home = user_home();
+    let shared = home.canonicalize().unwrap_or(home).join(".agents");
+    destinations.iter().any(|destination| {
+        !destination.variants.is_empty()
+            && match name {
+                "Claude Code" => destination.name == "Claude",
+                "Codex CLI" => destination.name == "Codex",
+                "Gemini CLI" => {
+                    destination.name == "Gemini"
+                        || (destination.name == "Codex" && destination.parent == shared)
+                }
+                "Cursor" => destination.name == "Cursor",
+                _ => false,
+            }
+    })
 }
 
 fn agent_skill_supported(name: &str) -> bool {
@@ -896,6 +936,8 @@ struct InstallReq {
     targets: Vec<String>,
     /// Omitted keeps the old API behavior: register MCP targets only.
     skill: Option<String>,
+    #[serde(default)]
+    remove_mcp: bool,
 }
 
 async fn api_install(
@@ -917,14 +959,20 @@ async fn api_install(
         Ok(path) => path,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let results =
-        match cli::install_integrations(&user_home(), &st.home, &bin, &req.targets, variant) {
-            Ok(results) => results
-                .into_iter()
-                .map(|result| json!({ "name": result.name, "ok": result.ok, "msg": result.msg }))
-                .collect::<Vec<_>>(),
-            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        };
+    let results = match cli::install_integrations_with_options(
+        &user_home(),
+        &st.home,
+        &bin,
+        &req.targets,
+        variant,
+        req.remove_mcp,
+    ) {
+        Ok(results) => results
+            .into_iter()
+            .map(|result| json!({ "name": result.name, "ok": result.ok, "msg": result.msg }))
+            .collect::<Vec<_>>(),
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     Json(json!({ "results": results, "skill": req.skill })).into_response()
 }
 
@@ -995,11 +1043,8 @@ async fn api_update_idle(State(st): State<Arc<AppState>>, headers: HeaderMap) ->
 }
 
 #[cfg(unix)]
-fn restart_self(token: &str, port: u16) {
+fn restart_self(exe: &str, token: &str, port: u16) {
     use std::os::unix::process::CommandExt;
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
     let err = std::process::Command::new(exe)
         .args(std::env::args_os().skip(1))
         .env("FETCHIRA_UI_TOKEN", token)
@@ -1010,18 +1055,17 @@ fn restart_self(token: &str, port: u16) {
 }
 
 #[cfg(not(unix))]
-fn restart_self(_token: &str, _port: u16) {}
+fn restart_self(_exe: &str, _token: &str, _port: u16) {}
 
 async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
     }
+    let binary = match cli::installation_binary() {
+        Ok(binary) => binary,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
     match crate::update::perform(&st.home, false).await {
-        Ok(crate::update::Outcome::Brew) => Json(json!({
-            "ok": false,
-            "msg": "installed via Homebrew — run `brew upgrade fetchira` in a terminal",
-        }))
-        .into_response(),
         Ok(crate::update::Outcome::UpToDate) => {
             Json(json!({ "ok": true, "msg": "already up to date" })).into_response()
         }
@@ -1038,7 +1082,7 @@ async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
             let (token, port) = (st.token.clone(), st.port);
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                restart_self(&token, port);
+                restart_self(&binary, &token, port);
             });
             Json(json!({
                 "ok": true,

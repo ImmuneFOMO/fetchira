@@ -64,7 +64,7 @@ label = "grok-1"
 provider = "chatgpt_web"
 label = "chatgpt-1"
 
-# Optional: proxy MCP to your private hosted server. One-shot CLI commands require local mode.
+# Optional: route MCP and one-shot CLI commands through your private hosted server.
 # [remote]
 # endpoint = "https://fetchira.example.com/mcp"
 # api_key = "env:FETCHIRA_API_KEY"

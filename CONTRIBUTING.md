@@ -13,6 +13,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all
 sh tests/install-installer.sh
 python3 tests/cli_install.py
+python3 tests/upgrade_013.py
 node tools/build_webui.js
 node tools/check_webui_assets.js
 git diff --exit-code -- webui

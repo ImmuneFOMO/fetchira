@@ -44,13 +44,12 @@ pub(crate) fn absolute_path(path: &Path) -> PathBuf {
 /// is available.
 pub(crate) fn installation_binary() -> anyhow::Result<String> {
     let current = std::env::current_exe()?;
+    let current_canonical = current.canonicalize().ok();
     if let Some(name) = current.file_name() {
         if let Some(path) = std::env::var_os("PATH") {
             for directory in std::env::split_paths(&path) {
                 let candidate = directory.join(name);
-                if candidate.is_file()
-                    && candidate.canonicalize().ok() == current.canonicalize().ok()
-                {
+                if candidate.is_file() && candidate.canonicalize().ok() == current_canonical {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
@@ -67,7 +66,28 @@ pub(crate) fn installation_binary() -> anyhow::Result<String> {
             }
         }
     }
+    if let Some(stable) = brew_launcher_for(&current) {
+        return Ok(stable.to_string_lossy().into_owned());
+    }
     Ok(current.to_string_lossy().into_owned())
+}
+
+fn brew_launcher_for(current: &Path) -> Option<PathBuf> {
+    let current = current.canonicalize().ok()?;
+    let bin = current.parent()?;
+    if bin.file_name()?.to_str()? != "bin" {
+        return None;
+    }
+    let formula_version = bin.parent()?;
+    let formula = formula_version.parent()?;
+    if formula.file_name()?.to_str()? != "fetchira"
+        || formula.parent()?.file_name()?.to_str()? != "Cellar"
+    {
+        return None;
+    }
+    let prefix = formula.parent()?.parent()?;
+    let stable = prefix.join("bin").join(current.file_name()?);
+    (stable.canonicalize().ok()? == current).then_some(stable)
 }
 
 fn cfg_path(home: &Path) -> PathBuf {
@@ -1231,15 +1251,21 @@ pub(crate) struct IntegrationResult {
     pub(crate) msg: String,
 }
 
-pub(crate) fn install_integrations(
+/// Install the selected skill and, when explicitly requested for CLI-only setup, remove the
+/// selected agents' existing Fetchira MCP registrations after their skill installation succeeds.
+pub(crate) fn install_integrations_with_options(
     agent_home: &Path,
     config_home: &Path,
     bin: &str,
     target_names: &[String],
     skill: Option<crate::skills::SkillVariant>,
+    remove_mcp: bool,
 ) -> anyhow::Result<Vec<IntegrationResult>> {
     if skill == Some(crate::skills::SkillVariant::Skip) {
         return Ok(Vec::new());
+    }
+    if remove_mcp && skill != Some(crate::skills::SkillVariant::Cli) {
+        bail!("MCP conversion is available only with the CLI-only skill");
     }
     let all = mcp_target_list();
     let mut targets = Vec::with_capacity(target_names.len());
@@ -1248,6 +1274,9 @@ pub(crate) fn install_integrations(
             .iter()
             .find(|target| target.name == name)
             .with_context(|| format!("unknown install target '{name}'"))?;
+        if remove_mcp && !agent_skill_supported(target.name) {
+            bail!("MCP conversion is unavailable for {}", target.name);
+        }
         targets.push(target);
     }
     if let Some(variant) = skill {
@@ -1255,7 +1284,7 @@ pub(crate) fn install_integrations(
     }
     let mut results = Vec::new();
     if !matches!(skill, Some(crate::skills::SkillVariant::Cli)) {
-        for target in targets {
+        for target in &targets {
             match (target.run)(config_home, bin) {
                 Ok(msg) => results.push(IntegrationResult {
                     name: target.name.to_string(),
@@ -1270,28 +1299,103 @@ pub(crate) fn install_integrations(
             }
         }
     }
-    if let Some(variant) = skill {
-        results.extend(
-            crate::skills::install_skills_for_agents(
-                agent_home,
-                config_home,
-                Path::new(bin),
-                variant,
-                target_names,
-            )
-            .into_iter()
-            .map(|result| IntegrationResult {
-                name: format!("skill:{}", result.name),
-                ok: result.ok,
-                msg: result.msg,
-            }),
+    let skill_results = if let Some(variant) = skill {
+        let skill_results = crate::skills::install_skills_for_agents(
+            agent_home,
+            config_home,
+            Path::new(bin),
+            variant,
+            target_names,
         );
+        results.extend(skill_results.iter().map(|result| IntegrationResult {
+            name: format!("skill:{}", result.name),
+            ok: result.ok,
+            msg: result.msg.clone(),
+        }));
+        skill_results
+    } else {
+        Vec::new()
+    };
+    if remove_mcp {
+        let shared_root = agent_home
+            .canonicalize()
+            .unwrap_or_else(|_| agent_home.to_path_buf())
+            .join(".agents");
+        let shared_codex = crate::skills::skill_destinations(agent_home)
+            .iter()
+            .any(|destination| destination.name == "Codex" && destination.parent == shared_root);
+        for target in targets {
+            if !target.installed {
+                continue;
+            }
+            if !skill_succeeded_for_target(target.name, &skill_results, shared_codex) {
+                results.push(IntegrationResult {
+                    name: format!("mcp:{}", target.name),
+                    ok: false,
+                    msg: "kept because the CLI skill was not installed".into(),
+                });
+                continue;
+            }
+            let Some(remove) = target.remove.as_ref() else {
+                results.push(IntegrationResult {
+                    name: format!("mcp:{}", target.name),
+                    ok: false,
+                    msg: "MCP removal is unavailable for this agent".into(),
+                });
+                continue;
+            };
+            match remove(agent_home) {
+                Ok(msg) => results.push(IntegrationResult {
+                    name: format!("mcp:{}", target.name),
+                    ok: true,
+                    msg,
+                }),
+                Err(e) => results.push(IntegrationResult {
+                    name: format!("mcp:{}", target.name),
+                    ok: false,
+                    msg: e.to_string(),
+                }),
+            }
+        }
     }
     Ok(results)
 }
 
+fn skill_succeeded_for_target(
+    target: &str,
+    results: &[crate::skills::SkillInstallResult],
+    shared_codex: bool,
+) -> bool {
+    let destinations: &[&str] = match target {
+        "Claude Code" => &["Claude"],
+        "Codex CLI" => &["Codex"],
+        "Gemini CLI" if shared_codex => &["Codex"],
+        "Gemini CLI" => &["Gemini"],
+        "Cursor" => &["Cursor"],
+        _ => &[],
+    };
+    results.iter().any(|result| {
+        destinations.contains(&result.name) && result.ok && !result.msg.starts_with("skipped:")
+    })
+}
+
 /// `fetchira install` — choose one agent integration, then select detected MCP targets if needed.
 pub fn install_tools(config_home: &Path) -> anyhow::Result<()> {
+    let user_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME is required to install agent skills")?;
+    let mut variants: Vec<_> = crate::skills::skill_destinations(&user_home)
+        .into_iter()
+        .flat_map(|destination| destination.variants)
+        .collect();
+    variants.sort_by_key(|variant| variant.as_str());
+    variants.dedup();
+    let starting_cursor = match variants.as_slice() {
+        [crate::skills::SkillVariant::Mcp] => 1,
+        [crate::skills::SkillVariant::Cli] => 2,
+        _ => 0,
+    };
     let integration = match Select::new(
         "How should your agents use Fetchira? (Esc to exit)",
         vec![
@@ -1301,6 +1405,7 @@ pub fn install_tools(config_home: &Path) -> anyhow::Result<()> {
             Integration::Skip,
         ],
     )
+    .with_starting_cursor(starting_cursor)
     .prompt()
     {
         Ok(choice) => choice,
@@ -1322,8 +1427,17 @@ pub fn install_tools(config_home: &Path) -> anyhow::Result<()> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .context("HOME is required to install agent skills")?;
-    let targets = choose_install_targets(matches!(integration, Integration::Cli))?;
-    let results = install_integrations(&home, config_home, &bin, &targets, Some(skill))?;
+    let cli_only = matches!(integration, Integration::Cli);
+    let targets = choose_install_targets(cli_only)?;
+    let remove_mcp = cli_only && confirm_mcp_conversion(&targets);
+    let results = install_integrations_with_options(
+        &home,
+        config_home,
+        &bin,
+        &targets,
+        Some(skill),
+        remove_mcp,
+    )?;
     let mut changed = false;
     for result in results {
         println!(
@@ -1350,10 +1464,17 @@ fn choose_install_targets(skill_only: bool) -> anyhow::Result<Vec<String>> {
         .iter()
         .map(|t| format!("{}{}", t.name, if t.present { "  (detected)" } else { "" }))
         .collect();
+    let has_installed = targets.iter().any(|target| target.installed);
     let preselect: Vec<usize> = targets
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.present)
+        .filter(|(_, t)| {
+            if has_installed {
+                t.installed
+            } else {
+                t.present
+            }
+        })
         .map(|(i, _)| i)
         .collect();
 
@@ -1378,11 +1499,34 @@ fn choose_install_targets(skill_only: bool) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+fn confirm_mcp_conversion(target_names: &[String]) -> bool {
+    let existing: Vec<&str> = mcp_target_list()
+        .iter()
+        .filter(|target| target_names.iter().any(|name| name == target.name))
+        .filter(|target| target.installed)
+        .map(|target| target.name)
+        .collect();
+    if existing.is_empty() {
+        return false;
+    }
+    println!(
+        "\nFetchira MCP registrations already exist for: {}.",
+        existing.join(", ")
+    );
+    println!("Keeping them leaves those MCP registrations callable alongside the CLI skill.");
+    Confirm::new("Remove these MCP registrations after the CLI skill is installed?")
+        .with_default(false)
+        .prompt()
+        .unwrap_or(false)
+}
+
 fn agent_skill_supported(name: &str) -> bool {
     matches!(name, "Claude Code" | "Codex CLI" | "Gemini CLI" | "Cursor")
 }
 
 type RunFn = Box<dyn Fn(&Path, &str) -> anyhow::Result<String> + Send>;
+type RemoveFn = Box<dyn Fn(&Path) -> anyhow::Result<String> + Send>;
+type RepairFn = Box<dyn Fn(&Path, &str) -> anyhow::Result<String> + Send>;
 
 pub(crate) struct McpTarget {
     pub(crate) name: &'static str,
@@ -1390,6 +1534,8 @@ pub(crate) struct McpTarget {
     /// This tool's config already registers a "fetchira" server (checklist done-state in the UI).
     pub(crate) installed: bool,
     pub(crate) run: RunFn,
+    pub(crate) remove: Option<RemoveFn>,
+    pub(crate) repair: Option<RepairFn>,
 }
 
 /// Detected coding tools + registration actions. Shared by `fetchira install` and the web UI.
@@ -1449,36 +1595,66 @@ fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path, codex: &Path) -> Vec<McpTarg
             present: which("claude"),
             installed: has_fetchira(&p(".claude.json")),
             run: Box::new(reg_claude_code),
+            remove: Some(boxed_remove(p(".claude.json"), remove_json_mcp_servers)),
+            repair: Some(boxed_repair(p(".claude.json"), repair_json_mcp_servers)),
         },
         McpTarget {
             name: "Codex CLI",
             present: codex.exists() || which("codex"),
             installed: has_fetchira(&codex.join("config.toml")),
             run: boxed(codex.join("config.toml"), reg_codex),
+            remove: Some(boxed_remove(
+                codex.join("config.toml"),
+                remove_codex_registration,
+            )),
+            repair: Some(boxed_repair(
+                codex.join("config.toml"),
+                repair_codex_registration,
+            )),
         },
         McpTarget {
             name: "OpenCode",
             present: xdg.join("opencode").exists() || which("opencode"),
             installed: has_fetchira(&xdg.join("opencode/opencode.json")),
             run: boxed(xdg.join("opencode/opencode.json"), reg_opencode),
+            remove: None,
+            repair: Some(boxed_repair(
+                xdg.join("opencode/opencode.json"),
+                repair_opencode_registration,
+            )),
         },
         McpTarget {
             name: "Gemini CLI",
             present: p(".gemini").exists() || which("gemini"),
             installed: has_fetchira(&p(".gemini/settings.json")),
             run: boxed(p(".gemini/settings.json"), reg_mcp_servers),
+            remove: Some(boxed_remove(
+                p(".gemini/settings.json"),
+                remove_json_mcp_servers,
+            )),
+            repair: Some(boxed_repair(
+                p(".gemini/settings.json"),
+                repair_json_mcp_servers,
+            )),
         },
         McpTarget {
             name: "Cursor",
             present: p(".cursor").exists(),
             installed: has_fetchira(&p(".cursor/mcp.json")),
             run: boxed(p(".cursor/mcp.json"), reg_mcp_servers),
+            remove: Some(boxed_remove(p(".cursor/mcp.json"), remove_json_mcp_servers)),
+            repair: Some(boxed_repair(p(".cursor/mcp.json"), repair_json_mcp_servers)),
         },
         McpTarget {
             name: "Windsurf",
             present: p(".codeium/windsurf").exists(),
             installed: has_fetchira(&p(".codeium/windsurf/mcp_config.json")),
             run: boxed(p(".codeium/windsurf/mcp_config.json"), reg_mcp_servers),
+            remove: None,
+            repair: Some(boxed_repair(
+                p(".codeium/windsurf/mcp_config.json"),
+                repair_json_mcp_servers,
+            )),
         },
         McpTarget {
             name: "Claude Desktop",
@@ -1488,18 +1664,36 @@ fn mcp_targets(h: &Path, appsup: &Path, xdg: &Path, codex: &Path) -> Vec<McpTarg
                 claude_dir.join("claude_desktop_config.json"),
                 reg_mcp_servers,
             ),
+            remove: None,
+            repair: Some(boxed_repair(
+                claude_dir.join("claude_desktop_config.json"),
+                repair_json_mcp_servers,
+            )),
         },
         McpTarget {
             name: "VS Code",
             present: code_dir.exists(),
             installed: has_fetchira(&code_dir.join("User/mcp.json")),
             run: boxed(code_dir.join("User/mcp.json"), reg_vscode),
+            remove: None,
+            repair: Some(boxed_repair(
+                code_dir.join("User/mcp.json"),
+                repair_vscode_registration,
+            )),
         },
     ]
 }
 
 fn boxed(path: PathBuf, f: fn(&Path, &Path, &str) -> anyhow::Result<String>) -> RunFn {
     Box::new(move |config_home, bin| f(&path, config_home, bin))
+}
+
+fn boxed_remove(path: PathBuf, f: fn(&Path, &Path) -> anyhow::Result<String>) -> RemoveFn {
+    Box::new(move |backup_root| f(&path, backup_root))
+}
+
+fn boxed_repair(path: PathBuf, f: fn(&Path, &Path, &str) -> anyhow::Result<String>) -> RepairFn {
+    Box::new(move |backup_root, bin| f(&path, backup_root, bin))
 }
 
 fn which(cmd: &str) -> bool {
@@ -1528,6 +1722,320 @@ fn write_obj(path: &Path, obj: &serde_json::Map<String, Value>) -> anyhow::Resul
         false,
     )?;
     Ok(format!("wrote {}", path.display()))
+}
+
+fn readable_config(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("refusing to modify symlink {}", path.display())
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            bail!("refusing to modify non-file {}", path.display())
+        }
+        Ok(_) => Ok(Some(
+            std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+fn backup_config(path: &Path, backup_root: &Path, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+    match std::fs::symlink_metadata(backup_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("refusing symlink backup root {}", backup_root.display())
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!("backup root {} is not a directory", backup_root.display())
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(backup_root)
+                .with_context(|| format!("create backup root {}", backup_root.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", backup_root.display()));
+        }
+    }
+    let dir = backup_root.join(".fetchira-mcp-backups");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("refusing symlink backup directory {}", dir.display())
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!("backup directory {} is not a directory", dir.display())
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&dir)
+                .with_context(|| format!("create backup directory {}", dir.display()))?;
+        }
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", dir.display())),
+    }
+
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config")
+        .replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-',
+            "_",
+        );
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    for attempt in 0..100u32 {
+        let destination = dir.join(format!(
+            "{basename}-{}-{stamp}-{attempt}.bak",
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&destination) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                    let _ = std::fs::remove_file(&destination);
+                    return Err(error)
+                        .with_context(|| format!("write backup {}", destination.display()));
+                }
+                return Ok(destination);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create backup {}", destination.display()));
+            }
+        }
+    }
+    bail!(
+        "could not allocate a unique MCP backup name in {}",
+        dir.display()
+    )
+}
+
+fn removed_message(path: &Path, backup: &Path) -> String {
+    format!(
+        "removed Fetchira MCP registration from {}; backup: {}",
+        path.display(),
+        backup.display()
+    )
+}
+
+fn remove_json_registration_in(
+    path: &Path,
+    backup_root: &Path,
+    section: &str,
+) -> anyhow::Result<String> {
+    let Some(bytes) = readable_config(path)? else {
+        return Ok(format!(
+            "MCP registration already absent from {}",
+            path.display()
+        ));
+    };
+    let mut obj: serde_json::Map<String, Value> = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse {} (expected a JSON object)", path.display()))?;
+    let Some(servers) = obj.get_mut(section) else {
+        return Ok(format!(
+            "MCP registration already absent from {}",
+            path.display()
+        ));
+    };
+    let servers = servers
+        .as_object_mut()
+        .with_context(|| format!("{section} must be a JSON object in {}", path.display()))?;
+    if servers.remove("fetchira").is_none() {
+        return Ok(format!(
+            "MCP registration already absent from {}",
+            path.display()
+        ));
+    }
+    let backup = backup_config(path, backup_root, &bytes)?;
+    write_obj(path, &obj)?;
+    Ok(removed_message(path, &backup))
+}
+
+fn remove_json_mcp_servers(path: &Path, backup_root: &Path) -> anyhow::Result<String> {
+    remove_json_registration_in(path, backup_root, "mcpServers")
+}
+
+fn remove_codex_registration(path: &Path, backup_root: &Path) -> anyhow::Result<String> {
+    let Some(bytes) = readable_config(path)? else {
+        return Ok(format!(
+            "MCP registration already absent from {}",
+            path.display()
+        ));
+    };
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("parse {} as UTF-8 TOML", path.display()))?;
+    let mut doc: toml::Table =
+        toml::from_str(text).with_context(|| format!("parse {}", path.display()))?;
+    let Some(servers) = doc.get_mut("mcp_servers") else {
+        return Ok(format!(
+            "MCP registration already absent from {}",
+            path.display()
+        ));
+    };
+    let servers = servers
+        .as_table_mut()
+        .with_context(|| format!("mcp_servers must be a TOML table in {}", path.display()))?;
+    if servers.remove("fetchira").is_none() {
+        return Ok(format!(
+            "MCP registration already absent from {}",
+            path.display()
+        ));
+    }
+    let backup = backup_config(path, backup_root, &bytes)?;
+    config::write_atomic(path, &toml::to_string_pretty(&doc)?, false)?;
+    Ok(removed_message(path, &backup))
+}
+
+/// Repair only versioned launchers from this Homebrew installation, preserving all other options.
+pub(crate) fn repair_mcp_launchers(backup_root: &Path, bin: &str) -> Vec<IntegrationResult> {
+    mcp_target_list()
+        .into_iter()
+        .filter(|target| target.installed)
+        .filter_map(|target| {
+            let repair = target.repair?;
+            let result = repair(backup_root, bin);
+            if result.as_ref().is_ok_and(|message| message == "unchanged") {
+                return None;
+            }
+            Some(IntegrationResult {
+                name: target.name.into(),
+                ok: result.is_ok(),
+                msg: match result {
+                    Ok(message) => message,
+                    Err(error) => format!("{error:#}"),
+                },
+            })
+        })
+        .collect()
+}
+
+fn cellar_prefix(path: &Path) -> Option<&Path> {
+    if path.file_name()? != "fetchira" || path.parent()?.file_name()? != "bin" {
+        return None;
+    }
+    let formula = path.parent()?.parent()?.parent()?;
+    if formula.file_name()? != "fetchira" || formula.parent()?.file_name()? != "Cellar" {
+        return None;
+    }
+    formula.parent()?.parent()
+}
+
+fn needs_launcher_repair(command: &str, bin: &str) -> bool {
+    let Ok(current) = Path::new(bin).canonicalize() else {
+        return false;
+    };
+    let Some(old_prefix) =
+        cellar_prefix(Path::new(command)).and_then(|path| path.canonicalize().ok())
+    else {
+        return false;
+    };
+    command != bin && Some(old_prefix.as_path()) == cellar_prefix(&current)
+}
+
+fn repair_json_registration(
+    path: &Path,
+    backup_root: &Path,
+    bin: &str,
+    section: &str,
+) -> anyhow::Result<String> {
+    let Some(bytes) = readable_config(path)? else {
+        return Ok("unchanged".into());
+    };
+    let mut doc: Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    let Some(server) = doc
+        .get_mut(section)
+        .and_then(|servers| servers.get_mut("fetchira"))
+    else {
+        return Ok("unchanged".into());
+    };
+    if server.get("url").is_some() {
+        return Ok("unchanged".into());
+    }
+    let Some(command) = server.get_mut("command") else {
+        return Ok("unchanged".into());
+    };
+    let command = if command.is_array() {
+        let Some(first) = command.get_mut(0) else {
+            return Ok("unchanged".into());
+        };
+        first
+    } else {
+        command
+    };
+    if !command
+        .as_str()
+        .is_some_and(|value| needs_launcher_repair(value, bin))
+    {
+        return Ok("unchanged".into());
+    }
+    *command = json!(bin);
+    let backup = backup_config(path, backup_root, &bytes)?;
+    config::write_atomic(path, &serde_json::to_string_pretty(&doc)?, false)?;
+    Ok(format!(
+        "updated Fetchira launcher in {}; backup: {}",
+        path.display(),
+        backup.display()
+    ))
+}
+
+fn repair_json_mcp_servers(path: &Path, backup_root: &Path, bin: &str) -> anyhow::Result<String> {
+    repair_json_registration(path, backup_root, bin, "mcpServers")
+}
+fn repair_opencode_registration(
+    path: &Path,
+    backup_root: &Path,
+    bin: &str,
+) -> anyhow::Result<String> {
+    repair_json_registration(path, backup_root, bin, "mcp")
+}
+fn repair_vscode_registration(
+    path: &Path,
+    backup_root: &Path,
+    bin: &str,
+) -> anyhow::Result<String> {
+    repair_json_registration(path, backup_root, bin, "servers")
+}
+fn repair_codex_registration(path: &Path, backup_root: &Path, bin: &str) -> anyhow::Result<String> {
+    let Some(bytes) = readable_config(path)? else {
+        return Ok("unchanged".into());
+    };
+    let mut doc: toml::Table = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    let Some(server) = doc
+        .get_mut("mcp_servers")
+        .and_then(|servers| servers.get_mut("fetchira"))
+    else {
+        return Ok("unchanged".into());
+    };
+    if server.get("url").is_some() {
+        return Ok("unchanged".into());
+    }
+    let Some(command) = server.get_mut("command") else {
+        return Ok("unchanged".into());
+    };
+    if !command
+        .as_str()
+        .is_some_and(|value| needs_launcher_repair(value, bin))
+    {
+        return Ok("unchanged".into());
+    }
+    *command = toml::Value::String(bin.into());
+    let backup = backup_config(path, backup_root, &bytes)?;
+    config::write_atomic(path, &toml::to_string_pretty(&doc)?, false)?;
+    Ok(format!(
+        "updated Fetchira launcher in {}; backup: {}",
+        path.display(),
+        backup.display()
+    ))
 }
 
 fn registered_env(config_home: &Path) -> Value {
@@ -1708,7 +2216,7 @@ pub fn help() {
            fetchira setup               guided setup: pick providers, enter keys, log in\n  \
            fetchira providers           list all available providers\n  \
            fetchira list                show your accounts + remaining quota\n  \
-         fetchira install             choose one agent integration (MCP + CLI fallback / MCP / CLI / later)\n  \
+         fetchira install             choose agent integration (--refresh: update existing skills and launchers)\n  \
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
@@ -1722,7 +2230,7 @@ pub fn help() {
            fetchira server              hosted Streamable HTTP at /mcp (alias serve-http; FETCHIRA_MASTER_KEY required; FETCHIRA_BIND default 127.0.0.1:7879)\n  \
            fetchira server key create ID [NAME] [--accounts-manage]  mint a key (mcp + usage:read; opt in to account management/remote login; prints fk_live_* once)\n  \
            fetchira server password hash  Argon2id of a password on stdin (not a TTY) — for FETCHIRA_ADMIN_PASSWORD, never plaintext\n  \
-           fetchira update              download & install the latest release (--when-idle: after all instances exit)\n  \
+           fetchira update              update and finish agent setup (alias: upgrade; --when-idle waits for active instances)\n  \
            fetchira --version           print the installed version\n  \
            fetchira help                this message\n\n\
          Tool flags: fetchira <command> --help. Flags may mix with words; -- ends flags.\n\
@@ -1735,6 +2243,69 @@ pub fn help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn brew_launcher_is_used_only_for_the_matching_cellar_binary() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-brew-launcher-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let versioned = home.join("Cellar/fetchira/0.1.14/bin/fetchira");
+        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        std::fs::write(&versioned, "binary").unwrap();
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&versioned, home.join("bin/fetchira")).unwrap();
+        assert_eq!(
+            brew_launcher_for(&versioned),
+            Some(home.canonicalize().unwrap().join("bin/fetchira"))
+        );
+        let old = home.join("Cellar/fetchira/0.1.13/bin/fetchira");
+        let stable = home.join("bin/fetchira");
+        let stable = stable.to_str().unwrap();
+        let config_path = home.join("mcp.json");
+        let original = json!({"mcpServers": {
+            "fetchira": {"command": old, "args": ["serve"], "env": {"FETCHIRA_HOME": "/custom/home"}},
+            "other": {"command": "keep"}
+        }});
+        std::fs::write(&config_path, original.to_string()).unwrap();
+        repair_json_mcp_servers(&config_path, &home, stable).unwrap();
+        let repaired: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let mut expected = original;
+        expected["mcpServers"]["fetchira"]["command"] = json!(stable);
+        assert_eq!(repaired, expected);
+        assert_eq!(
+            repair_json_mcp_servers(&config_path, &home, stable).unwrap(),
+            "unchanged"
+        );
+        let codex = home.join("config.toml");
+        let source = format!("[mcp_servers.fetchira]\ncommand = {}\nargs = [\"serve\"]\n[mcp_servers.other]\ncommand = \"keep\"\n", json!(old.to_str().unwrap()));
+        std::fs::write(&codex, source).unwrap();
+        repair_codex_registration(&codex, &home, stable).unwrap();
+        let repaired: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&codex).unwrap()).unwrap();
+        assert_eq!(
+            repaired["mcp_servers"]["fetchira"]["command"].as_str(),
+            Some(stable)
+        );
+        assert_eq!(
+            repaired["mcp_servers"]["other"]["command"].as_str(),
+            Some("keep")
+        );
+        assert!(!needs_launcher_repair(
+            "/another/Cellar/fetchira/0.1.13/bin/fetchira",
+            stable
+        ));
+        assert!(!needs_launcher_repair("my-custom-wrapper", stable));
+
+        let unrelated = home.join("other/bin/fetchira");
+        std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+        std::fs::write(&unrelated, "binary").unwrap();
+        assert_eq!(brew_launcher_for(&unrelated), None);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn mcp_registration_uses_native_config_paths() {
@@ -1908,6 +2479,133 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
         }
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removing_mcp_registration_preserves_other_servers_and_backups_original() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-mcp-remove-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("mcp.json");
+        let original = br#"{"mcpServers":{"other":{"command":"other"},"fetchira":{"command":"/old/fetchira"}},"theme":"dark"}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let message = remove_json_mcp_servers(&path, &home).unwrap();
+        let updated: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(updated["mcpServers"].get("fetchira").is_none());
+        assert_eq!(updated["mcpServers"]["other"]["command"], "other");
+        assert_eq!(updated["theme"], "dark");
+        assert!(message.contains("backup:"));
+
+        let backups = home.join(".fetchira-mcp-backups");
+        let backup = std::fs::read_dir(backups)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(backup).unwrap(), original);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removing_codex_registration_preserves_other_servers_and_backups_original() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-codex-remove-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("config.toml");
+        let original = b"title = 'keep'\n[mcp_servers.other]\ncommand = 'other'\n[mcp_servers.fetchira]\ncommand = '/old/fetchira'\n";
+        std::fs::write(&path, original).unwrap();
+
+        remove_codex_registration(&path, &home).unwrap();
+        let updated: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(updated["mcp_servers"].get("fetchira").is_none());
+        assert_eq!(
+            updated["mcp_servers"]["other"]["command"].as_str(),
+            Some("other")
+        );
+        assert_eq!(updated["title"].as_str(), Some("keep"));
+        let backup = std::fs::read_dir(home.join(".fetchira-mcp-backups"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(std::fs::read(backup).unwrap(), original);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn removing_mcp_refuses_malformed_and_symlink_configs() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-mcp-remove-errors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let malformed = home.join("malformed.json");
+        std::fs::write(&malformed, b"{broken").unwrap();
+        assert!(remove_json_mcp_servers(&malformed, &home).is_err());
+        assert_eq!(std::fs::read(&malformed).unwrap(), b"{broken");
+
+        #[cfg(unix)]
+        {
+            let target = home.join("target.json");
+            let link = home.join("link.json");
+            let original = br#"{"mcpServers":{"fetchira":{"command":"/old/fetchira"}}}"#;
+            std::fs::write(&target, original).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(remove_json_mcp_servers(&link, &home).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+            assert!(!home.join(".fetchira-mcp-backups").exists());
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn mcp_conversion_only_accepts_a_successful_selected_skill() {
+        let skipped = crate::skills::SkillInstallResult {
+            name: "Cursor",
+            ok: true,
+            msg: "skipped: Cursor was not selected".into(),
+        };
+        assert!(!skill_succeeded_for_target("Cursor", &[skipped], false));
+        let installed = crate::skills::SkillInstallResult {
+            name: "Cursor",
+            ok: true,
+            msg: "installed /tmp/.cursor/skills/fetchira-cli".into(),
+        };
+        assert!(skill_succeeded_for_target("Cursor", &[installed], false));
+        let shared = crate::skills::SkillInstallResult {
+            name: "Codex",
+            ok: true,
+            msg: "installed shared skill".into(),
+        };
+        assert!(!skill_succeeded_for_target(
+            "Gemini CLI",
+            std::slice::from_ref(&shared),
+            false
+        ));
+        assert!(skill_succeeded_for_target("Gemini CLI", &[shared], true));
+        assert!(!agent_skill_supported("OpenCode"));
+        assert!(agent_skill_supported("Gemini CLI"));
     }
 
     #[test]

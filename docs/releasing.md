@@ -36,7 +36,7 @@ merge the Release PR
 
 - Run the checks in [CONTRIBUTING.md](../CONTRIBUTING.md) before pushing.
 - Commit with [Conventional Commits](https://www.conventionalcommits.org/) (already the
-  house style): `feat:` → minor bump, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` → major.
+  house style). With [release-plz defaults](https://release-plz.dev/docs/config#the-features_always_increment_minor-field), `feat:` and `fix:` bump the patch while Fetchira is `0.x`; breaking changes bump the minor. From `1.0`, features bump the minor and breaking changes bump the major.
 - Push to `main`. A "Release PR" appears/updates. Ignore it as long as you like.
 - When ready to ship, **merge the Release PR**. The release builds and publishes itself.
 

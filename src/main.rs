@@ -45,8 +45,31 @@ async fn main() -> anyhow::Result<()> {
     // stdio). Skip the serve path (explicit `serve`, or bare with piped stdin) and `update`.
     let serving = matches!(cmd.as_deref(), Some("serve"))
         || (cmd.is_none() && !std::io::stdin().is_terminal());
-    if !serving && cmd.as_deref() != Some("update") {
+    if !serving
+        && !matches!(
+            cmd.as_deref(),
+            Some("update" | "upgrade" | "--finish-upgrade")
+        )
+    {
         fetchira::update::nudge_if_stale(&home).await;
+    }
+    if !serving
+        && !matches!(
+            cmd.as_deref(),
+            Some(
+                "install"
+                    | "setup"
+                    | "server"
+                    | "ui"
+                    | "update"
+                    | "upgrade"
+                    | "--finish-upgrade"
+                    | "--version"
+                    | "-V"
+            )
+        )
+    {
+        fetchira::update::integration_nudge(&home);
     }
     match cmd.as_deref() {
         Some("setup") => {
@@ -70,7 +93,14 @@ async fn main() -> anyhow::Result<()> {
             return fetchira::invoke::run(&home, command, args).await;
         }
         Some("install") => {
-            require_no_args(&mut args, "usage: fetchira install")?;
+            match args.next().as_deref() {
+                Some("--refresh") => {
+                    require_no_args(&mut args, "usage: fetchira install [--refresh]")?;
+                    return fetchira::update::refresh_skills(&home);
+                }
+                Some(_) => anyhow::bail!("usage: fetchira install [--refresh]"),
+                None => {}
+            }
             return cli::install_tools(&home);
         }
         Some("add") => return cli::add(&home, args).await,
@@ -163,7 +193,11 @@ async fn main() -> anyhow::Result<()> {
             let bind = std::env::var("FETCHIRA_BIND").unwrap_or_else(|_| "127.0.0.1:7879".into());
             return fetchira::hosted::run(&home, &bind).await;
         }
-        Some("update") => return fetchira::update::run(&home, args).await,
+        Some("update" | "upgrade") => return fetchira::update::run(&home, args).await,
+        Some("--finish-upgrade") => {
+            require_no_args(&mut args, "unexpected upgrade arguments")?;
+            return fetchira::update::finish_upgrade(&home);
+        }
         Some("remote") => match args.next().as_deref() {
             Some("set") => {
                 let endpoint = args

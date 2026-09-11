@@ -15,6 +15,9 @@ pub struct Instance {
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Older dashboards would silently drop the new `[remote]` section on their next save.
+    #[serde(default)]
+    pub supports_remote_config: bool,
 }
 
 /// Removes this process's registry entry on drop (kernel cleanup isn't needed — a stale
@@ -45,6 +48,7 @@ pub fn register(home: &Path, mode: &str) -> RunGuard {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         hint: host.as_deref().map(|h| restart_hint(h).to_string()),
         host,
+        supports_remote_config: true,
     };
     let path = dir.join(format!("{pid}.json"));
     if let Ok(s) = serde_json::to_string(&inst) {
@@ -56,6 +60,16 @@ pub fn register(home: &Path, mode: &str) -> RunGuard {
 /// Every live fetchira process except `exclude`: registry entries verified against `ps`,
 /// plus unregistered fetchira processes (pre-registry versions) found by the same sweep.
 pub fn running(home: &Path, exclude: &[u32]) -> Vec<Instance> {
+    running_with_scope(home, exclude, true)
+}
+
+/// Since 0.1.13, processes register their config home. Data migrations must not be blocked by
+/// unrelated installations; the binary updater retains its broader pre-registry process sweep.
+pub(crate) fn running_in_home(home: &Path, exclude: &[u32]) -> Vec<Instance> {
+    running_with_scope(home, exclude, false)
+}
+
+fn running_with_scope(home: &Path, exclude: &[u32], include_unregistered: bool) -> Vec<Instance> {
     let table = ps_table();
     let dir = home.join("run");
     let mut seen = Vec::new();
@@ -81,7 +95,8 @@ pub fn running(home: &Path, exclude: &[u32]) -> Vec<Instance> {
         }
     }
     for r in &table {
-        if !is_fetchira(&r.args)
+        if !include_unregistered
+            || !is_fetchira(&r.args)
             || seen.contains(&r.pid)
             || exclude.contains(&r.pid)
             || r.args.contains("--when-idle")
@@ -98,10 +113,26 @@ pub fn running(home: &Path, exclude: &[u32]) -> Vec<Instance> {
             version: None,
             hint: host.as_deref().map(|h| restart_hint(h).to_string()),
             host,
+            supports_remote_config: false,
         });
     }
     out.sort_by_key(|i| i.pid);
     out
+}
+
+pub(crate) fn ensure_remote_config_compatible(home: &Path) -> crate::Result<()> {
+    // A legacy UI may still be starting or may have failed to write its registry entry.
+    // Conservatively include unregistered dashboards here; silently losing credentials is worse
+    // than asking the user to close an unrelated old dashboard. DB migration remains home-scoped.
+    let unsafe_peers: Vec<_> = running(home, &[std::process::id()])
+        .into_iter()
+        .filter(|instance| instance.mode == "ui" && !instance.supports_remote_config)
+        .map(|instance| instance.pid.to_string())
+        .collect();
+    if !unsafe_peers.is_empty() {
+        return Err(crate::Error::Config(format!("restart older Fetchira dashboards (PID {}) before saving a hosted connection; they could erase the server settings", unsafe_peers.join(", "))));
+    }
+    Ok(())
 }
 
 /// Whether `pid` is a live fetchira process (used to spot stale idle-update markers).
