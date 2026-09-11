@@ -1129,17 +1129,36 @@ impl Store {
         quota: i64,
         period: &str,
         cost: i64,
+        probe_until: Option<i64>,
     ) -> Result<bool> {
+        let now = Utc::now().timestamp_millis();
         let res = sqlx::query(
-            "INSERT INTO usage (provider, label, period, used) VALUES (?, ?, ?, ?)
+            "INSERT INTO usage (provider, label, period, used)
+             SELECT ?, ?, ?, ?
+             WHERE NOT EXISTS (
+                SELECT 1 FROM provider_cooldown
+                WHERE label = ? AND until_ms > ? AND (? IS NULL OR until_ms != ?)
+             )
              ON CONFLICT(label, period) DO UPDATE SET used = used + excluded.used
-                WHERE exhausted = 0 AND used + excluded.used <= ?",
+                WHERE exhausted = 0 AND used + excluded.used <= ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM provider_cooldown
+                    WHERE label = ? AND until_ms > ? AND (? IS NULL OR until_ms != ?)
+                  )",
         )
         .bind(provider)
         .bind(label)
         .bind(period)
         .bind(cost)
+        .bind(label)
+        .bind(now)
+        .bind(probe_until)
+        .bind(probe_until)
         .bind(quota)
+        .bind(label)
+        .bind(now)
+        .bind(probe_until)
+        .bind(probe_until)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() == 1)
@@ -1659,12 +1678,12 @@ mod tests {
         // Quota 3: the first three reservations win, the fourth is denied.
         for _ in 0..3 {
             assert!(store
-                .reserve("grok_web", "grok-1#dr", 3, "d", 1)
+                .reserve("grok_web", "grok-1#dr", 3, "d", 1, None)
                 .await
                 .unwrap());
         }
         assert!(!store
-            .reserve("grok_web", "grok-1#dr", 3, "d", 1)
+            .reserve("grok_web", "grok-1#dr", 3, "d", 1, None)
             .await
             .unwrap());
         assert_eq!(store.remaining("grok-1#dr", 3, "d").await.unwrap(), 0);
@@ -1672,7 +1691,7 @@ mod tests {
         // A refund frees exactly one slot back.
         store.refund("grok-1#dr", "d", 1).await.unwrap();
         assert!(store
-            .reserve("grok_web", "grok-1#dr", 3, "d", 1)
+            .reserve("grok_web", "grok-1#dr", 3, "d", 1, None)
             .await
             .unwrap());
 
@@ -1683,7 +1702,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!store
-            .reserve("grok_web", "grok-1#dr", 3, "d", 1)
+            .reserve("grok_web", "grok-1#dr", 3, "d", 1, None)
             .await
             .unwrap());
 

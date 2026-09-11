@@ -370,7 +370,7 @@ impl Router {
                 // A `false` means a sibling took the last slot meanwhile — move to the next account.
                 if !self
                     .store
-                    .reserve(kind.as_str(), &blabel, bquota, &period, 1)
+                    .reserve(kind.as_str(), &blabel, bquota, &period, 1, probe_until)
                     .await?
                 {
                     continue;
