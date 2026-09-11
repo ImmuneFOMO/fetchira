@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline install API check. Run after cargo build: python3 tests/cli_install.py"""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,9 @@ from urllib.request import Request, ProxyHandler, build_opener
 
 
 def main():
-    binary = Path(__file__).resolve().parents[1] / 'target/debug/fetchira'
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, default=Path(__file__).resolve().parents[1] / 'target/debug/fetchira')
+    binary = parser.parse_args().binary.resolve()
     with tempfile.TemporaryDirectory(prefix='fetchira-install-api-') as temp:
         home = Path(temp)
         for parent in ('.claude', '.cursor', '.codex', '.gemini', 'config', 'data'):

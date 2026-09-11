@@ -37,3 +37,4 @@ jobs:
           cargo build --locked
           python3 tests/cli_install.py
           python3 tests/upgrade_013.py
+          python3 tests/upgrade_integrations.py

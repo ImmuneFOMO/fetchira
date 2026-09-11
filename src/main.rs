@@ -53,23 +53,21 @@ async fn main() -> anyhow::Result<()> {
     {
         fetchira::update::nudge_if_stale(&home).await;
     }
-    if !serving
-        && !matches!(
-            cmd.as_deref(),
-            Some(
-                "install"
-                    | "setup"
-                    | "server"
-                    | "ui"
-                    | "update"
-                    | "upgrade"
-                    | "--finish-upgrade"
-                    | "--version"
-                    | "-V"
-            )
+    if !matches!(
+        cmd.as_deref(),
+        Some(
+            "install"
+                | "setup"
+                | "server"
+                | "serve-http"
+                | "update"
+                | "upgrade"
+                | "--finish-upgrade"
+                | "--version"
+                | "-V"
         )
-    {
-        fetchira::update::integration_nudge(&home);
+    ) {
+        fetchira::update::finish_upgrade_on_start(&home);
     }
     match cmd.as_deref() {
         Some("setup") => {

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.14...v0.1.15) - 2026-09-11
+
+### Fixed
+
+- Complete existing agent integration upgrades automatically on CLI, MCP and dashboard startup, including after the 0.1.13 updater replaces the binary.
+- Preserve CLI/MCP choices, repair stale Homebrew launchers and back up old skills without prompting during an update.
+- Serialize simultaneous agent migrations and retry incomplete migrations on the next launch.
+- Clear recovered legacy quota markers and their probe cooldown atomically.
+
 ## [0.1.14](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.13...v0.1.14) - 2026-09-11
 
 ### Added

@@ -23,7 +23,9 @@ parser.add_argument(
 args = parser.parse_args()
 if not (args.home / "fetchira.toml").is_file():
     parser.error("--home must contain a configured fetchira.toml (an empty file tests no providers)")
-env = dict(os.environ, FETCHIRA_HOME=str(args.home.resolve()))
+env = dict(os.environ, FETCHIRA_HOME=str(args.home.resolve()), HOME=str(args.home.resolve()),
+           USERPROFILE=str(args.home.resolve()), XDG_CONFIG_HOME=str(args.home.resolve() / "config"))
+env.pop("CODEX_HOME", None)
 
 with tempfile.TemporaryFile() as log:
     process = subprocess.Popen(

@@ -52,61 +52,52 @@ pub fn refresh_skills(home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A local, once-per-version notice also reaches users who upgraded through Homebrew.
-pub fn integration_nudge(home: &Path) {
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-        return;
-    }
-    let marker = home.join("agent-upgrade-notice");
-    if std::fs::read_to_string(&marker).ok().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
-        return;
-    }
-    let agent_home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let Ok(bin) = crate::cli::installation_binary() else {
-        return;
-    };
-    let skills = crate::skills::refresh_existing(&agent_home, home, Path::new(&bin), false);
-    let targets: Vec<_> = crate::cli::mcp_target_list()
-        .into_iter()
-        .filter(|target| target.installed)
-        .map(|target| target.name)
-        .collect();
-    if skills.is_empty() && targets.is_empty() {
-        return;
-    }
-    if let Err(error) = finish_upgrade(home) {
+/// Finish migrations even when the previous updater only replaced the executable.
+/// No prompts or stdout: this also runs before an agent's MCP handshake.
+pub fn finish_upgrade_on_start(home: &Path) {
+    if let Err(error) = complete_integrations(home) {
         eprintln!("Agent upgrade: {error}");
     }
 }
 
+fn complete_integrations(home: &Path) -> anyhow::Result<Vec<crate::cli::IntegrationResult>> {
+    // Several agents may restart together. Hold an OS lock while replacing shared skills;
+    // the lock is released on exit, including a crash, so the next launch can retry.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(home.join("agent-upgrade.lock"))?;
+    lock.lock()?;
+    let marker = home.join("agent-upgrade-complete");
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+        return Ok(vec![]);
+    }
+    let agent_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME is required to refresh agent skills")?;
+    let bin = crate::cli::installation_binary()?;
+    let results = refresh_integrations(&agent_home, home, &bin);
+    let errors: Vec<_> = results
+        .iter()
+        .filter(|r| !r.ok)
+        .map(|r| format!("{}: {}", r.name, r.msg))
+        .collect();
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
+    crate::config::write_atomic(&marker, env!("CARGO_PKG_VERSION"), true)?;
+    Ok(results)
+}
+
 /// Executed by the newly installed binary, so embedded skills come from the new release.
 pub fn finish_upgrade(home: &Path) -> anyhow::Result<()> {
-    refresh_skills(home)?;
-    let targets: Vec<_> = crate::cli::mcp_target_list()
-        .into_iter()
-        .filter(|target| target.installed)
-        .map(|target| target.name)
-        .collect();
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !targets.is_empty() {
-        println!(
-            "Fetchira MCP is installed in {}. CLI-only provides the same operations.",
-            targets.join(", ")
-        );
-        if inquire::Confirm::new("Review agent setup or switch to CLI-only now?")
-            .with_default(false)
-            .prompt()
-            .unwrap_or(false)
-        {
-            crate::cli::install_tools(home)?;
-        }
+    for result in complete_integrations(home)? {
+        println!("{}: {}", result.name, result.msg);
     }
-    crate::config::write_atomic(
-        &home.join("agent-upgrade-notice"),
-        env!("CARGO_PKG_VERSION"),
-        false,
-    )?;
+    println!("Agent integrations are up to date. Your integration choices are unchanged.");
     Ok(())
 }
 

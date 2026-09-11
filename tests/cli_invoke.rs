@@ -16,6 +16,8 @@ fn one_shot_contract_without_live_providers() {
             .args(args)
             .env("FETCHIRA_HOME", &home)
             .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env_remove("CODEX_HOME")
             .env("RUST_LOG", "off")
             .current_dir(&home)
             .output()

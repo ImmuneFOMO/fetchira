@@ -116,29 +116,12 @@ The updater uses Homebrew for a Homebrew installation and release archives for a
 binary. It reports progress or an actionable error in place. Hosted updates have a separate
 [backup and rollback procedure](hosted.md#updates-and-rollback).
 
-### Upgrading from 0.1.13 to 0.1.14
-
-Your existing Fetchira home is retained: accounts, sessions, usage and settings migrate there.
-Do not delete the database or re-add working accounts. Updated skills are refreshed as part
-of finishing the upgrade; old files and custom edits are archived under `fetchira-skill-backups/`.
-Versioned Homebrew MCP launchers are repaired without changing your other server options.
-
-The upgrade offers agent setup in the CLI or dashboard. Choose **CLI only**, select your
-agents and confirm removal to replace their Fetchira MCP registrations with the CLI skill.
-Removal happens only after that skill installs; original configs are backed up. Declining
-keeps MCP available. Project-level MCP settings are separate: only detected user-level
-registrations are managed.
-
-The already-released 0.1.13 CLI updater cannot run the new setup after replacing itself:
-setup finishes on the next interactive Fetchira run. Its dashboard updater already restarts
-into the new version. Its Homebrew path still displays the existing `brew upgrade fetchira`
-instruction; the new updater runs Homebrew directly. No GitHub visit is needed.
-
-Agents that hold a running MCP process must reload it through their own controls; Fetchira
-shows restart hints instead of terminating active work. An old dashboard must close before
-a hosted connection is saved, because its old config writer could erase the server settings.
-For a deliberate refresh outside the update flow, use `fetchira install --refresh` or
-**Setup & agents → Refresh existing skills**.
+Accounts, sessions, usage and settings stay in the existing data directory. The new process
+migrates the database and refreshes existing agent skills automatically, including when it
+starts through MCP or restarts the dashboard. Replaced skill files are backed up, stale
+Homebrew launchers are repaired, and your CLI/MCP choices and other server settings stay unchanged.
+No separate migration command is needed. Already-running agents load the new executable when
+restarted; active work is not terminated. Use **Setup & agents** to deliberately change integrations.
 
 To stop using Fetchira, remove its MCP entry from the clients you configured, remove the
 installed Fetchira skill folder, and uninstall the binary using its installation method.

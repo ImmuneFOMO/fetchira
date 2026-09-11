@@ -222,10 +222,14 @@ async fn legacy_firecrawl_429_recovers_once_from_live_balance() {
     let firecrawl = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v2/team/credit-usage"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "success": true,
-            "data": {"remainingCredits": 1515, "planCredits": 3000}
-        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "success": true,
+                    "data": {"remainingCredits": 1515, "planCredits": 3000}
+                }))
+                .set_delay(std::time::Duration::from_millis(100)),
+        )
         .expect(1)
         .mount(&firecrawl)
         .await;
@@ -257,12 +261,45 @@ async fn legacy_firecrawl_429_recovers_once_from_live_balance() {
         url: Some("https://example.com/b".into()),
         ..Default::default()
     };
-    let (a, b) = tokio::join!(
-        router.call(Capability::Read, &input_a, Some(ProviderKind::Firecrawl)),
-        router.call(Capability::Read, &input_b, Some(ProviderKind::Firecrawl))
-    );
-    assert!(a.unwrap().text.contains("FIRECRAWL_OK"));
-    assert!(b.unwrap().text.contains("FIRECRAWL_OK"));
+    let recovery_router = router.clone();
+    let first = tokio::spawn(async move {
+        recovery_router
+            .call(Capability::Read, &input_a, Some(ProviderKind::Firecrawl))
+            .await
+    });
+    // During the balance probe only its owner may proceed. Wait for its persisted lease,
+    // rather than assuming which of two concurrently scheduled calls reaches it first.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while probe
+            .cooldown_remaining("firecrawl-1")
+            .await
+            .unwrap()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let second = router
+        .call(Capability::Read, &input_b, Some(ProviderKind::Firecrawl))
+        .await;
+    assert!(matches!(
+        second,
+        Err(fetchira::error::Error::RateLimit { .. })
+    ));
+    assert!(first.await.unwrap().unwrap().text.contains("FIRECRAWL_OK"));
+    assert!(probe
+        .cooldown_remaining("firecrawl-1")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(router
+        .call(Capability::Read, &input_b, Some(ProviderKind::Firecrawl))
+        .await
+        .unwrap()
+        .text
+        .contains("FIRECRAWL_OK"));
     let usage = probe.usage_for("firecrawl-1", &period).await.unwrap();
     assert_eq!(usage.used, 2);
     assert!(!usage.exhausted);

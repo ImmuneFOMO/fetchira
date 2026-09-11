@@ -722,10 +722,13 @@ impl Router {
         if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
             return Ok(None);
         }
-        let cleared = self.store.clear_legacy_exhausted(label, period).await?;
-        if cleared {
-            let _ = self.store.release_cooldown(label, probe_until).await;
-        }
+        // Clear the marker and release the lease in one commit. A sibling checks the marker before
+        // entering `legacy_recovery_gate`; separate writes would let it skip the gate while the
+        // lease is still visible and incorrectly report a 60-second cooldown.
+        let cleared = self
+            .store
+            .clear_legacy_exhausted_and_release_cooldown(label, period, probe_until)
+            .await?;
         Ok(cleared.then_some(ExhaustionRecovery { probe_until: None }))
     }
 

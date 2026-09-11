@@ -871,7 +871,7 @@ async fn api_install_targets(State(st): State<Arc<AppState>>, headers: HeaderMap
     let outdated = cli::installation_binary()
         .map(|bin| crate::skills::refresh_existing(&user_home(), &st.home, Path::new(&bin), false))
         .unwrap_or_default();
-    let upgrade_pending = std::fs::read_to_string(st.home.join("agent-upgrade-notice"))
+    let upgrade_pending = std::fs::read_to_string(st.home.join("agent-upgrade-complete"))
         .ok()
         .as_deref()
         != Some(env!("CARGO_PKG_VERSION"))
@@ -901,7 +901,7 @@ async fn api_refresh_skills(State(st): State<Arc<AppState>>, headers: HeaderMap)
     let results = crate::update::refresh_integrations(&user_home(), &st.home, &bin);
     if results.iter().all(|result| result.ok) {
         let _ = config::write_atomic(
-            &st.home.join("agent-upgrade-notice"),
+            &st.home.join("agent-upgrade-complete"),
             env!("CARGO_PKG_VERSION"),
             false,
         );

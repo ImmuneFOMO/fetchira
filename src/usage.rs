@@ -1067,6 +1067,36 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Clear a pre-upgrade exhaustion mark and its one-shot recovery lease in one commit. Keeping
+    /// these writes atomic prevents another process from observing only half of the recovery.
+    pub async fn clear_legacy_exhausted_and_release_cooldown(
+        &self,
+        label: &str,
+        period: &str,
+        probe_until: i64,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let cleared = sqlx::query(
+            "UPDATE usage SET exhausted = 0
+             WHERE label = ? AND period = ? AND exhausted = 1 AND exhausted_kind IS NULL",
+        )
+        .bind(label)
+        .bind(period)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        if cleared {
+            sqlx::query("DELETE FROM provider_cooldown WHERE label = ? AND until_ms = ?")
+                .bind(label)
+                .bind(probe_until)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(cleared)
+    }
+
     pub async fn clear_quota_exhausted(&self, label: &str, period: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE usage SET exhausted = 0, exhausted_kind = NULL

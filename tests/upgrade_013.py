@@ -5,6 +5,7 @@ The TOML and DDL below are copied from tag v0.1.13 (src/config.rs and
 src/usage.rs::Store::open).  Keep this fixture self-contained: release
 verification must not depend on Git history or a downloaded old binary.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -99,10 +100,16 @@ def wait_for_mcp(process):
     }
 
 
-def start_current(binary, home):
-    env = dict(os.environ, FETCHIRA_HOME=str(home), RUST_LOG="off")
-    for name in ("FETCHIRA_MASTER_KEY", "FETCHIRA_MASTER_KEY_FILE"):
+def isolated_env(home):
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home),
+               XDG_CONFIG_HOME=str(home / "config"), FETCHIRA_HOME=str(home), RUST_LOG="off")
+    for name in ("FETCHIRA_MASTER_KEY", "FETCHIRA_MASTER_KEY_FILE", "CODEX_HOME"):
         env.pop(name, None)
+    return env
+
+
+def start_current(binary, home):
+    env = isolated_env(home)
     process = subprocess.Popen(
         [str(binary), "serve"], cwd=home, env=env, stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
@@ -138,7 +145,9 @@ def legacy_queries(db):
 
 
 def main():
-    binary = Path(__file__).resolve().parents[1] / "target/debug/fetchira"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/fetchira")
+    binary = parser.parse_args().binary.resolve()
     assert binary.is_file(), "run `cargo build --locked` first"
     sleep = shutil.which("sleep")
     assert sleep, "the upgrade fixture needs the standard sleep utility"
@@ -185,7 +194,7 @@ def main():
             before_blocked = config.read_bytes()
             blocked = subprocess.run(
                 [str(binary), "add", "serper", "--label", "must-not-save", "--key", "fixture-key"],
-                cwd=home, env=dict(os.environ, FETCHIRA_HOME=str(home), RUST_LOG="off"),
+                cwd=home, env=isolated_env(home),
                 capture_output=True, text=True, timeout=15,
             )
             assert blocked.returncode != 0
@@ -223,7 +232,7 @@ def main():
             before_blocked = config.read_bytes()
             blocked = subprocess.run(
                 [str(binary), "add", "serper", "--label", "must-not-save", "--key", "fixture-key"],
-                cwd=home, env=dict(os.environ, FETCHIRA_HOME=str(home), RUST_LOG="off"),
+                cwd=home, env=isolated_env(home),
                 capture_output=True, text=True, timeout=15,
             )
             assert blocked.returncode != 0 and "restart older Fetchira dashboards" in blocked.stderr, (blocked.returncode, blocked.stderr)
