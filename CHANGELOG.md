@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.13...v0.1.14) - 2026-09-11
+
+### Added
+
+- unify hosted CLI and agent setup
+- add CLI tools and harden hosted routing
+- *(deploy)* ship self-contained Chrome image
+- *(hosted)* add private MCP server and dashboard
+
+### Fixed
+
+- preserve data and agent integrations during upgrades
+- enforce recovery cooldown during quota reservation
+- harden hosted setup, updates and documentation
+- *(overview)* sum per-provider quotas and share cube bars
+- *(store)* open v1 schema while peers still run
+- *(accounts)* hide soft quota without a live total
+- *(grok)* finish login through x.ai MFA
+- *(grok)* load live plan and quotas from grok.com
+- *(hosted)* set admin password and show ChatGPT plan
+
 ## [0.1.13](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.12...v0.1.13) - 2026-08-03
 
 ### Added
