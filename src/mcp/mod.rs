@@ -448,8 +448,57 @@ fn inline_artifact(img: &crate::providers::OutImage) -> Content {
     }
 }
 
+fn update_error() -> ErrorData {
+    ErrorData::internal_error(
+        crate::instances::UPDATING,
+        Some(serde_json::json!({"reason":"fetchira_updating","retryable":true})),
+    )
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Fetchira {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let home = crate::cli::home();
+        let http = context.extensions.get::<http::request::Parts>();
+        let hosted_cancel = context
+            .extensions
+            .get::<tokio_util::sync::CancellationToken>()
+            .cloned()
+            .or_else(|| {
+                http.and_then(|parts| {
+                    parts
+                        .extensions
+                        .get::<tokio_util::sync::CancellationToken>()
+                })
+                .cloned()
+            });
+        let _admission = if http.is_none() {
+            Some(crate::instances::admit_request(&home).map_err(|_| update_error())?)
+        } else {
+            None
+        };
+        let call = self
+            .tool_router
+            .call(rmcp::handler::server::tool::ToolCallContext::new(
+                self, request, context,
+            ));
+        let cancellation = async {
+            match hosted_cancel {
+                Some(token) => token.cancelled().await,
+                None if _admission.is_some() => crate::instances::forced(&home).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! { biased;
+            _ = cancellation => Err(update_error()),
+            result = call => result,
+        }
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("fetchira", env!("CARGO_PKG_VERSION")))

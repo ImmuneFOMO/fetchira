@@ -464,7 +464,6 @@ function HostedAdminFull({
     variant: "primary",
     disabled: busy,
     onClick: async () => {
-      if (!window.confirm('Drain requests and update this server now?')) return;
       setBusy(true);
       try {
         await hostedAdminJSON('/admin/update', {
@@ -480,16 +479,17 @@ function HostedAdminFull({
         setBusy(false);
       }
     }
-  }, "Update server"), /*#__PURE__*/React.createElement(HostedButton, {
+  }, "Update after active requests"), /*#__PURE__*/React.createElement(HostedButton, {
     variant: "secondary",
     disabled: busy,
     onClick: async () => {
+      if (!window.confirm('Force update now? Active MCP requests may be interrupted.')) return;
       setBusy(true);
       try {
         await hostedAdminJSON('/admin/update', {
           method: 'POST',
           body: {
-            mode: 'idle'
+            mode: 'force'
           }
         });
         await refresh();
@@ -499,7 +499,7 @@ function HostedAdminFull({
         setBusy(false);
       }
     }
-  }, "Update when idle"))), modal === 'key' && /*#__PURE__*/React.createElement(HostedAdminModal, {
+  }, "Force update now"))), modal === 'key' && /*#__PURE__*/React.createElement(HostedAdminModal, {
     title: "Create API key",
     onClose: () => setModal(null)
   }, /*#__PURE__*/React.createElement("form", {

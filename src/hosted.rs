@@ -54,7 +54,7 @@ struct HostedRequestLease {
     key_id: String,
     started: Instant,
     status: Option<tokio::sync::oneshot::Receiver<u16>>,
-    _global: tokio::sync::OwnedSemaphorePermit,
+    _global: Option<tokio::sync::OwnedSemaphorePermit>,
     _key: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -63,12 +63,14 @@ impl Drop for HostedRequestLease {
         let Some(status) = self.status.take() else {
             return;
         };
+        let permit = self._global.take();
         let store = self.store.clone();
         let request_id = self.request_id.clone();
         let key_id = self.key_id.clone();
         let latency_ms = self.started.elapsed().as_millis() as i64;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                let _permit = permit;
                 let status = status.await.unwrap_or(500) as i64;
                 let _ = store
                     .log_request(&request_id, &key_id, status, latency_ms)
@@ -79,39 +81,62 @@ impl Drop for HostedRequestLease {
 }
 
 pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
+    let updates = crate::hosted_update::UpdateState::load(home)?;
+    let result = run_inner(home, bind, updates.clone()).await;
+    if let Err(error) = &result {
+        if updates.rejecting_requests().await {
+            let _ = updates.set("startup_failed", Some(error.to_string())).await;
+        }
+    }
+    result
+}
+
+async fn run_inner(
+    home: &std::path::Path,
+    bind: &str,
+    updates: crate::hosted_update::UpdateState,
+) -> anyhow::Result<()> {
+    updates.validate_startup().await?;
     crate::web::require_browser()?;
     let config_path = home.join("fetchira.toml");
     let cfg = config::load_hosted(&config_path)?;
     let db_path = config::resolve_db(home, &cfg.db_path);
+    crate::hosted_update::check_database(&db_path).await?;
     let store = Store::open(&db_path).await?;
     let router = Arc::new(Router::build(cfg, store.clone()).await?);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    updates.startup_complete().await?;
     let shared_router = Arc::new(tokio::sync::RwLock::new(router.clone()));
-    {
-        let home = home.to_path_buf();
-        let store = store.clone();
-        tokio::spawn(async move {
-            cli::backfill_identities(&home, &store).await;
-        });
-    }
     let state = HostedState {
         router: shared_router.clone(),
         store: store.clone(),
         active: Arc::new(tokio::sync::Semaphore::new(64)),
         key_active: Default::default(),
         mcp_sessions: Default::default(),
-        updates: Default::default(),
+        updates,
         home: home.to_path_buf(),
         db_path,
     };
 
+    {
+        let home = home.to_path_buf();
+        let store = store.clone();
+        spawn_background(&state, async move {
+            cli::backfill_identities(&home, &store).await;
+        });
+    }
+
     // Keep provider limits and balances warm so the hosted dashboard's cached snapshot
     // resolves its loading state without blocking every poll on provider network calls.
     {
-        let shared_router = shared_router.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             loop {
-                let router = shared_router.read().await.clone();
-                router.warm().await;
+                let router = state.router.read().await.clone();
+                background_work(&state, async move {
+                    router.warm().await;
+                })
+                .await;
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
@@ -134,7 +159,7 @@ pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
             axum::response::Redirect::temporary("/admin")
         }))
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
-        .route("/readyz", get(|| async { Json(json!({"ready": true})) }))
+        .route("/readyz", get(|State(st): State<HostedState>| async move { if st.updates.rejecting_requests().await { maintenance_response() } else { Json(json!({"ready": true})).into_response() } }))
         .route("/version", get(move || async move {
             Json(json!({"server_version": version, "protocol_version": PROTOCOL_VERSION, "schema_version": crate::usage::SCHEMA, "min_client_schema_version": 1, "max_client_schema_version": crate::usage::SCHEMA}))
         }))
@@ -180,7 +205,6 @@ pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
         .fallback(hosted_static)
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!(
         "fetchira hosted server listening on http://{}",
         listener.local_addr()?
@@ -189,6 +213,30 @@ pub async fn run(home: &std::path::Path, bind: &str) -> anyhow::Result<()> {
         .with_graceful_shutdown(async move { cancellation.cancelled().await })
         .await?;
     Ok(())
+}
+
+async fn background_work(st: &HostedState, work: impl std::future::Future<Output = ()>) {
+    if st.updates.rejecting_requests().await {
+        return;
+    }
+    let Ok(_permit) = st.active.clone().try_acquire_owned() else {
+        return;
+    };
+    if st.updates.rejecting_requests().await {
+        return;
+    }
+    let cancellation = st.updates.token().await;
+    tokio::select! { _ = work => (), _ = cancellation.cancelled() => () }
+}
+
+fn spawn_background(
+    st: &HostedState,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let st = st.clone();
+    tokio::spawn(async move {
+        background_work(&st, work).await;
+    });
 }
 
 async fn current_router(st: &HostedState) -> Arc<Router> {
@@ -202,7 +250,7 @@ async fn rebuild_router(st: &HostedState) {
     if let Ok(router) = Router::build(cfg, st.store.clone()).await {
         let router = Arc::new(router);
         *st.router.write().await = router.clone();
-        tokio::spawn(async move {
+        spawn_background(st, async move {
             router.warm().await;
         });
     }
@@ -808,7 +856,7 @@ async fn admin_provider_session(
             let store = st.store.clone();
             let raw = req.session.clone();
             let lab = label.clone();
-            tokio::spawn(async move {
+            spawn_background(&st, async move {
                 cli::record_identity(&store, provider, &lab, &raw, None).await;
             });
             let _ = st
@@ -1270,7 +1318,7 @@ async fn challenge_upload(
                     let store = st.store.clone();
                     let raw = req.session.clone();
                     let lab = label.clone();
-                    tokio::spawn(async move {
+                    spawn_background(&st, async move {
                         cli::record_identity(&store, kind, &lab, &raw, None).await;
                     });
                 }
@@ -1638,11 +1686,17 @@ async fn admin_start_update(
     if req
         .mode
         .as_deref()
-        .is_some_and(|mode| !matches!(mode, "idle" | "now"))
+        .is_some_and(|mode| !matches!(mode, "idle" | "now" | "force"))
     {
-        return (StatusCode::BAD_REQUEST, "mode must be now or idle").into_response();
+        return (StatusCode::BAD_REQUEST, "mode must be idle, now, or force").into_response();
     }
-    if st.updates.start().await.is_none() {
+    let force = req.mode.as_deref() == Some("force");
+    if !st
+        .updates
+        .start(if force { "force" } else { "drain" })
+        .await
+        .unwrap_or(false)
+    {
         return (StatusCode::CONFLICT, "update already running").into_response();
     }
     let when_idle = req.when_idle || req.mode.as_deref() == Some("idle");
@@ -1652,7 +1706,13 @@ async fn admin_start_update(
             "admin",
             "server.update",
             None,
-            Some(if when_idle { "when_idle" } else { "now" }),
+            Some(if force {
+                "force"
+            } else if when_idle {
+                "when_idle"
+            } else {
+                "now"
+            }),
         )
         .await;
     let state = st.clone();
@@ -1661,21 +1721,18 @@ async fn admin_start_update(
             &state.home,
             &state.db_path,
             state.active.clone(),
-            when_idle,
+            &state.updates,
+            &state.store,
+            force,
         )
         .await;
-        match result {
-            Ok(message) => {
-                state
-                    .updates
-                    .finish("restart_required", Some(message))
-                    .await;
-                // Docker/systemd owns the process lifecycle. Exit after the response has had a
-                // chance to reach the admin client so the supervisor starts the replaced binary.
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                std::process::exit(75);
+        if let Err(error) = result {
+            if matches!(
+                state.updates.get().await.status.as_str(),
+                "queued" | "draining" | "forcing"
+            ) {
+                let _ = state.updates.set("failed", Some(error.to_string())).await;
             }
-            Err(e) => state.updates.finish("failed", Some(e.to_string())).await,
         }
     });
     (
@@ -1772,13 +1829,51 @@ pub async fn create_key(
     Ok(())
 }
 
+fn maintenance_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "5")],
+        crate::hosted_update::UPDATE_MESSAGE,
+    )
+        .into_response()
+}
+
 async fn authenticate(
     State(state): State<HostedState>,
     mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if !req.uri().path().starts_with("/mcp") {
+    let path = req.uri().path();
+    let health = matches!(path, "/healthz" | "/readyz" | "/version" | "/admin/update");
+    let api = path.starts_with("/mcp")
+        || path.starts_with("/admin/")
+        || path.starts_with("/login-challenges/")
+        || path == "/usage"
+        || path == "/auth/check"
+        || path == "/remote/check";
+    // The same permit covers administrative mutations and reads that refresh cached state.
+    // Acquire synchronously, then recheck the gate: no request slips behind the drain barrier.
+    if api && !health && !path.starts_with("/mcp") {
+        if state.updates.rejecting_requests().await {
+            return maintenance_response();
+        }
+        let Ok(_permit) = state.active.clone().try_acquire_owned() else {
+            return maintenance_response();
+        };
+        if state.updates.rejecting_requests().await {
+            return maintenance_response();
+        }
+        let token = state.updates.token().await;
+        return tokio::select! {
+            response = next.run(req) => response,
+            _ = token.cancelled() => maintenance_response(),
+        };
+    }
+    if !path.starts_with("/mcp") {
         return next.run(req).await;
+    }
+    if state.updates.rejecting_requests().await {
+        return maintenance_response();
     }
     let Some(value) = req
         .headers()
@@ -1834,6 +1929,23 @@ async fn authenticate(
             return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
         }
     }
+    let global_permit = match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        state.active.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(p)) => p,
+        _ => {
+            if let Some(response) = forward_cancellation(req, next).await {
+                return response;
+            }
+            return rate_limited("server concurrency limit exceeded", 1, None);
+        }
+    };
+    if state.updates.rejecting_requests().await {
+        return maintenance_response();
+    }
     let request_id = format!(
         "{}-{}",
         std::process::id(),
@@ -1868,21 +1980,7 @@ async fn authenticate(
             return (StatusCode::SERVICE_UNAVAILABLE, "quota store unavailable").into_response();
         }
     };
-    let global_permit = match tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        state.active.clone().acquire_owned(),
-    )
-    .await
-    {
-        Ok(Ok(p)) => p,
-        _ => {
-            let _ = state.store.cancel_request(&request_id, &key.id).await;
-            if let Some(response) = forward_cancellation(req, next).await {
-                return response;
-            }
-            return rate_limited("server concurrency limit exceeded", 1, Some(quota));
-        }
-    };
+    req.extensions_mut().insert(state.updates.token().await);
     let key_sem = {
         let mut active = state.key_active.lock().await;
         active
@@ -1897,7 +1995,6 @@ async fn authenticate(
     let key_permit = match key_sem.try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
-            drop(global_permit);
             let _ = state.store.cancel_request(&request_id, &key.id).await;
             if let Some(response) = forward_cancellation(req, next).await {
                 return response;
@@ -1915,7 +2012,7 @@ async fn authenticate(
         key_id: key.id.clone(),
         started,
         status: Some(status_rx),
-        _global: global_permit,
+        _global: Some(global_permit),
         _key: key_permit,
     }));
     let response = crate::usage::HOSTED_REQUEST_ID

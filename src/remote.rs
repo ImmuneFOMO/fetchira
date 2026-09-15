@@ -203,6 +203,7 @@ pub async fn validate_config(cfg: &Config) -> anyhow::Result<String> {
 /// The hosted connection is initialized independently; the local initialize request is answered
 /// from the hosted server's negotiated info instead of being sent a second time upstream.
 pub async fn serve_stdio(cfg: &Config) -> anyhow::Result<()> {
+    let _run = crate::instances::register(&crate::cli::home(), "mcp");
     let remote = ().serve(transport(cfg)?).await?;
     let info = remote
         .peer()
@@ -234,6 +235,9 @@ impl Service<RoleServer> for StdioBridge {
         if matches!(request, ClientRequest::InitializeRequest(_)) {
             return Ok(ServerResult::InitializeResult(self.info.clone()));
         }
+        let home = crate::cli::home();
+        let _admission = crate::instances::admit_request(&home)
+            .map_err(|_| ErrorData::internal_error(crate::instances::UPDATING, None))?;
         let image_path = match &request {
             ClientRequest::CallToolRequest(call) if call.params.name.as_ref() == "create_image" => {
                 call.params
@@ -245,11 +249,10 @@ impl Service<RoleServer> for StdioBridge {
             }
             _ => None,
         };
-        let result = self
-            .peer
-            .send_request(request)
-            .await
-            .map_err(remote_error)?;
+        let result = tokio::select! { biased;
+            _ = crate::instances::forced(&home) => return Err(ErrorData::internal_error(crate::instances::UPDATING, None)),
+            result = self.peer.send_request(request) => result.map_err(remote_error)?,
+        };
         Ok(match (image_path, result) {
             (Some(path), ServerResult::CallToolResult(result)) => {
                 ServerResult::CallToolResult(materialize_remote_artifacts(result, Some(path)))

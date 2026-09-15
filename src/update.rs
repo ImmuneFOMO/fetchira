@@ -105,6 +105,10 @@ async fn finish_in_new_binary(home: &Path, binary: &str) -> anyhow::Result<()> {
     let status = tokio::process::Command::new(binary)
         .arg("--finish-upgrade")
         .env("FETCHIRA_HOME", crate::cli::absolute_path(home))
+        .env(
+            "FETCHIRA_UPDATE_TOKEN",
+            crate::instances::update_token(home).unwrap_or_default(),
+        )
         .status()
         .await
         .context("updated binary could not finish agent setup")?;
@@ -329,53 +333,121 @@ pub enum Outcome {
     },
 }
 
-/// The `schema-version` release asset, or None when the release predates it (= no break).
-async fn fetch_schema(client: &reqwest::Client, tag: &str) -> Option<i64> {
-    // Test hook: lets the blocked flow be exercised before a real schema bump exists.
-    if let Ok(v) = std::env::var("FETCHIRA_REMOTE_SCHEMA") {
-        return v.parse().ok();
-    }
-    let url = format!("https://github.com/{REPO}/releases/download/{tag}/schema-version");
-    let resp = client.get(url).send().await.ok()?.error_for_status().ok()?;
-    resp.text().await.ok()?.trim().parse().ok()
+/// Local CLI/UI update. Stage first, drain admitted work, stop positively identified peers,
+/// back up the database and binary, then install and run the new migration before reopening.
+pub async fn perform(home: &Path, force: bool) -> anyhow::Result<Outcome> {
+    perform_with_store(home, force, None).await
 }
 
-/// Download the latest release for this platform and replace the binary in place.
-/// Shared by `fetchira update`, the dashboard's Update button, and the idle waiter
-/// (`force` skips the schema gate — the waiter only runs once every process has exited).
-pub async fn perform(home: &Path, force: bool) -> anyhow::Result<Outcome> {
+pub async fn perform_with_store(
+    home: &Path,
+    force: bool,
+    store: Option<&crate::usage::Store>,
+) -> anyhow::Result<Outcome> {
+    let Some(staged) = stage(home).await? else {
+        return Ok(Outcome::UpToDate);
+    };
+    let peers = crate::instances::running_in_home(home, &[std::process::id()]);
+    let legacy: Vec<_> = peers
+        .into_iter()
+        .filter(|p| !p.supports_update_control)
+        .collect();
+    if !force && !legacy.is_empty() {
+        return Ok(Outcome::Blocked {
+            latest: staged.version.clone(),
+            instances: legacy,
+        });
+    }
+    if is_brew_managed() {
+        return upgrade_with_brew().await;
+    }
+    let mut guard = crate::instances::UpdateGuard::acquire(home, force)?;
+    if force {
+        // Cooperative calls return the update reason immediately; legacy calls can only disconnect.
+        let _ = guard.drain(Duration::from_secs(5)).await;
+        crate::instances::stop_for_update(home, &[std::process::id()]).await?;
+        guard.drain(Duration::from_secs(5)).await?;
+    } else {
+        guard.drain(Duration::from_secs(3600)).await?;
+        crate::instances::stop_for_update(home, &[std::process::id()]).await?;
+    }
+    let bin = crate::cli::installation_binary()?;
+    let cfg = crate::config::load(
+        home.join("fetchira.toml")
+            .to_str()
+            .context("invalid config path")?,
+    )?;
+    let db = crate::config::resolve_db(home, &cfg.db_path);
+    if let Some(store) = store {
+        // A closed pool cannot be reopened by dropping maintenance. Restart is required on error.
+        guard.keep_closed();
+        store.close().await;
+    }
+    let backup = if Path::new(&db).exists() {
+        Some(crate::hosted_update::backup_db(home, &db).await?)
+    } else {
+        None
+    };
+    let previous = home.join("update-previous-binary");
+    std::fs::copy(&bin, &previous).context("could not back up the current binary")?;
+    crate::config::write_atomic(&home.join("update-recovery.json"), &serde_json::json!({"version":staged.version,"binary":bin,"previous":previous,"database":db,"backup":backup,"phase":"installing"}).to_string(), true)?;
+    guard.keep_closed();
+    install(&staged)?;
+    let result = finish_in_new_binary(home, &bin).await;
+    if let Err(error) = result {
+        // New child has exited; keep the backup/state available and close admission for recovery.
+        guard.keep_closed();
+        anyhow::bail!(
+            "Fetchira installed but migration failed: {error}; recovery state: {}",
+            home.join("update-recovery.json").display()
+        );
+    }
+    std::fs::remove_file(home.join("update-recovery.json"))?;
+    guard.reopen();
+    Ok(Outcome::Updated(staged.version.clone()))
+}
+
+/// A verified release staged in a private temporary directory.  Hosted maintenance uses this
+/// to download and validate before it stops accepting requests.
+pub struct StagedUpdate {
+    pub version: String,
+    binary: PathBuf,
+    dir: PathBuf,
+}
+
+impl Drop for StagedUpdate {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+pub async fn stage(home: &Path) -> anyhow::Result<Option<StagedUpdate>> {
     let client = client(Duration::from_secs(60)).context("could not build http client")?;
     let (tag, latest) = fetch_latest(&client)
         .await
         .context("could not check the latest release")?;
     write_cache(home, &latest.to_string());
     if latest <= current() {
-        return Ok(Outcome::UpToDate);
+        return Ok(None);
     }
-    if !force {
-        if let Some(remote) = fetch_schema(&client, &tag).await {
-            if remote > crate::usage::SCHEMA {
-                let instances = crate::instances::running(home, &[std::process::id()]);
-                if !instances.is_empty() {
-                    return Ok(Outcome::Blocked {
-                        latest: latest.to_string(),
-                        instances,
-                    });
-                }
-            }
-        }
-    }
-    if is_brew_managed() {
-        return upgrade_with_brew().await;
-    }
-    let triple = target_triple().context(
-        "no prebuilt binary for this platform — reinstall via install.sh or `cargo install`",
-    )?;
+    let triple = target_triple().context("no prebuilt binary for this platform")?;
     let dir = create_update_dir()?;
-    let res = download_and_swap(&client, &tag, triple, &dir).await;
-    let _ = std::fs::remove_dir_all(&dir); // clean up on success and failure alike
-    res?;
-    Ok(Outcome::Updated(latest.to_string()))
+    let binary = match stage_download(&client, &tag, triple, &dir).await {
+        Ok(binary) => binary,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+    };
+    Ok(Some(StagedUpdate {
+        version: latest.to_string(),
+        binary,
+        dir,
+    }))
+}
+
+pub fn install(staged: &StagedUpdate) -> anyhow::Result<()> {
+    self_replace::self_replace(&staged.binary).context("could not replace Fetchira binary")
 }
 
 fn create_update_dir() -> anyhow::Result<PathBuf> {
@@ -419,81 +491,46 @@ pub fn pending(home: &Path) -> Option<serde_json::Value> {
     Some(v)
 }
 
-/// `fetchira update --when-idle`: wait until every other fetchira process has exited, then
-/// update. Spawned detached by the dashboard; runs in the foreground from a terminal.
+/// Compatibility alias: wait for active requests, not the lifetime of MCP processes.
 pub async fn wait_idle(home: &Path) -> anyhow::Result<()> {
-    let binary = crate::cli::installation_binary()?;
-    if pending(home).is_some() {
-        println!("an idle update is already pending");
-        return Ok(());
-    }
-    let client = client(Duration::from_secs(10)).context("could not build http client")?;
-    let (_, latest) = fetch_latest(&client)
-        .await
-        .context("could not check the latest release")?;
-    if latest <= current() {
-        println!("already up to date");
-        return Ok(());
-    }
-    let me = std::process::id();
-    std::fs::write(
-        marker_path(home),
-        serde_json::json!({ "pid": me, "target": latest.to_string() }).to_string(),
-    )?;
-    println!("waiting to update to {latest} until all fetchira processes exit…");
-    let mut last = usize::MAX;
-    let res = loop {
-        let alive = crate::instances::running(home, &[me]);
-        if alive.is_empty() {
-            break perform(home, true).await;
-        }
-        if alive.len() != last {
-            last = alive.len();
-            println!("  {} process(es) still running", alive.len());
-        }
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    };
-    let _ = std::fs::remove_file(marker_path(home));
-    match res? {
-        Outcome::Updated(v) => {
-            println!("updated fetchira to {v}");
-            finish_in_new_binary(home, &binary).await?;
-        }
-        Outcome::UpToDate => println!("already up to date"),
-        _ => {}
-    }
-    Ok(())
+    run(home, std::iter::empty()).await
 }
 
 /// `fetchira update [--when-idle]` — the CLI face of `perform`.
 pub async fn run(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
-    let when_idle = match args.next().as_deref() {
+    let selected = args.next();
+    if selected.as_deref() == Some("--recover") {
+        anyhow::ensure!(args.next().is_none(), "usage: fetchira update --recover");
+        crate::instances::recovery(home).await?;
+        println!("Previous Fetchira binary and database restored. Restart Fetchira and reconnect your MCP servers.");
+        return Ok(());
+    }
+    let mode = match selected.as_deref() {
         None => false,
         Some("--when-idle") => true,
-        Some(_) => anyhow::bail!("usage: fetchira update [--when-idle]"),
+        Some("--force") => false,
+        Some(_) => anyhow::bail!("usage: fetchira update [--when-idle|--force|--recover]"),
     };
+    let force = selected.as_deref() == Some("--force");
     anyhow::ensure!(
         args.next().is_none(),
-        "usage: fetchira update [--when-idle]"
+        "usage: fetchira update [--when-idle|--force|--recover]"
     );
-    if when_idle {
-        return wait_idle(home).await;
-    }
-    let binary = crate::cli::installation_binary()?;
+    let _ = mode;
     println!("fetchira {}", current());
     loop {
-        match perform(home, false).await? {
+        match perform(home, force).await? {
             Outcome::UpToDate => {
                 println!("already up to date");
                 finish_upgrade(home)?;
             }
             Outcome::Updated(v) => {
                 println!("updated fetchira to {v}");
-                finish_in_new_binary(home, &binary).await?;
+                println!("Reconnect Fetchira MCP in your coding tools to load the new version.");
             }
             Outcome::Blocked { latest, instances } => {
                 println!(
-                "fetchira {latest} changes the database format; {} fetchira process(es) are still running:",
+                "Fetchira {latest}: {} legacy process(es) cannot report active requests. Close them, or use --force to interrupt their requests:",
                 instances.len()
             );
                 for i in &instances {
@@ -526,13 +563,12 @@ pub async fn run(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
     Ok(())
 }
 
-/// Download the release tarball for `triple`, verify it, and replace the running binary.
-async fn download_and_swap(
+async fn stage_download(
     client: &reqwest::Client,
     tag: &str,
     triple: &str,
     dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PathBuf> {
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
     let tarball = client
         .get(format!("{base}/fetchira-{triple}.tar.xz"))
@@ -541,22 +577,16 @@ async fn download_and_swap(
         .error_for_status()?
         .bytes()
         .await?;
-
-    // Verify the checksum dist publishes alongside the archive (catches truncated downloads).
     let checksum = client
         .get(format!("{base}/fetchira-{triple}.tar.xz.sha256"))
         .send()
-        .await
-        .context("could not download release checksum")?
-        .error_for_status()
-        .context("release checksum request failed")?
+        .await?
+        .error_for_status()?
         .text()
-        .await
-        .context("could not read release checksum")?;
+        .await?;
     verify_sha256(&tarball, &checksum)?;
-
     let archive = dir.join("fetchira.tar.xz");
-    std::fs::write(&archive, &tarball)?;
+    std::fs::write(&archive, tarball)?;
     let extracted = extract(&archive, dir)?;
     finalize(&extracted)?;
     launch_check(
@@ -566,8 +596,7 @@ async fn download_and_swap(
         Duration::from_secs(10),
     )
     .await?;
-    self_replace::self_replace(&extracted)?;
-    Ok(())
+    Ok(extracted)
 }
 
 /// Launch the downloaded binary before replacing the current one. The isolated home and working

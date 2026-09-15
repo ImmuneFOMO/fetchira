@@ -135,6 +135,11 @@ async fn usage_has_exhausted_kind(pool: &SqlitePool) -> Result<bool> {
 }
 
 impl Store {
+    /// Close all clones of the hosted pool before update backup and process replacement.
+    pub(crate) async fn close(&self) {
+        self.pool.close().await;
+    }
+
     pub async fn open(path: &str) -> Result<Self> {
         // Changing journal mode or upgrading a legacy schema can return SQLITE_BUSY immediately
         // despite busy_timeout. Another CLI/MCP process may be opening the same database.
@@ -172,11 +177,12 @@ impl Store {
                  restart this MCP server (or update this tool's fetchira) to pick up the new binary"
             )));
         }
-        let peers = if v < SCHEMA && v > 0 {
-            crate::instances::running_in_home(&crate::cli::home(), &[std::process::id()]).len()
-        } else {
-            0
-        };
+        let peers =
+            if v < SCHEMA && v > 0 && !crate::instances::migration_child(&crate::cli::home()) {
+                crate::instances::running_in_home(&crate::cli::home(), &[std::process::id()]).len()
+            } else {
+                0
+            };
         let bump = should_bump_user_version(v, peers);
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS usage (

@@ -45,6 +45,32 @@ async fn main() -> anyhow::Result<()> {
     // stdio). Skip the serve path (explicit `serve`, or bare with piped stdin) and `update`.
     let serving = matches!(cmd.as_deref(), Some("serve"))
         || (cmd.is_none() && !std::io::stdin().is_terminal());
+    // One-shot CLI mutations participate for their whole lifetime; servers use startup and
+    // per-request guards so idle processes never block the update drain.
+    let _command_admission = if !serving
+        && cmd.is_some()
+        && !matches!(
+            cmd.as_deref(),
+            Some(
+                "update"
+                    | "upgrade"
+                    | "--finish-upgrade"
+                    | "--version"
+                    | "-V"
+                    | "ui"
+                    | "server"
+                    | "serve-http"
+            )
+        ) {
+        Some(fetchira::instances::admit_request(&home)?)
+    } else {
+        None
+    };
+    let startup_admission = if serving {
+        Some(fetchira::instances::admit_request(&home)?)
+    } else {
+        None
+    };
     if !serving
         && !matches!(
             cmd.as_deref(),
@@ -194,6 +220,27 @@ async fn main() -> anyhow::Result<()> {
         Some("update" | "upgrade") => return fetchira::update::run(&home, args).await,
         Some("--finish-upgrade") => {
             require_no_args(&mut args, "unexpected upgrade arguments")?;
+            let _admission = if fetchira::instances::migration_child(&home) { None } else { Some(fetchira::instances::admit_request(&home)?) };
+            let cfg = config::load(home.join("fetchira.toml").to_str().unwrap_or("fetchira.toml"))?;
+            if cfg.remote.endpoint.is_none() {
+                let db_path = config::resolve_db(&home, &cfg.db_path);
+                let store = Store::open(&db_path).await?;
+                drop(store);
+                let opts = sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .read_only(true);
+                use sqlx::Connection;
+                let mut conn = sqlx::SqliteConnection::connect_with(&opts).await?;
+                let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+                    .fetch_one(&mut conn)
+                    .await?;
+                anyhow::ensure!(version == fetchira::usage::SCHEMA, "database migration incomplete: schema v{version}, expected v{}", fetchira::usage::SCHEMA);
+                let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+                    .fetch_one(&mut conn)
+                    .await?;
+                anyhow::ensure!(integrity == "ok", "database integrity check failed: {integrity}");
+                sqlx::Connection::close(conn).await?;
+            }
             return fetchira::update::finish_upgrade(&home);
         }
         Some("remote") => match args.next().as_deref() {
@@ -289,6 +336,8 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
         .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira` in a terminal to set up."))?;
     if cfg.remote.endpoint.is_some() {
+        let _run = fetchira::instances::register(&home, "mcp");
+        drop(startup_admission);
         tracing::info!("{}", fetchira::remote::verify(&cfg).await?);
         fetchira::remote::serve_stdio(&cfg).await?;
         return Ok(());
@@ -299,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
     let server = Fetchira::new(Arc::new(router));
     // Registry entry for the schema-aware updater ("which tools still run an old fetchira").
     let _run = fetchira::instances::register(&home, "mcp");
+    drop(startup_admission);
 
     tracing::info!(
         "fetchira ready; serving MCP over stdio (home: {})",

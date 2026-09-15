@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{Path as AxumPath, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -57,9 +58,11 @@ struct AppState {
     port: u16,
     store: Store,
     inner: RwLock<Inner>,
+    update_result: RwLock<Value>,
 }
 
 pub async fn run(home: &Path) -> anyhow::Result<()> {
+    let startup = crate::instances::admit_request(home)?;
     // A missing/empty config is fine: the dashboard opens in its onboarding state and the
     // first `POST /api/account/add` writes fetchira.toml.
     let cfg = cli::load_or_empty(home)?;
@@ -82,10 +85,12 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         port: addr.port(),
         store,
         inner: RwLock::new(inner),
+        update_result: RwLock::new(json!({"status": "idle"})),
     });
 
     // Registry entry for the schema-aware updater (the dashboard holds the DB open too).
     let _run = crate::instances::register(home, "ui");
+    drop(startup);
 
     // Best-effort: fill in account emails for already-logged-in accounts (otherwise missing until
     // their next login) so the dashboard shows them. Background — doesn't delay the first paint.
@@ -93,7 +98,12 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         let home = home.to_path_buf();
         let store = state.store.clone();
         tokio::spawn(async move {
-            cli::backfill_identities(&home, &store).await;
+            if let Ok(_permit) = crate::instances::admit_request(&home) {
+                tokio::select! {
+                    _ = crate::instances::forced(&home) => {},
+                    _ = cli::backfill_identities(&home, &store) => {},
+                }
+            }
         });
     }
 
@@ -116,8 +126,13 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         let st = state.clone();
         tokio::spawn(async move {
             loop {
-                let router = st.inner.read().await.router.clone();
-                router.warm().await;
+                if let Ok(_permit) = crate::instances::admit_request(&st.home) {
+                    let router = st.inner.read().await.router.clone();
+                    tokio::select! {
+                        _ = crate::instances::forced(&st.home) => {},
+                        _ = router.warm() => {},
+                    }
+                }
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
@@ -142,8 +157,14 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
         .route("/api/install/refresh", post(api_refresh_skills))
         .route("/api/install", post(api_install))
         .route("/api/update", post(api_update))
+        .route("/api/update/force", post(api_update_force))
         .route("/api/update/idle", post(api_update_idle))
+        .route("/api/update/status", get(api_update_status))
         .fallback(static_handler)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            update_admission,
+        ))
         .with_state(state);
 
     let url = format!("http://{addr}/ui_kits/dashboard/index.html?token={token}");
@@ -160,6 +181,37 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
     }
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn updating_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({"error": "Fetchira is updating; reconnect MCP and retry"})),
+    )
+        .into_response()
+}
+
+async fn update_admission(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    if !path.starts_with("/api/") || path.starts_with("/api/update") || path == "/api/events" {
+        return next.run(req).await;
+    }
+    let rejected = if req.method() == axum::http::Method::GET {
+        guard(&st, req.headers())
+    } else {
+        guard_mut(&st, req.headers())
+    };
+    if let Some(response) = rejected {
+        return response;
+    }
+    let Ok(_permit) = crate::instances::admit_request(&st.home) else {
+        return updating_response();
+    };
+    tokio::select! {
+        _ = crate::instances::forced(&st.home) => updating_response(),
+        response = next.run(req) => response,
+    }
 }
 
 /// (Re)build the router + per-account metadata from the on-disk config. Called at startup
@@ -1010,36 +1062,9 @@ fn installed_skill_status(home: &Path) -> (Option<&'static str>, Vec<&'static st
     (selected, names)
 }
 
-/// The dashboard's Update button: self-update in place, then tell the user to restart.
-/// Brew-managed installs can't self-replace — the response says to `brew upgrade` instead.
-/// Spawn a detached `fetchira update --when-idle` that outlives this dashboard, logging to
-/// `<home>/update.log`. The waiter updates once every fetchira process (this one too) exits.
+/// Compatibility route: use the same managed graceful update as the main button.
 async fn api_update_idle(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Some(r) = guard_mut(&st, &headers) {
-        return r;
-    }
-    if crate::update::pending(&st.home).is_some() {
-        return Json(json!({ "ok": true, "msg": "an idle update is already pending" }))
-            .into_response();
-    }
-    let spawned = std::env::current_exe()
-        .map_err(anyhow::Error::from)
-        .and_then(|exe| {
-            let log = std::fs::File::create(st.home.join("update.log"))?;
-            let mut cmd = std::process::Command::new(exe);
-            cmd.args(["update", "--when-idle"])
-                .stdin(std::process::Stdio::null())
-                .stdout(log.try_clone()?)
-                .stderr(log);
-            #[cfg(unix)]
-            std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-            cmd.spawn()?;
-            Ok(())
-        });
-    match spawned {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    }
+    api_update_impl(st, headers, false).await
 }
 
 #[cfg(unix)]
@@ -1057,7 +1082,22 @@ fn restart_self(exe: &str, token: &str, port: u16) {
 #[cfg(not(unix))]
 fn restart_self(_exe: &str, _token: &str, _port: u16) {}
 
+async fn api_update_force(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    api_update_impl(st, headers, true).await
+}
+
 async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    api_update_impl(st, headers, false).await
+}
+
+async fn api_update_status(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Some(r) = guard(&st, &headers) {
+        return r;
+    }
+    Json(st.update_result.read().await.clone()).into_response()
+}
+
+async fn api_update_impl(st: Arc<AppState>, headers: HeaderMap, force: bool) -> Response {
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
     }
@@ -1065,34 +1105,42 @@ async fn api_update(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         Ok(binary) => binary,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
-    match crate::update::perform(&st.home, false).await {
-        Ok(crate::update::Outcome::UpToDate) => {
-            Json(json!({ "ok": true, "msg": "already up to date" })).into_response()
-        }
-        Ok(crate::update::Outcome::Blocked { latest, instances }) => Json(json!({
-            "ok": false,
-            "blocked": true,
-            "latest": latest,
-            "instances": instances,
-        }))
-        .into_response(),
-        Ok(crate::update::Outcome::Updated(v)) => {
-            // Flush the response, then re-exec the new binary. Running MCP servers keep the
-            // old inode (in-flight work is safe) and pick the update on their next spawn.
-            let (token, port) = (st.token.clone(), st.port);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                restart_self(&binary, &token, port);
-            });
-            Json(json!({
-                "ok": true,
-                "restarted": true,
-                "msg": format!("updated to {v} — restarting the dashboard…"),
-            }))
-            .into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    let mut status = st.update_result.write().await;
+    if matches!(status["status"].as_str(), Some("running" | "restarting")) {
+        return (StatusCode::CONFLICT, "An update is already running").into_response();
     }
+    *status = json!({"status": "running", "ok": true, "msg": "Preparing update"});
+    drop(status);
+    // The updater must survive an HTTP disconnect while downloading or draining work.
+    tokio::spawn(async move {
+        let result = match crate::update::perform_with_store(&st.home, force, Some(&st.store)).await
+        {
+            Ok(crate::update::Outcome::UpToDate) => {
+                json!({"status": "finished", "ok": true, "msg": "Already up to date"})
+            }
+            Ok(crate::update::Outcome::Blocked { latest, instances }) => json!({
+                "status": "finished", "ok": false, "blocked": true,
+                "latest": latest, "instances": instances,
+            }),
+            Ok(crate::update::Outcome::Updated(version)) => {
+                *st.update_result.write().await = json!({
+                    "status": "restarting", "ok": true, "restarted": true,
+                    "msg": format!("Updated to {version}; restarting dashboard"),
+                });
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                restart_self(&binary, &st.token, st.port);
+                json!({"status": "finished", "ok": false,
+                    "msg": "Update installed, but dashboard restart failed. Restart Fetchira."})
+            }
+            Err(error) => json!({"status": "finished", "ok": false, "msg": error.to_string()}),
+        };
+        *st.update_result.write().await = result;
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"ok": true, "status": "running"})),
+    )
+        .into_response()
 }
 
 /// A capability-appropriate probe call for a provider (real request → counts against quota,
