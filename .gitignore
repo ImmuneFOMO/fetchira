@@ -17,6 +17,15 @@ usage.db-wal
 # scratch
 scratchpad/
 
+# local video / demo production
+fetchira-demo/
+fetchira-hero/
+fetchira-shotcraft/
+.agents/
+skills-lock.json
+/out/
+caption-*.png
+
 # macOS / editors
 .DS_Store
 *.bak

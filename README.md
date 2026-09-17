@@ -1,4 +1,4 @@
-![Fetchira](docs/fetchira.gif)
+![Fetchira](docs/fetchira.webp)
 
 # Fetchira
 
