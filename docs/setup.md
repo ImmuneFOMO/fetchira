@@ -73,6 +73,7 @@ Every provider is optional. Start with one or two that match the job, then add m
 | `gdelt` | None | News article search | [gdeltproject.org](https://www.gdeltproject.org) |
 | `tinyfish` | API key | Search, page reads and deep research | [tinyfish.ai](https://tinyfish.ai) |
 | `linkup` | API key | Search, page reads and deep research | [app.linkup.so](https://app.linkup.so) |
+| `you` | API key | Search, page reads and deep research | [you.com](https://you.com/platform) |
 | `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
 | `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
 | `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |

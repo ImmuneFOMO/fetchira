@@ -86,6 +86,11 @@ provider = "linkup"
 label = "linkup-1"
 api_key = "env:LINKUP_API_KEY"
 
+[[account]]
+provider = "you"
+label = "you-1"
+api_key = "env:YOU_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

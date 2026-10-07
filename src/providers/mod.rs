@@ -24,6 +24,7 @@ mod serper;
 mod steel;
 mod tavily;
 mod tinyfish;
+mod you;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +41,7 @@ pub enum ProviderKind {
     Gdelt,
     Tinyfish,
     Linkup,
+    You,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -163,6 +165,7 @@ impl ProviderKind {
             ProviderKind::Gdelt => "gdelt",
             ProviderKind::Tinyfish => "tinyfish",
             ProviderKind::Linkup => "linkup",
+            ProviderKind::You => "you",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -183,6 +186,7 @@ impl ProviderKind {
             ProviderKind::Gdelt => "https://api.gdeltproject.org",
             ProviderKind::Tinyfish => "https://api.search.tinyfish.ai",
             ProviderKind::Linkup => "https://api.linkup.so",
+            ProviderKind::You => "https://ydc-index.io",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -203,7 +207,7 @@ impl ProviderKind {
                 | (Keenable, Search | Read)
                 | (Jina, Read)
                 | (Openalex | Gdelt, Search)
-                | (Tinyfish | Linkup, Search | Read | DeepResearch)
+                | (Tinyfish | Linkup | You, Search | Read | DeepResearch)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
@@ -256,6 +260,7 @@ impl ProviderKind {
             ProviderKind::Gdelt => 1000,
             ProviderKind::Tinyfish => 1000,
             ProviderKind::Linkup => 4000,
+            ProviderKind::You => 20_000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -270,6 +275,7 @@ impl ProviderKind {
             | ProviderKind::Parallel
             | ProviderKind::Exa
             | ProviderKind::Steel
+            | ProviderKind::You
             | ProviderKind::Jina => Reset::Once,
             ProviderKind::Openalex | ProviderKind::Gdelt | ProviderKind::Tinyfish => Reset::Daily,
             _ => Reset::Monthly,
@@ -304,7 +310,7 @@ impl ProviderKind {
         use ProviderKind::*;
         &[
             Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, Gdelt,
-            Tinyfish, Linkup, GeminiWeb, GrokWeb, ChatgptWeb,
+            Tinyfish, Linkup, You, GeminiWeb, GrokWeb, ChatgptWeb,
         ]
     }
 
@@ -323,6 +329,7 @@ impl ProviderKind {
             ProviderKind::Gdelt => "global news article search, no key",
             ProviderKind::Tinyfish => "search + page fetch + deep research, free daily allowance",
             ProviderKind::Linkup => "search + page fetch + async deep research on a $ balance",
+            ProviderKind::You => "search + page contents + deep research on a $ credit",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -345,6 +352,7 @@ impl ProviderKind {
             ProviderKind::Openalex => "https://openalex.org/settings/api",
             ProviderKind::Tinyfish => "https://tinyfish.ai",
             ProviderKind::Linkup => "https://app.linkup.so",
+            ProviderKind::You => "https://you.com/platform",
             _ => "",
         }
     }
@@ -367,6 +375,7 @@ impl ProviderKind {
             ProviderKind::Linkup => {
                 "$20 credit, topped back up to $20 / month · eligibility applies"
             }
+            ProviderKind::You => "$100 credit · one-time",
             _ => "",
         }
     }
@@ -378,14 +387,14 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
         Capability::Search => &[
-            Tavily, Serper, Exa, Parallel, Keenable, Tinyfish, Linkup, GeminiWeb, GrokWeb,
+            Tavily, Serper, Exa, Parallel, Keenable, Tinyfish, Linkup, You, GeminiWeb, GrokWeb,
             ChatgptWeb,
         ],
         Capability::Read => &[
-            Firecrawl, Tavily, Serper, Exa, Keenable, Jina, Tinyfish, Linkup,
+            Firecrawl, Tavily, Serper, Exa, Keenable, Jina, Tinyfish, Linkup, You,
         ],
         Capability::DeepResearch => &[
-            GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish, Linkup,
+            GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish, Linkup, You,
         ],
         Capability::Browser => &[Steel],
         Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
@@ -459,7 +468,7 @@ pub fn niche_native(kind: ProviderKind, cap: Capability, input: &Input) -> Optio
         Keenable => !topic && (input.domains.is_none() || keenable::site(input).is_some()),
         Openalex => !domains,
         Gdelt => !academic,
-        Linkup => !topic,
+        Linkup | You => !topic,
         // web sessions + read/browser backends: everything is prose/rewrite
         _ => false,
     })
@@ -611,6 +620,18 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "search(query=\"rust release notes\", provider=\"linkup\", domains=[\"blog.rust-lang.org\"])",
                 "read(url=\"https://react.dev\", provider=\"linkup\", mode=\"js\")",
                 "deep_research(query=\"HTTP/3 adoption in 2026\", provider=\"linkup\")",
+            ],
+        },
+        You => ProviderExtras {
+            niches: &[
+                "recency → freshness",
+                "domains → include_domains (excludes only without includes)",
+                "depth=deep → deep research effort (standard → lite)",
+            ],
+            modes: &[],
+            examples: &[
+                "search(query=\"rust async runtimes\", provider=\"you\", recency=\"month\")",
+                "deep_research(query=\"current stable rust version\", provider=\"you\")",
             ],
         },
         GrokWeb => ProviderExtras {
@@ -800,6 +821,7 @@ impl Provider {
             ProviderKind::Gdelt => gdelt::call(b, key, client, cap, input).await,
             ProviderKind::Tinyfish => tinyfish::call(b, key, client, cap, input).await,
             ProviderKind::Linkup => linkup::call(b, key, client, cap, input).await,
+            ProviderKind::You => you::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -904,6 +926,7 @@ impl Provider {
             ProviderKind::Jina => jina::balance(key, client).await.ok(),
             ProviderKind::Openalex => openalex::balance(&self.base, key, client).await.ok(),
             ProviderKind::Linkup => linkup::balance(&self.base, key, client).await.ok(),
+            ProviderKind::You => you::balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }
