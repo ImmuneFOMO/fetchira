@@ -67,7 +67,7 @@ pub struct ReadArgs {
     pub provider: Option<ProviderKind>,
     /// Provider-specific escape hatch: firecrawl "crawl"/"extract", tavily "extract",
     /// serper "scrape", steel "screenshot"/"pdf", jina "screenshot"/"links", linkup "js",
-    /// scrapingant "browser". Call usage(provider=…) for the exact set.
+    /// scrapingant "browser", zenrows "js". Call usage(provider=…) for the exact set.
     pub mode: Option<String>,
 }
 

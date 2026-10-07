@@ -450,7 +450,7 @@ fn provider_group(name: &str) -> &'static str {
     match name {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" | "gdelt"
         | "tinyfish" | "linkup" | "you" | "octen" | "nimble" | "serpapi" | "langsearch" => "search",
-        "firecrawl" | "jina" | "scrapingant" => "read",
+        "firecrawl" | "jina" | "scrapingant" | "zenrows" => "read",
         "steel" => "browser",
         _ => "web",
     }
@@ -475,6 +475,7 @@ fn provider_desc(name: &str) -> &'static str {
         "serpapi" => "Google SERP API",
         "langsearch" => "Web search API",
         "scrapingant" => "Scrape API · headless Chrome",
+        "zenrows" => "Scrape API · anti-bot",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
@@ -989,7 +990,8 @@ async fn admin_account_test(
     let (cap, input) = match kind {
         crate::providers::ProviderKind::Firecrawl
         | crate::providers::ProviderKind::Jina
-        | crate::providers::ProviderKind::Scrapingant => (
+        | crate::providers::ProviderKind::Scrapingant
+        | crate::providers::ProviderKind::Zenrows => (
             crate::providers::Capability::Read,
             crate::providers::Input {
                 url: Some("https://example.com".into()),

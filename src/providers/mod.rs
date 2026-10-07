@@ -30,6 +30,7 @@ mod steel;
 mod tavily;
 mod tinyfish;
 mod you;
+mod zenrows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +53,7 @@ pub enum ProviderKind {
     Serpapi,
     Langsearch,
     Scrapingant,
+    Zenrows,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -181,6 +183,7 @@ impl ProviderKind {
             ProviderKind::Serpapi => "serpapi",
             ProviderKind::Langsearch => "langsearch",
             ProviderKind::Scrapingant => "scrapingant",
+            ProviderKind::Zenrows => "zenrows",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -207,6 +210,7 @@ impl ProviderKind {
             ProviderKind::Serpapi => "https://serpapi.com",
             ProviderKind::Langsearch => "https://api.langsearch.com",
             ProviderKind::Scrapingant => "https://api.scrapingant.com",
+            ProviderKind::Zenrows => "https://api.zenrows.com",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -225,7 +229,7 @@ impl ProviderKind {
                 | (Parallel, Search | DeepResearch)
                 | (Steel, Browser | Read)
                 | (Keenable, Search | Read)
-                | (Jina | Scrapingant, Read)
+                | (Jina | Scrapingant | Zenrows, Read)
                 | (
                     Openalex | Gdelt | Octen | Nimble | Serpapi | Langsearch,
                     Search
@@ -289,6 +293,7 @@ impl ProviderKind {
             ProviderKind::Serpapi => 250,
             ProviderKind::Langsearch => 1000,
             ProviderKind::Scrapingant => 10_000,
+            ProviderKind::Zenrows => 5000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -360,6 +365,7 @@ impl ProviderKind {
             Serpapi,
             Langsearch,
             Scrapingant,
+            Zenrows,
             GeminiWeb,
             GrokWeb,
             ChatgptWeb,
@@ -387,6 +393,7 @@ impl ProviderKind {
             ProviderKind::Serpapi => "Google web, news and Scholar results as JSON",
             ProviderKind::Langsearch => "free web search on a daily token allowance",
             ProviderKind::Scrapingant => "page reads as markdown, plain fetch or headless Chrome",
+            ProviderKind::Zenrows => "page reads as markdown, escalating past anti-bot walls",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -415,6 +422,7 @@ impl ProviderKind {
             ProviderKind::Serpapi => "https://serpapi.com",
             ProviderKind::Langsearch => "https://langsearch.com",
             ProviderKind::Scrapingant => "https://app.scrapingant.com",
+            ProviderKind::Zenrows => "https://www.zenrows.com",
             _ => "",
         }
     }
@@ -443,6 +451,7 @@ impl ProviderKind {
             ProviderKind::Serpapi => "250 free searches / month",
             ProviderKind::Langsearch => "free · daily token allowance, resets 00:00 UTC",
             ProviderKind::Scrapingant => "10,000 credits / month · JS render 10 per read",
+            ProviderKind::Zenrows => "5,000 credits / month · JS render 5 per read",
             _ => "",
         }
     }
@@ -468,6 +477,7 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
             Linkup,
             You,
             Scrapingant,
+            Zenrows,
         ],
         Capability::DeepResearch => &[
             GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish, Linkup, You,
@@ -768,6 +778,14 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "read(url=\"https://react.dev\", provider=\"scrapingant\", mode=\"browser\")",
             ],
         },
+        Zenrows => ProviderExtras {
+            niches: &[],
+            modes: &[("js", "render JavaScript and wait 1.5 s (5 credits)")],
+            examples: &[
+                "read(url=\"https://example.com\", provider=\"zenrows\")",
+                "read(url=\"https://react.dev\", provider=\"zenrows\", mode=\"js\")",
+            ],
+        },
         GrokWeb => ProviderExtras {
             niches: &[],
             modes: &[
@@ -961,6 +979,7 @@ impl Provider {
             ProviderKind::Serpapi => serpapi::call(b, key, client, cap, input).await,
             ProviderKind::Langsearch => langsearch::call(b, key, client, cap, input).await,
             ProviderKind::Scrapingant => scrapingant::call(b, key, client, cap, input).await,
+            ProviderKind::Zenrows => zenrows::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -1068,6 +1087,7 @@ impl Provider {
             ProviderKind::You => you::balance(&self.base, key, client).await.ok(),
             ProviderKind::Serpapi => serpapi::balance(&self.base, key, client).await.ok(),
             ProviderKind::Scrapingant => scrapingant::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Zenrows => zenrows::balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }
