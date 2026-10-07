@@ -16,6 +16,7 @@ mod grok_web;
 mod jina;
 mod keenable;
 pub(crate) mod niche;
+mod openalex;
 mod parallel;
 mod serper;
 mod steel;
@@ -32,6 +33,7 @@ pub enum ProviderKind {
     Steel,
     Keenable,
     Jina,
+    Openalex,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -151,6 +153,7 @@ impl ProviderKind {
             ProviderKind::Steel => "steel",
             ProviderKind::Keenable => "keenable",
             ProviderKind::Jina => "jina",
+            ProviderKind::Openalex => "openalex",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -167,6 +170,7 @@ impl ProviderKind {
             ProviderKind::Steel => "https://api.steel.dev",
             ProviderKind::Keenable => "https://api.keenable.ai",
             ProviderKind::Jina => "https://r.jina.ai",
+            ProviderKind::Openalex => "https://api.openalex.org",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -186,6 +190,7 @@ impl ProviderKind {
                 | (Steel, Browser | Read)
                 | (Keenable, Search | Read)
                 | (Jina, Read)
+                | (Openalex, Search)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
@@ -200,7 +205,11 @@ impl ProviderKind {
 
     /// True when an api key is mandatory; keyless api providers use one only when given.
     pub fn needs_key(self) -> bool {
-        !self.is_web() && !matches!(self, ProviderKind::Keenable | ProviderKind::Jina)
+        !self.is_web()
+            && !matches!(
+                self,
+                ProviderKind::Keenable | ProviderKind::Jina | ProviderKind::Openalex
+            )
     }
 
     /// Api-key providers whose live balance is only readable through their dashboard's cookie session
@@ -222,6 +231,7 @@ impl ProviderKind {
             ProviderKind::Steel => 2000,
             ProviderKind::Keenable => 100_000,
             ProviderKind::Jina => 2500,
+            ProviderKind::Openalex => 100,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -237,6 +247,7 @@ impl ProviderKind {
             | ProviderKind::Exa
             | ProviderKind::Steel
             | ProviderKind::Jina => Reset::Once,
+            ProviderKind::Openalex => Reset::Daily,
             _ => Reset::Monthly,
         }
     }
@@ -263,8 +274,8 @@ impl ProviderKind {
     pub fn all() -> &'static [ProviderKind] {
         use ProviderKind::*;
         &[
-            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, GeminiWeb, GrokWeb,
-            ChatgptWeb,
+            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, GeminiWeb,
+            GrokWeb, ChatgptWeb,
         ]
     }
 
@@ -279,6 +290,7 @@ impl ProviderKind {
             ProviderKind::Steel => "headless-browser page scrape",
             ProviderKind::Keenable => "web search + page fetch, works without a key",
             ProviderKind::Jina => "read any URL as clean markdown, works without a key",
+            ProviderKind::Openalex => "scholarly papers search, works without a key",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -298,6 +310,7 @@ impl ProviderKind {
             ProviderKind::Steel => "https://steel.dev",
             ProviderKind::Keenable => "https://keenable.ai",
             ProviderKind::Jina => "https://jina.ai/reader",
+            ProviderKind::Openalex => "https://openalex.org/settings/api",
             _ => "",
         }
     }
@@ -314,6 +327,7 @@ impl ProviderKind {
             ProviderKind::Steel => "$30 credit · one-time, 90 days",
             ProviderKind::Keenable => "100,000 free / month · keyless 1,000 / hour",
             ProviderKind::Jina => "keyless 20 / min · key adds 10M free tokens, one-time",
+            ProviderKind::Openalex => "keyless ~100 searches / day · free key ~1,000 / day",
             _ => "",
         }
     }
@@ -337,7 +351,8 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
 /// `order(cap)` re-ranked. A user `custom` list (`fetchira priority`) comes first verbatim —
 /// filtered to providers serving the cap, with the remaining built-in order appended — and beats
 /// the niche re-rank, since the user set it explicitly. Otherwise a research niche floats its
-/// native providers: academic → Exa (papers) then Serper (scholar), news → Serper then Tavily.
+/// native providers: academic → OpenAlex, Exa (papers) then Serper (scholar), news → Serper then
+/// Tavily. Niche-only providers absent from the base order (OpenAlex) join only for their niche.
 /// Quota-aware failover still runs within the returned list.
 pub fn order_for(
     cap: Capability,
@@ -361,15 +376,13 @@ pub fn order_for(
     }
     let mut list = order(cap).to_vec();
     let front: &[ProviderKind] = match topic {
-        Some("academic") => &[Exa, Serper],
+        Some("academic") => &[Openalex, Exa, Serper],
         Some("news") => &[Serper, Tavily],
         _ => return list,
     };
-    for &p in front.iter().rev() {
-        if let Some(i) = list.iter().position(|&k| k == p) {
-            list.remove(i);
-            list.insert(0, p);
-        }
+    for &p in front.iter().rev().filter(|p| p.supports(cap)) {
+        list.retain(|&k| k != p);
+        list.insert(0, p);
     }
     list
 }
@@ -397,6 +410,7 @@ pub fn niche_native(kind: ProviderKind, input: &Input) -> Option<bool> {
         // only domains native (source_policy); topic + recency rewrite
         Parallel => !(topic || recency),
         Keenable => !topic && (input.domains.is_none() || keenable::site(input).is_some()),
+        Openalex => !domains,
         // web sessions + read/browser backends: everything is prose/rewrite
         _ => false,
     })
@@ -500,6 +514,16 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             examples: &[
                 "read(url=\"https://example.com\", provider=\"jina\")",
                 "read(url=\"https://example.com\", provider=\"jina\", mode=\"links\")",
+            ],
+        },
+        Openalex => ProviderExtras {
+            niches: &[
+                "topic=academic → routed first; skipped when domains are set",
+                "recency → from_publication_date",
+            ],
+            modes: &[],
+            examples: &[
+                "search(query=\"transformer scaling laws\", provider=\"openalex\", recency=\"year\")",
             ],
         },
         GrokWeb => ProviderExtras {
@@ -685,6 +709,7 @@ impl Provider {
             ProviderKind::Steel => steel::call(b, key, client, cap, input).await,
             ProviderKind::Keenable => keenable::call(b, key, client, cap, input).await,
             ProviderKind::Jina => jina::call(b, key, client, cap, input).await,
+            ProviderKind::Openalex => openalex::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -787,6 +812,7 @@ impl Provider {
             ProviderKind::Firecrawl => firecrawl::balance(&self.base, key, client).await.ok(),
             ProviderKind::Steel => steel::balance(&self.base, key, client).await.ok(),
             ProviderKind::Jina => jina::balance(key, client).await.ok(),
+            ProviderKind::Openalex => openalex::balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }
@@ -957,11 +983,10 @@ mod tests {
 
     #[test]
     fn order_for_floats_niche_providers() {
-        // academic -> Exa then Serper to the front, rest of the order preserved
+        // academic -> OpenAlex (niche-only, inserted) then Exa then Serper, rest preserved
         let acad = order_for(Capability::Search, Some("academic"), &[]);
-        assert_eq!(acad[0], Exa);
-        assert_eq!(acad[1], Serper);
-        assert_eq!(acad.len(), order(Capability::Search).len());
+        assert_eq!(&acad[..3], &[Openalex, Exa, Serper]);
+        assert_eq!(acad.len(), order(Capability::Search).len() + 1);
         // news -> Serper then Tavily
         let news = order_for(Capability::Search, Some("news"), &[]);
         assert_eq!(&news[..2], &[Serper, Tavily]);
@@ -974,10 +999,10 @@ mod tests {
             order_for(Capability::Search, Some("web"), &[]),
             order(Capability::Search)
         );
-        // only reorders providers already present for the cap (Serper isn't a DeepResearch backend)
         let dr = order_for(Capability::DeepResearch, Some("academic"), &[]);
         assert_eq!(dr[0], Exa);
-        assert!(!dr.contains(&Serper));
+        assert!(!dr.contains(&Serper) && !dr.contains(&Openalex));
+        assert!(!order_for(Capability::Search, None, &[]).contains(&Openalex));
     }
 
     #[test]

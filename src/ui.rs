@@ -2059,7 +2059,7 @@ fn mask_proxy(proxy: &str) -> String {
 
 fn group_of(provider: &str) -> (&'static str, &'static str) {
     match provider {
-        "serper" | "tavily" | "exa" | "parallel" | "keenable" => ("search", "Search"),
+        "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" => ("search", "Search"),
         "firecrawl" | "jina" => ("read", "Read / scrape"),
         "steel" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
@@ -2091,6 +2091,7 @@ fn desc_of(provider: &str) -> &'static str {
         "steel" => "Headless browser sessions",
         "keenable" => "Search + fetch API · keyless",
         "jina" => "Reader API · keyless",
+        "openalex" => "Scholarly search API · keyless",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",

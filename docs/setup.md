@@ -69,6 +69,7 @@ Every provider is optional. Start with one or two that match the job, then add m
 | `steel` | API key | Browser and JavaScript page reads | [steel.dev](https://steel.dev) |
 | `keenable` | Optional API key | Search and page reads | [keenable.ai](https://keenable.ai) |
 | `jina` | Optional API key | Page reads | [jina.ai](https://jina.ai/reader) |
+| `openalex` | Optional API key | Academic paper search | [openalex.org](https://openalex.org/settings/api) |
 | `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
 | `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
 | `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |

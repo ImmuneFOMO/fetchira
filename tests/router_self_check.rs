@@ -586,6 +586,42 @@ async fn custom_priority_reorders() {
     );
 }
 
+#[tokio::test]
+async fn academic_domains_skip_openalex() {
+    let oa = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/works"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "results": [{ "id": "https://openalex.org/W1", "display_name": "OPENALEX_HIT" }] }),
+        ))
+        .mount(&oa)
+        .await;
+    let exa = MockServer::start().await;
+    mount_search(&exa, exa_body()).await;
+
+    let store = fresh_store("academic_domains").await;
+    let probe = store.clone();
+    let buckets = vec![
+        bucket(ProviderKind::Openalex, &oa.uri(), "openalex-1"),
+        bucket(ProviderKind::Exa, &exa.uri(), "exa-1"),
+    ];
+    let router = Router::from_parts(buckets, store);
+    let input = Input {
+        topic: Some("academic".into()),
+        domains: Some(vec!["nature.com".into()]),
+        ..query("crispr")
+    };
+    let out = router.call(Capability::Search, &input, None).await.unwrap();
+    assert!(out.text.contains("EXA_HIT"), "got: {}", out.text);
+    assert_eq!(probe.recent_routes(1).await.unwrap()[0].fail_from, None);
+    let plain = Input {
+        domains: None,
+        ..input
+    };
+    let out = router.call(Capability::Search, &plain, None).await.unwrap();
+    assert!(out.text.contains("OPENALEX_HIT"), "got: {}", out.text);
+}
+
 // (f) forcing a provider outside the capability's auto-route order still works (read via serper's
 // scrape endpoint, which the built-in read order doesn't route).
 #[tokio::test]

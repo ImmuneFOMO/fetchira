@@ -300,7 +300,14 @@ impl Router {
         let order = match forced {
             Some(f) if !f.supports(cap) => return Err(Error::Unsupported(f.as_str())),
             Some(f) => vec![f],
-            None => order_for(cap, input.topic.as_deref(), self.priority.for_cap(cap)),
+            None => {
+                let mut order = order_for(cap, input.topic.as_deref(), self.priority.for_cap(cap));
+                // OpenAlex has no host filter and links through doi.org, so it can't honor domains.
+                if input.domains.is_some() {
+                    order.retain(|&k| k != ProviderKind::Openalex);
+                }
+                order
+            }
         };
         for &kind in &order {
             let mut cands: Vec<(usize, i64, String, i64, String, Option<i64>)> = Vec::new();

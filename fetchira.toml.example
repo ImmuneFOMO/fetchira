@@ -63,6 +63,13 @@ provider = "jina"
 label = "jina-1"
 # api_key = "env:JINA_API_KEY"
 
+# openalex serves topic=academic searches; keyless gets ~100/day, a free key ~1,000 (raise quota).
+[[account]]
+provider = "openalex"
+label = "openalex-1"
+# api_key = "env:OPENALEX_API_KEY"
+# quota = 1000
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"
