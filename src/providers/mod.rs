@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Reset;
 use crate::error::{Error, Result};
 
+mod browserless;
 pub(crate) mod chatgpt_browser;
 mod chatgpt_sentinel;
 mod chatgpt_web;
@@ -56,6 +57,7 @@ pub enum ProviderKind {
     Scrapingant,
     Zenrows,
     Hyperbrowser,
+    Browserless,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -187,6 +189,7 @@ impl ProviderKind {
             ProviderKind::Scrapingant => "scrapingant",
             ProviderKind::Zenrows => "zenrows",
             ProviderKind::Hyperbrowser => "hyperbrowser",
+            ProviderKind::Browserless => "browserless",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -215,6 +218,7 @@ impl ProviderKind {
             ProviderKind::Scrapingant => "https://api.scrapingant.com",
             ProviderKind::Zenrows => "https://api.zenrows.com",
             ProviderKind::Hyperbrowser => "https://api.hyperbrowser.ai",
+            ProviderKind::Browserless => "https://production-sfo.browserless.io",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -231,7 +235,7 @@ impl ProviderKind {
                 | (Serper, Search | Read)
                 | (Firecrawl, Search | Read)
                 | (Parallel, Search | DeepResearch)
-                | (Steel | Hyperbrowser, Browser | Read)
+                | (Steel | Hyperbrowser | Browserless, Browser | Read)
                 | (Keenable, Search | Read)
                 | (Jina | Scrapingant | Zenrows, Read)
                 | (
@@ -299,6 +303,7 @@ impl ProviderKind {
             ProviderKind::Scrapingant => 10_000,
             ProviderKind::Zenrows => 5000,
             ProviderKind::Hyperbrowser => 5000,
+            ProviderKind::Browserless => 1000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -373,6 +378,7 @@ impl ProviderKind {
             Scrapingant,
             Zenrows,
             Hyperbrowser,
+            Browserless,
             GeminiWeb,
             GrokWeb,
             ChatgptWeb,
@@ -402,6 +408,7 @@ impl ProviderKind {
             ProviderKind::Scrapingant => "page reads as markdown, plain fetch or headless Chrome",
             ProviderKind::Zenrows => "page reads as markdown, escalating past anti-bot walls",
             ProviderKind::Hyperbrowser => "cloud-browser page reads as markdown",
+            ProviderKind::Browserless => "headless-browser page reads via BrowserQL",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -432,6 +439,7 @@ impl ProviderKind {
             ProviderKind::Scrapingant => "https://app.scrapingant.com",
             ProviderKind::Zenrows => "https://www.zenrows.com",
             ProviderKind::Hyperbrowser => "https://hyperbrowser.ai",
+            ProviderKind::Browserless => "https://www.browserless.io",
             _ => "",
         }
     }
@@ -462,6 +470,7 @@ impl ProviderKind {
             ProviderKind::Scrapingant => "10,000 credits / month · JS render 10 per read",
             ProviderKind::Zenrows => "5,000 credits / month · JS render 5 per read",
             ProviderKind::Hyperbrowser => "5,000 credits · one-time",
+            ProviderKind::Browserless => "1,000 units / month · 2 concurrent",
             _ => "",
         }
     }
@@ -492,7 +501,7 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
         Capability::DeepResearch => &[
             GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish, Linkup, You,
         ],
-        Capability::Browser => &[Steel, Hyperbrowser],
+        Capability::Browser => &[Steel, Hyperbrowser, Browserless],
         Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
     }
 }
@@ -804,6 +813,14 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "read(url=\"https://example.com\", provider=\"hyperbrowser\")",
             ],
         },
+        Browserless => ProviderExtras {
+            niches: &[],
+            modes: &[],
+            examples: &[
+                "browser(url=\"https://react.dev\")",
+                "read(url=\"https://example.com\", provider=\"browserless\")",
+            ],
+        },
         GrokWeb => ProviderExtras {
             niches: &[],
             modes: &[
@@ -999,6 +1016,7 @@ impl Provider {
             ProviderKind::Scrapingant => scrapingant::call(b, key, client, cap, input).await,
             ProviderKind::Zenrows => zenrows::call(b, key, client, cap, input).await,
             ProviderKind::Hyperbrowser => hyperbrowser::call(b, key, client, cap, input).await,
+            ProviderKind::Browserless => browserless::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -1108,6 +1126,7 @@ impl Provider {
             ProviderKind::Scrapingant => scrapingant::balance(&self.base, key, client).await.ok(),
             ProviderKind::Zenrows => zenrows::balance(&self.base, key, client).await.ok(),
             ProviderKind::Hyperbrowser => hyperbrowser::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Browserless => browserless::balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }

@@ -60,8 +60,9 @@ fetchira usage chatgpt_web
 `read --provider firecrawl --mode extract` returns single-page structured JSON. Its `crawl`
 mode only starts a provider job and returns the job ID; Fetchira does not poll crawl jobs.
 
-`browser` returns page content from Steel. It does not control your signed-in browser or
-perform arbitrary clicks. `read` can fall back to browser rendering when content is empty.
+`browser` returns page content from Hyperbrowser, Browserless or Steel. It does not control
+your signed-in browser or perform arbitrary clicks. `read` can fall back to browser rendering
+when content is empty.
 
 ## Sessions and research
 

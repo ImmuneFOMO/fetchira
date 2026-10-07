@@ -128,6 +128,12 @@ provider = "hyperbrowser"
 label = "hyperbrowser-1"
 api_key = "env:HYPERBROWSER_API_KEY"
 
+# browserless free plan runs two browsers at once; a third concurrent call is rate limited.
+[[account]]
+provider = "browserless"
+label = "browserless-1"
+api_key = "env:BROWSERLESS_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

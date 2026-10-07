@@ -81,6 +81,7 @@ Every provider is optional. Start with one or two that match the job, then add m
 | `scrapingant` | API key | Page reads, plain or JavaScript-rendered | [scrapingant.com](https://app.scrapingant.com) |
 | `zenrows` | API key | Page reads past anti-bot walls | [zenrows.com](https://www.zenrows.com) |
 | `hyperbrowser` | API key | Browser and JavaScript page reads | [hyperbrowser.ai](https://hyperbrowser.ai) |
+| `browserless` | API key | Browser and JavaScript page reads | [browserless.io](https://www.browserless.io) |
 | `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
 | `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
 | `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |

@@ -1157,7 +1157,7 @@ fn test_call(kind: ProviderKind) -> (Capability, Input) {
                 ..Default::default()
             },
         ),
-        ProviderKind::Steel | ProviderKind::Hyperbrowser => (
+        ProviderKind::Steel | ProviderKind::Hyperbrowser | ProviderKind::Browserless => (
             Capability::Browser,
             Input {
                 url: Some("https://example.com".to_string()),
@@ -2067,7 +2067,7 @@ fn group_of(provider: &str) -> (&'static str, &'static str) {
             ("search", "Search")
         }
         "firecrawl" | "jina" | "scrapingant" | "zenrows" => ("read", "Read / scrape"),
-        "steel" | "hyperbrowser" => ("browser", "Browser"),
+        "steel" | "hyperbrowser" | "browserless" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
     }
 }
@@ -2112,6 +2112,7 @@ fn desc_of(provider: &str) -> &'static str {
         "scrapingant" => "Scrape API · headless Chrome",
         "zenrows" => "Scrape API · anti-bot",
         "hyperbrowser" => "Cloud browser fetch API",
+        "browserless" => "Headless browser API",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
