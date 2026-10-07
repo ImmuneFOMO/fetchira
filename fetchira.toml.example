@@ -70,6 +70,11 @@ label = "openalex-1"
 # api_key = "env:OPENALEX_API_KEY"
 # quota = 1000
 
+# gdelt serves topic=news searches after serper/tavily; no key, about one request per 5 s.
+[[account]]
+provider = "gdelt"
+label = "gdelt-1"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

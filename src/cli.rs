@@ -149,8 +149,10 @@ pub fn providers() {
             "browser login"
         } else if k.needs_key() {
             "API key"
-        } else {
+        } else if k.takes_key() {
             "optional key"
+        } else {
+            "no key"
         };
         println!("  {:15} {:14} {}", k.as_str(), cred, k.blurb());
     }
@@ -1030,7 +1032,7 @@ async fn add_flow(home: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut api_key = None;
-    if !kind.is_web() {
+    if kind.takes_key() {
         if !kind.signup().is_empty() {
             println!("  get a key: {}", kind.signup());
         }
@@ -2628,5 +2630,11 @@ mod tests {
         assert_eq!(list_remaining(true, true, Some(12)), "12");
         assert_eq!(list_research(true, true, Some((3, 3))), "3/3/day");
         assert_eq!(list_remaining(false, false, Some(2500)), "2500");
+    }
+
+    #[test]
+    fn gdelt_takes_no_key() {
+        assert!(!ProviderKind::Gdelt.takes_key());
+        assert!(ProviderKind::Openalex.takes_key());
     }
 }

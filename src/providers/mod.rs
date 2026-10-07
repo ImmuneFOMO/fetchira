@@ -8,6 +8,7 @@ mod chatgpt_sentinel;
 mod chatgpt_web;
 mod exa;
 mod firecrawl;
+mod gdelt;
 mod gemini_web;
 #[cfg(test)]
 mod grok_browser;
@@ -34,6 +35,7 @@ pub enum ProviderKind {
     Keenable,
     Jina,
     Openalex,
+    Gdelt,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -154,6 +156,7 @@ impl ProviderKind {
             ProviderKind::Keenable => "keenable",
             ProviderKind::Jina => "jina",
             ProviderKind::Openalex => "openalex",
+            ProviderKind::Gdelt => "gdelt",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -171,6 +174,7 @@ impl ProviderKind {
             ProviderKind::Keenable => "https://api.keenable.ai",
             ProviderKind::Jina => "https://r.jina.ai",
             ProviderKind::Openalex => "https://api.openalex.org",
+            ProviderKind::Gdelt => "https://api.gdeltproject.org",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -190,7 +194,7 @@ impl ProviderKind {
                 | (Steel, Browser | Read)
                 | (Keenable, Search | Read)
                 | (Jina, Read)
-                | (Openalex, Search)
+                | (Openalex | Gdelt, Search)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
@@ -208,8 +212,16 @@ impl ProviderKind {
         !self.is_web()
             && !matches!(
                 self,
-                ProviderKind::Keenable | ProviderKind::Jina | ProviderKind::Openalex
+                ProviderKind::Keenable
+                    | ProviderKind::Jina
+                    | ProviderKind::Openalex
+                    | ProviderKind::Gdelt
             )
+    }
+
+    /// Whether an api key is used at all; gdelt never sends one.
+    pub fn takes_key(self) -> bool {
+        !self.is_web() && self != ProviderKind::Gdelt
     }
 
     /// Api-key providers whose live balance is only readable through their dashboard's cookie session
@@ -232,6 +244,7 @@ impl ProviderKind {
             ProviderKind::Keenable => 100_000,
             ProviderKind::Jina => 2500,
             ProviderKind::Openalex => 100,
+            ProviderKind::Gdelt => 1000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -247,7 +260,7 @@ impl ProviderKind {
             | ProviderKind::Exa
             | ProviderKind::Steel
             | ProviderKind::Jina => Reset::Once,
-            ProviderKind::Openalex => Reset::Daily,
+            ProviderKind::Openalex | ProviderKind::Gdelt => Reset::Daily,
             _ => Reset::Monthly,
         }
     }
@@ -274,8 +287,8 @@ impl ProviderKind {
     pub fn all() -> &'static [ProviderKind] {
         use ProviderKind::*;
         &[
-            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, GeminiWeb,
-            GrokWeb, ChatgptWeb,
+            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, Gdelt,
+            GeminiWeb, GrokWeb, ChatgptWeb,
         ]
     }
 
@@ -291,6 +304,7 @@ impl ProviderKind {
             ProviderKind::Keenable => "web search + page fetch, works without a key",
             ProviderKind::Jina => "read any URL as clean markdown, works without a key",
             ProviderKind::Openalex => "scholarly papers search, works without a key",
+            ProviderKind::Gdelt => "global news article search, no key",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -328,6 +342,7 @@ impl ProviderKind {
             ProviderKind::Keenable => "100,000 free / month · keyless 1,000 / hour",
             ProviderKind::Jina => "keyless 20 / min · key adds 10M free tokens, one-time",
             ProviderKind::Openalex => "keyless ~100 searches / day · free key ~1,000 / day",
+            ProviderKind::Gdelt => "free, no key · 1 request / 5 s",
             _ => "",
         }
     }
@@ -351,8 +366,9 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
 /// `order(cap)` re-ranked. A user `custom` list (`fetchira priority`) comes first verbatim —
 /// filtered to providers serving the cap, with the remaining built-in order appended — and beats
 /// the niche re-rank, since the user set it explicitly. Otherwise a research niche floats its
-/// native providers: academic → OpenAlex, Exa (papers) then Serper (scholar), news → Serper then
-/// Tavily. Niche-only providers absent from the base order (OpenAlex) join only for their niche.
+/// native providers: academic → OpenAlex, Exa (papers) then Serper (scholar), news → Serper, Tavily
+/// then GDELT. Niche-only providers absent from the base order (OpenAlex, GDELT) join only for
+/// their niche.
 /// Quota-aware failover still runs within the returned list.
 pub fn order_for(
     cap: Capability,
@@ -377,7 +393,7 @@ pub fn order_for(
     let mut list = order(cap).to_vec();
     let front: &[ProviderKind] = match topic {
         Some("academic") => &[Openalex, Exa, Serper],
-        Some("news") => &[Serper, Tavily],
+        Some("news") => &[Serper, Tavily, Gdelt],
         _ => return list,
     };
     for &p in front.iter().rev().filter(|p| p.supports(cap)) {
@@ -411,6 +427,7 @@ pub fn niche_native(kind: ProviderKind, input: &Input) -> Option<bool> {
         Parallel => !(topic || recency),
         Keenable => !topic && (input.domains.is_none() || keenable::site(input).is_some()),
         Openalex => !domains,
+        Gdelt => !academic,
         // web sessions + read/browser backends: everything is prose/rewrite
         _ => false,
     })
@@ -524,6 +541,17 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             modes: &[],
             examples: &[
                 "search(query=\"transformer scaling laws\", provider=\"openalex\", recency=\"year\")",
+            ],
+        },
+        Gdelt => ProviderExtras {
+            niches: &[
+                "topic=news → routed after serper/tavily",
+                "recency → timespan (last 3 months only)",
+                "domains → domain: operators",
+            ],
+            modes: &[],
+            examples: &[
+                "search(query=\"ukraine ceasefire\", provider=\"gdelt\", recency=\"week\")",
             ],
         },
         GrokWeb => ProviderExtras {
@@ -710,6 +738,7 @@ impl Provider {
             ProviderKind::Keenable => keenable::call(b, key, client, cap, input).await,
             ProviderKind::Jina => jina::call(b, key, client, cap, input).await,
             ProviderKind::Openalex => openalex::call(b, key, client, cap, input).await,
+            ProviderKind::Gdelt => gdelt::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -987,9 +1016,10 @@ mod tests {
         let acad = order_for(Capability::Search, Some("academic"), &[]);
         assert_eq!(&acad[..3], &[Openalex, Exa, Serper]);
         assert_eq!(acad.len(), order(Capability::Search).len() + 1);
-        // news -> Serper then Tavily
+        // news -> Serper, Tavily, then GDELT (niche-only, inserted)
         let news = order_for(Capability::Search, Some("news"), &[]);
-        assert_eq!(&news[..2], &[Serper, Tavily]);
+        assert_eq!(&news[..3], &[Serper, Tavily, Gdelt]);
+        assert_eq!(news.len(), order(Capability::Search).len() + 1);
         // web / none leaves the base order untouched
         assert_eq!(
             order_for(Capability::Search, None, &[]),
@@ -1002,7 +1032,8 @@ mod tests {
         let dr = order_for(Capability::DeepResearch, Some("academic"), &[]);
         assert_eq!(dr[0], Exa);
         assert!(!dr.contains(&Serper) && !dr.contains(&Openalex));
-        assert!(!order_for(Capability::Search, None, &[]).contains(&Openalex));
+        let web = order_for(Capability::Search, None, &[]);
+        assert!(!web.contains(&Openalex) && !web.contains(&Gdelt));
     }
 
     #[test]
