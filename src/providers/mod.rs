@@ -23,6 +23,7 @@ mod nimble;
 mod octen;
 mod openalex;
 mod parallel;
+mod scrapingant;
 mod serpapi;
 mod serper;
 mod steel;
@@ -50,6 +51,7 @@ pub enum ProviderKind {
     Nimble,
     Serpapi,
     Langsearch,
+    Scrapingant,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -178,6 +180,7 @@ impl ProviderKind {
             ProviderKind::Nimble => "nimble",
             ProviderKind::Serpapi => "serpapi",
             ProviderKind::Langsearch => "langsearch",
+            ProviderKind::Scrapingant => "scrapingant",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -203,6 +206,7 @@ impl ProviderKind {
             ProviderKind::Nimble => "https://sdk.nimbleway.com",
             ProviderKind::Serpapi => "https://serpapi.com",
             ProviderKind::Langsearch => "https://api.langsearch.com",
+            ProviderKind::Scrapingant => "https://api.scrapingant.com",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -221,7 +225,7 @@ impl ProviderKind {
                 | (Parallel, Search | DeepResearch)
                 | (Steel, Browser | Read)
                 | (Keenable, Search | Read)
-                | (Jina, Read)
+                | (Jina | Scrapingant, Read)
                 | (
                     Openalex | Gdelt | Octen | Nimble | Serpapi | Langsearch,
                     Search
@@ -284,6 +288,7 @@ impl ProviderKind {
             ProviderKind::Nimble => 5000,
             ProviderKind::Serpapi => 250,
             ProviderKind::Langsearch => 1000,
+            ProviderKind::Scrapingant => 10_000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -337,8 +342,26 @@ impl ProviderKind {
     pub fn all() -> &'static [ProviderKind] {
         use ProviderKind::*;
         &[
-            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, Gdelt,
-            Tinyfish, Linkup, You, Octen, Nimble, Serpapi, Langsearch, GeminiWeb, GrokWeb,
+            Serper,
+            Tavily,
+            Exa,
+            Firecrawl,
+            Parallel,
+            Steel,
+            Keenable,
+            Jina,
+            Openalex,
+            Gdelt,
+            Tinyfish,
+            Linkup,
+            You,
+            Octen,
+            Nimble,
+            Serpapi,
+            Langsearch,
+            Scrapingant,
+            GeminiWeb,
+            GrokWeb,
             ChatgptWeb,
         ]
     }
@@ -363,6 +386,7 @@ impl ProviderKind {
             ProviderKind::Nimble => "web + academic search, SERP snippets or full-page depth",
             ProviderKind::Serpapi => "Google web, news and Scholar results as JSON",
             ProviderKind::Langsearch => "free web search on a daily token allowance",
+            ProviderKind::Scrapingant => "page reads as markdown, plain fetch or headless Chrome",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -390,6 +414,7 @@ impl ProviderKind {
             ProviderKind::Nimble => "https://online.nimbleway.com",
             ProviderKind::Serpapi => "https://serpapi.com",
             ProviderKind::Langsearch => "https://langsearch.com",
+            ProviderKind::Scrapingant => "https://app.scrapingant.com",
             _ => "",
         }
     }
@@ -417,6 +442,7 @@ impl ProviderKind {
             ProviderKind::Nimble => "5,000 free requests · one-time trial",
             ProviderKind::Serpapi => "250 free searches / month",
             ProviderKind::Langsearch => "free · daily token allowance, resets 00:00 UTC",
+            ProviderKind::Scrapingant => "10,000 credits / month · JS render 10 per read",
             _ => "",
         }
     }
@@ -432,7 +458,16 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
             Langsearch, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
         Capability::Read => &[
-            Firecrawl, Tavily, Serper, Exa, Keenable, Jina, Tinyfish, Linkup, You,
+            Firecrawl,
+            Tavily,
+            Serper,
+            Exa,
+            Keenable,
+            Jina,
+            Tinyfish,
+            Linkup,
+            You,
+            Scrapingant,
         ],
         Capability::DeepResearch => &[
             GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish, Linkup, You,
@@ -725,6 +760,14 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "search(query=\"rust async runtimes\", provider=\"langsearch\", recency=\"month\")",
             ],
         },
+        Scrapingant => ProviderExtras {
+            niches: &[],
+            modes: &[("browser", "render JavaScript in headless Chrome (10 credits)")],
+            examples: &[
+                "read(url=\"https://example.com\", provider=\"scrapingant\")",
+                "read(url=\"https://react.dev\", provider=\"scrapingant\", mode=\"browser\")",
+            ],
+        },
         GrokWeb => ProviderExtras {
             niches: &[],
             modes: &[
@@ -917,6 +960,7 @@ impl Provider {
             ProviderKind::Nimble => nimble::call(b, key, client, cap, input).await,
             ProviderKind::Serpapi => serpapi::call(b, key, client, cap, input).await,
             ProviderKind::Langsearch => langsearch::call(b, key, client, cap, input).await,
+            ProviderKind::Scrapingant => scrapingant::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -1023,6 +1067,7 @@ impl Provider {
             ProviderKind::Linkup => linkup::balance(&self.base, key, client).await.ok(),
             ProviderKind::You => you::balance(&self.base, key, client).await.ok(),
             ProviderKind::Serpapi => serpapi::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Scrapingant => scrapingant::balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }
@@ -1159,6 +1204,15 @@ fn uuid4() -> String {
         ((b >> 48) as u16 & 0x3fff) | 0x8000,
         b & 0xffff_ffff_ffff
     )
+}
+
+/// Per-call credit cost a provider reports in a response header; 1 when absent.
+fn header_cost(resp: &reqwest::Response, name: &str) -> i64 {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
 }
 
 /// Map a non-2xx response to the right error. A 429 is temporary and carries `Retry-After` into

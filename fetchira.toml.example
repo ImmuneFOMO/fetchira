@@ -111,6 +111,12 @@ provider = "langsearch"
 label = "langsearch-1"
 api_key = "env:LANGSEARCH_API_KEY"
 
+# scrapingant reads cost 1 credit; mode="browser" renders JavaScript for 10.
+[[account]]
+provider = "scrapingant"
+label = "scrapingant-1"
+api_key = "env:SCRAPINGANT_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

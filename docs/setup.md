@@ -78,6 +78,7 @@ Every provider is optional. Start with one or two that match the job, then add m
 | `nimble` | API key | Web and academic search | [nimbleway.com](https://online.nimbleway.com) |
 | `serpapi` | API key | Google web, news and Scholar search | [serpapi.com](https://serpapi.com) |
 | `langsearch` | API key | Web search | [langsearch.com](https://langsearch.com) |
+| `scrapingant` | API key | Page reads, plain or JavaScript-rendered | [scrapingant.com](https://app.scrapingant.com) |
 | `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
 | `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
 | `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |

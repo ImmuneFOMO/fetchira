@@ -66,8 +66,8 @@ pub struct ReadArgs {
     /// Force a specific provider instead of the priority order.
     pub provider: Option<ProviderKind>,
     /// Provider-specific escape hatch: firecrawl "crawl"/"extract", tavily "extract",
-    /// serper "scrape", steel "screenshot"/"pdf", jina "screenshot"/"links", linkup "js". Call
-    /// usage(provider=…) for the exact set.
+    /// serper "scrape", steel "screenshot"/"pdf", jina "screenshot"/"links", linkup "js",
+    /// scrapingant "browser". Call usage(provider=…) for the exact set.
     pub mode: Option<String>,
 }
 

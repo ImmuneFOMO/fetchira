@@ -1147,7 +1147,7 @@ async fn api_update_impl(st: Arc<AppState>, headers: HeaderMap, force: bool) -> 
 /// and shows up in the route log).
 fn test_call(kind: ProviderKind) -> (Capability, Input) {
     match kind {
-        ProviderKind::Firecrawl | ProviderKind::Jina => (
+        ProviderKind::Firecrawl | ProviderKind::Jina | ProviderKind::Scrapingant => (
             Capability::Read,
             Input {
                 url: Some("https://example.com".to_string()),
@@ -2063,7 +2063,7 @@ fn group_of(provider: &str) -> (&'static str, &'static str) {
         | "tinyfish" | "linkup" | "you" | "octen" | "nimble" | "serpapi" | "langsearch" => {
             ("search", "Search")
         }
-        "firecrawl" | "jina" => ("read", "Read / scrape"),
+        "firecrawl" | "jina" | "scrapingant" => ("read", "Read / scrape"),
         "steel" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
     }
@@ -2106,6 +2106,7 @@ fn desc_of(provider: &str) -> &'static str {
         "nimble" => "Web + academic search API",
         "serpapi" => "Google SERP API",
         "langsearch" => "Web search API",
+        "scrapingant" => "Scrape API · headless Chrome",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
