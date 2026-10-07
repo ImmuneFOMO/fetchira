@@ -2060,7 +2060,7 @@ fn mask_proxy(proxy: &str) -> String {
 fn group_of(provider: &str) -> (&'static str, &'static str) {
     match provider {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" | "gdelt"
-        | "tinyfish" | "linkup" | "you" => ("search", "Search"),
+        | "tinyfish" | "linkup" | "you" | "octen" => ("search", "Search"),
         "firecrawl" | "jina" => ("read", "Read / scrape"),
         "steel" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
@@ -2079,7 +2079,10 @@ fn group_color(provider: &str) -> &'static str {
 /// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance) rather
 /// than an exact request count — shown with a leading "≈".
 fn approx_quota(provider: &str) -> bool {
-    matches!(provider, "parallel" | "exa" | "steel" | "linkup" | "you" | "jina")
+    matches!(
+        provider,
+        "parallel" | "exa" | "steel" | "linkup" | "you" | "octen" | "jina"
+    )
 }
 
 fn desc_of(provider: &str) -> &'static str {
@@ -2097,6 +2100,7 @@ fn desc_of(provider: &str) -> &'static str {
         "tinyfish" => "Search + fetch + research API",
         "linkup" => "Search + fetch + research API",
         "you" => "Search + contents + research API",
+        "octen" => "Web + news search API",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
