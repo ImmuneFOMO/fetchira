@@ -1,4 +1,4 @@
-use fetchira::config::{Priority, Reset};
+use fetchira::config::{Account, Config, Priority, Reset};
 use fetchira::providers::{Capability, Input, Provider, ProviderKind};
 use fetchira::router::{Bucket, Conn, Router};
 use fetchira::usage::{period_key, Store};
@@ -724,4 +724,25 @@ async fn forced_exhausted_errors() {
         matches!(res, Err(fetchira::Error::ProviderForced(_))),
         "got: {res:?}"
     );
+}
+
+#[tokio::test]
+async fn unresolved_key_reference_skips_a_keyless_provider() {
+    let cfg = Config {
+        accounts: vec![Account {
+            provider: ProviderKind::Jina,
+            label: "jina-1".into(),
+            api_key: Some("env:FETCHIRA_TEST_UNSET_JINA_KEY".into()),
+            proxy: None,
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        }],
+        ..Default::default()
+    };
+    let router = Router::build(cfg, fresh_store("unresolved_key").await)
+        .await
+        .unwrap();
+    assert!(router.usage_snapshot_cached().await.unwrap().is_empty());
 }

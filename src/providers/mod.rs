@@ -13,6 +13,7 @@ mod gemini_web;
 mod grok_browser;
 mod grok_statsig;
 mod grok_web;
+mod jina;
 mod keenable;
 pub(crate) mod niche;
 mod parallel;
@@ -30,6 +31,7 @@ pub enum ProviderKind {
     Parallel,
     Steel,
     Keenable,
+    Jina,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -148,6 +150,7 @@ impl ProviderKind {
             ProviderKind::Parallel => "parallel",
             ProviderKind::Steel => "steel",
             ProviderKind::Keenable => "keenable",
+            ProviderKind::Jina => "jina",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -163,6 +166,7 @@ impl ProviderKind {
             ProviderKind::Parallel => "https://api.parallel.ai",
             ProviderKind::Steel => "https://api.steel.dev",
             ProviderKind::Keenable => "https://api.keenable.ai",
+            ProviderKind::Jina => "https://r.jina.ai",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -181,6 +185,7 @@ impl ProviderKind {
                 | (Parallel, Search | DeepResearch)
                 | (Steel, Browser | Read)
                 | (Keenable, Search | Read)
+                | (Jina, Read)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
@@ -195,7 +200,7 @@ impl ProviderKind {
 
     /// True when an api key is mandatory; keyless api providers use one only when given.
     pub fn needs_key(self) -> bool {
-        !self.is_web() && self != ProviderKind::Keenable
+        !self.is_web() && !matches!(self, ProviderKind::Keenable | ProviderKind::Jina)
     }
 
     /// Api-key providers whose live balance is only readable through their dashboard's cookie session
@@ -216,6 +221,7 @@ impl ProviderKind {
             ProviderKind::Parallel => 4000,
             ProviderKind::Steel => 2000,
             ProviderKind::Keenable => 100_000,
+            ProviderKind::Jina => 2500,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -229,7 +235,8 @@ impl ProviderKind {
             ProviderKind::Serper
             | ProviderKind::Parallel
             | ProviderKind::Exa
-            | ProviderKind::Steel => Reset::Once,
+            | ProviderKind::Steel
+            | ProviderKind::Jina => Reset::Once,
             _ => Reset::Monthly,
         }
     }
@@ -256,7 +263,7 @@ impl ProviderKind {
     pub fn all() -> &'static [ProviderKind] {
         use ProviderKind::*;
         &[
-            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, GeminiWeb, GrokWeb,
+            Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, GeminiWeb, GrokWeb,
             ChatgptWeb,
         ]
     }
@@ -271,6 +278,7 @@ impl ProviderKind {
             ProviderKind::Parallel => "async deep-research API",
             ProviderKind::Steel => "headless-browser page scrape",
             ProviderKind::Keenable => "web search + page fetch, works without a key",
+            ProviderKind::Jina => "read any URL as clean markdown, works without a key",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -289,6 +297,7 @@ impl ProviderKind {
             ProviderKind::Parallel => "https://parallel.ai",
             ProviderKind::Steel => "https://steel.dev",
             ProviderKind::Keenable => "https://keenable.ai",
+            ProviderKind::Jina => "https://jina.ai/reader",
             _ => "",
         }
     }
@@ -304,6 +313,7 @@ impl ProviderKind {
             ProviderKind::Parallel => "up to $80 signup + $5/mo · eligibility applies",
             ProviderKind::Steel => "$30 credit · one-time, 90 days",
             ProviderKind::Keenable => "100,000 free / month · keyless 1,000 / hour",
+            ProviderKind::Jina => "keyless 20 / min · key adds 10M free tokens, one-time",
             _ => "",
         }
     }
@@ -317,7 +327,7 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
         Capability::Search => &[
             Tavily, Serper, Exa, Parallel, Keenable, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
-        Capability::Read => &[Firecrawl, Tavily, Serper, Exa, Keenable],
+        Capability::Read => &[Firecrawl, Tavily, Serper, Exa, Keenable, Jina],
         Capability::DeepResearch => &[GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily],
         Capability::Browser => &[Steel],
         Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
@@ -479,6 +489,17 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             examples: &[
                 "search(query=\"rust async runtimes\", provider=\"keenable\", recency=\"week\")",
                 "read(url=\"https://example.com\", provider=\"keenable\")",
+            ],
+        },
+        Jina => ProviderExtras {
+            niches: &[],
+            modes: &[
+                ("screenshot", "link to a screenshot of the rendered page"),
+                ("links", "append the page's links"),
+            ],
+            examples: &[
+                "read(url=\"https://example.com\", provider=\"jina\")",
+                "read(url=\"https://example.com\", provider=\"jina\", mode=\"links\")",
             ],
         },
         GrokWeb => ProviderExtras {
@@ -663,6 +684,7 @@ impl Provider {
             ProviderKind::Parallel => parallel::call(b, key, client, cap, input).await,
             ProviderKind::Steel => steel::call(b, key, client, cap, input).await,
             ProviderKind::Keenable => keenable::call(b, key, client, cap, input).await,
+            ProviderKind::Jina => jina::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -764,6 +786,7 @@ impl Provider {
             ProviderKind::Tavily => tavily::balance(&self.base, key, client).await.ok(),
             ProviderKind::Firecrawl => firecrawl::balance(&self.base, key, client).await.ok(),
             ProviderKind::Steel => steel::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Jina => jina::balance(key, client).await.ok(),
             _ => None,
         }
     }

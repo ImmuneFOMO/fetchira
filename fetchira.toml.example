@@ -57,6 +57,12 @@ provider = "keenable"
 label = "keenable-1"
 # api_key = "env:KEENABLE_API_KEY"
 
+# jina reads without a key (per-IP rate limit); a key raises it and bills a token wallet.
+[[account]]
+provider = "jina"
+label = "jina-1"
+# api_key = "env:JINA_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

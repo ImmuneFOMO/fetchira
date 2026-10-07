@@ -1147,7 +1147,7 @@ async fn api_update_impl(st: Arc<AppState>, headers: HeaderMap, force: bool) -> 
 /// and shows up in the route log).
 fn test_call(kind: ProviderKind) -> (Capability, Input) {
     match kind {
-        ProviderKind::Firecrawl => (
+        ProviderKind::Firecrawl | ProviderKind::Jina => (
             Capability::Read,
             Input {
                 url: Some("https://example.com".to_string()),
@@ -2060,7 +2060,7 @@ fn mask_proxy(proxy: &str) -> String {
 fn group_of(provider: &str) -> (&'static str, &'static str) {
     match provider {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" => ("search", "Search"),
-        "firecrawl" => ("read", "Read / scrape"),
+        "firecrawl" | "jina" => ("read", "Read / scrape"),
         "steel" => ("browser", "Browser"),
         _ => ("web", "Web sessions"),
     }
@@ -2078,7 +2078,7 @@ fn group_color(provider: &str) -> &'static str {
 /// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance) rather
 /// than an exact request count — shown with a leading "≈".
 fn approx_quota(provider: &str) -> bool {
-    matches!(provider, "parallel" | "exa" | "steel")
+    matches!(provider, "parallel" | "exa" | "steel" | "jina")
 }
 
 fn desc_of(provider: &str) -> &'static str {
@@ -2090,6 +2090,7 @@ fn desc_of(provider: &str) -> &'static str {
         "firecrawl" => "Crawl + scrape API",
         "steel" => "Headless browser sessions",
         "keenable" => "Search + fetch API · keyless",
+        "jina" => "Reader API · keyless",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
@@ -2285,6 +2286,19 @@ mod tests {
             .flat_map(|g| g["providers"].as_array().into_iter().flatten())
             .find(|p| p["name"] == name)
             .expect("tile")
+    }
+
+    #[test]
+    fn jina_wallet_reads_as_lifetime() {
+        let mut v = view("jina", "jina-1", 100, 2500, None);
+        v.period = crate::usage::period_key(ProviderKind::Jina.default_reset());
+        let groups = overview_groups(&[&v], |_| true);
+        let j = tile(&groups, "jina");
+        assert_eq!(j["resetWindow"], "lifetime");
+        let bar = &j["limits"][0];
+        assert_eq!(bar["window"], "lifetime");
+        assert!(bar["resetAt"].is_null());
+        assert_eq!(bar["approx"], true);
     }
 
     #[test]

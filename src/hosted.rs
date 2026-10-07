@@ -449,7 +449,7 @@ fn hosted_group_color(provider: &str) -> &'static str {
 fn provider_group(name: &str) -> &'static str {
     match name {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" => "search",
-        "firecrawl" => "read",
+        "firecrawl" | "jina" => "read",
         "steel" => "browser",
         _ => "web",
     }
@@ -463,6 +463,7 @@ fn provider_desc(name: &str) -> &'static str {
         "firecrawl" => "Crawl + scrape API",
         "steel" => "Headless browser sessions",
         "keenable" => "Search + fetch API · keyless",
+        "jina" => "Reader API · keyless",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
@@ -975,7 +976,7 @@ async fn admin_account_test(
         return (StatusCode::BAD_REQUEST, "unknown account").into_response();
     };
     let (cap, input) = match kind {
-        crate::providers::ProviderKind::Firecrawl => (
+        crate::providers::ProviderKind::Firecrawl | crate::providers::ProviderKind::Jina => (
             crate::providers::Capability::Read,
             crate::providers::Input {
                 url: Some("https://example.com".into()),
