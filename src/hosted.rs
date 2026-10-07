@@ -451,7 +451,7 @@ fn provider_group(name: &str) -> &'static str {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" | "gdelt"
         | "tinyfish" | "linkup" | "you" | "octen" | "nimble" | "serpapi" | "langsearch" => "search",
         "firecrawl" | "jina" | "scrapingant" | "zenrows" => "read",
-        "steel" => "browser",
+        "steel" | "hyperbrowser" => "browser",
         _ => "web",
     }
 }
@@ -476,6 +476,7 @@ fn provider_desc(name: &str) -> &'static str {
         "langsearch" => "Web search API",
         "scrapingant" => "Scrape API · headless Chrome",
         "zenrows" => "Scrape API · anti-bot",
+        "hyperbrowser" => "Cloud browser fetch API",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
@@ -998,7 +999,7 @@ async fn admin_account_test(
                 ..Default::default()
             },
         ),
-        crate::providers::ProviderKind::Steel => (
+        crate::providers::ProviderKind::Steel | crate::providers::ProviderKind::Hyperbrowser => (
             crate::providers::Capability::Browser,
             crate::providers::Input {
                 url: Some("https://example.com".into()),

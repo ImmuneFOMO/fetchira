@@ -123,6 +123,11 @@ provider = "zenrows"
 label = "zenrows-1"
 api_key = "env:ZENROWS_API_KEY"
 
+[[account]]
+provider = "hyperbrowser"
+label = "hyperbrowser-1"
+api_key = "env:HYPERBROWSER_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"
