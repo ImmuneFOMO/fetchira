@@ -449,7 +449,7 @@ fn hosted_group_color(provider: &str) -> &'static str {
 fn provider_group(name: &str) -> &'static str {
     match name {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" | "gdelt"
-        | "tinyfish" | "linkup" | "you" | "octen" | "nimble" => "search",
+        | "tinyfish" | "linkup" | "you" | "octen" | "nimble" | "serpapi" => "search",
         "firecrawl" | "jina" => "read",
         "steel" => "browser",
         _ => "web",
@@ -472,6 +472,7 @@ fn provider_desc(name: &str) -> &'static str {
         "you" => "Search + contents + research API",
         "octen" => "Web + news search API",
         "nimble" => "Web + academic search API",
+        "serpapi" => "Google SERP API",
         "gemini_web" => "Browser session · search + deep research",
         "grok_web" => "Browser session · search + deep research",
         "chatgpt_web" => "Browser session · search + deep research",
