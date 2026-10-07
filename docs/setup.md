@@ -50,7 +50,7 @@ fetchira setup
 fetchira providers                # see every provider and its capability
 fetchira add serper --key KEY     # API-key provider; never omit --key
 fetchira add gemini_web            # web-session provider; a browser opens for login
-fetchira list                     # expect key or session, not NO KEY / NEEDS LOGIN
+fetchira list                     # expect key, keyless or session, not NO KEY / NEEDS LOGIN
 ```
 
 Config lives in `$FETCHIRA_HOME`, otherwise `$XDG_CONFIG_HOME/fetchira` (default `~/.config/fetchira`).
@@ -67,6 +67,7 @@ Every provider is optional. Start with one or two that match the job, then add m
 | `firecrawl` | API key | Search, scrape and crawl pages | [firecrawl.link](https://firecrawl.link/immunefomo) |
 | `parallel` | API key | Search and deep research | [parallel.ai](https://parallel.ai) |
 | `steel` | API key | Browser and JavaScript page reads | [steel.dev](https://steel.dev) |
+| `keenable` | Optional API key | Search and page reads | [keenable.ai](https://keenable.ai) |
 | `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
 | `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
 | `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |

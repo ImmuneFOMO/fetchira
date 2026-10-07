@@ -147,8 +147,10 @@ pub fn providers() {
     for k in ProviderKind::all() {
         let cred = if k.is_web() {
             "browser login"
-        } else {
+        } else if k.needs_key() {
             "API key"
+        } else {
+            "optional key"
         };
         println!("  {:15} {:14} {}", k.as_str(), cred, k.blurb());
     }
@@ -190,6 +192,8 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             } else {
                 "NEEDS LOGIN"
             }
+        } else if a.api_key.is_none() && ready {
+            "keyless"
         } else if ready {
             "key"
         } else {

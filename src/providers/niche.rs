@@ -65,13 +65,7 @@ pub fn split_domains(domains: &[String]) -> (Vec<&str>, Vec<&str>) {
 /// backends with no native filter (serper's `site:`, and web sessions which take everything as text).
 pub fn rewrite_query(input: &Input) -> String {
     let mut q = input.query.clone().unwrap_or_default();
-    if let Some(t) = input.topic.as_deref() {
-        match t {
-            "academic" => q.push_str(" (peer-reviewed OR research paper)"),
-            "news" => q.push_str(" latest news"),
-            _ => {}
-        }
-    }
+    q.push_str(topic_hint(input));
     if let Some(domains) = &input.domains {
         for d in domains {
             match d.strip_prefix('-') {
@@ -84,6 +78,15 @@ pub fn rewrite_query(input: &Input) -> String {
         q.push_str(&format!(" after:{r}"));
     }
     q
+}
+
+/// Query suffix standing in for a topic vertical the backend lacks.
+pub fn topic_hint(input: &Input) -> &'static str {
+    match input.topic.as_deref() {
+        Some("academic") => " (peer-reviewed OR research paper)",
+        Some("news") => " latest news",
+        _ => "",
+    }
 }
 
 /// Does this request carry any niche knob? (Cheap gate so the common case skips all of the above.)

@@ -51,6 +51,12 @@ provider = "steel"
 label = "steel-1"
 api_key = "env:STEEL_API_KEY"
 
+# keenable works without a key (per-IP hourly cap); a key raises it to the monthly allowance.
+[[account]]
+provider = "keenable"
+label = "keenable-1"
+# api_key = "env:KEENABLE_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

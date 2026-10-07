@@ -17,7 +17,7 @@ path = "src/main.rs"
 rmcp = { version = "1.8", features = ["server", "client", "macros", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "time", "process", "net", "fs"] }
 tokio-util = "0.7"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "query"] }
 # Rebuild a `reqwest::Response` from parts after the raw-HTTP tracer reads its body (src/httptrace.rs).
 http = "1"
 # Browser TLS/JA3 + HTTP2 fingerprint impersonation for the cookie-auth web providers.
