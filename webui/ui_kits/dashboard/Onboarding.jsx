@@ -27,9 +27,10 @@ function KeyProviderCard({ p, onOpenModal }) {
   const [label, setLabel] = React.useState('');
   const [ms, setMs] = React.useState(null);
   const [err, setErr] = React.useState(null);
+  const keyShort = !p.keyless && key.trim().length < 8;
 
   const connect = async () => {
-    if (key.trim().length < 8 || phase === 'adding' || phase === 'testing') return;
+    if (keyShort || phase === 'adding' || phase === 'testing') return;
     setErr(null); setPhase('adding');
     let added;
     try {
@@ -86,11 +87,11 @@ function KeyProviderCard({ p, onOpenModal }) {
       <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)', flex: 1 }}>{p.blurb}</span>
       <div style={{ display: 'flex', gap: 8 }}>
         <div style={{ flex: 1 }}>
-          <Input placeholder={OB_KEY_HINTS[p.id] || 'paste API key'} value={key} mono type="password"
+          <Input placeholder={OB_KEY_HINTS[p.id] || (p.keyless ? 'optional · works without a key' : 'paste API key')} value={key} mono type="password"
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') connect(); }} />
         </div>
-        <Button variant="primary" onClick={connect} disabled={key.trim().length < 8 || phase === 'adding' || phase === 'testing'}>
+        <Button variant="primary" onClick={connect} disabled={keyShort || phase === 'adding' || phase === 'testing'}>
           {phase === 'adding' ? 'Adding…' : phase === 'testing' ? 'Testing…' : 'Connect'}
         </Button>
       </div>

@@ -295,10 +295,11 @@ async fn account_ready(store: &Store, a: &Account) -> bool {
     if a.provider.is_web() {
         matches!(store.load_session(&a.label).await, Ok(Some(_)))
     } else {
-        a.api_key
-            .as_deref()
-            .and_then(|s| config::resolve_secret(s).ok())
-            .is_some_and(|k| !k.trim().is_empty())
+        !a.provider.needs_key()
+            || a.api_key
+                .as_deref()
+                .and_then(|s| config::resolve_secret(s).ok())
+                .is_some_and(|k| !k.trim().is_empty())
     }
 }
 
@@ -351,7 +352,7 @@ pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
         }
     }
 
-    if !kind.is_web() && key.is_none() {
+    if kind.needs_key() && key.is_none() {
         if !kind.signup().is_empty() {
             println!("Get a key: {}", kind.signup());
         }
@@ -406,7 +407,8 @@ pub fn add_account(
     if cfg.accounts.iter().any(|a| a.label == label) {
         bail!("an account labelled '{label}' already exists");
     }
-    if !kind.is_web() && key.as_deref().unwrap_or("").trim().is_empty() {
+    let key = key.filter(|k| !k.trim().is_empty());
+    if kind.needs_key() && key.is_none() {
         bail!("{} needs an API key", kind.as_str());
     }
     // Reject re-adding the same API key under a new label — it's the same account/quota pool.
@@ -1028,8 +1030,15 @@ async fn add_flow(home: &Path) -> anyhow::Result<()> {
         if !kind.signup().is_empty() {
             println!("  get a key: {}", kind.signup());
         }
-        match Text::new(&format!("{} API key:", kind.as_str())).prompt() {
+        match Text::new(&format!(
+            "{} API key{}:",
+            kind.as_str(),
+            if kind.needs_key() { "" } else { " (optional)" }
+        ))
+        .prompt()
+        {
             Ok(k) if !k.trim().is_empty() => api_key = Some(k.trim().to_string()),
+            Ok(_) if !kind.needs_key() => {}
             _ => return Ok(()),
         }
     }

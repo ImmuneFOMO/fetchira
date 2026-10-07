@@ -188,6 +188,11 @@ impl ProviderKind {
         )
     }
 
+    /// True when an api key is mandatory; keyless api providers use one only when given.
+    pub fn needs_key(self) -> bool {
+        !self.is_web()
+    }
+
     /// Api-key providers whose live balance is only readable through their dashboard's cookie session
     /// (no key-usable endpoint). `fetchira login <them>` captures that session; the api-key still does
     /// the actual calls. exa/parallel are real $ balances the api can't report.

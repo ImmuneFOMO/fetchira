@@ -40,7 +40,7 @@ function Field({ label, children }) {
 function catalogNow() {
   const live = window.FX && window.FX.catalog;
   if (!live || !live.length) return PROVIDER_CATALOG;
-  return live.map((c) => ({ id: c.id, kind: c.web ? 'web' : 'key', note: c.blurb, signup: c.signup }));
+  return live.map((c) => ({ id: c.id, kind: c.web ? 'web' : 'key', note: c.blurb, signup: c.signup, keyless: c.keyless }));
 }
 
 function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnly = false }) {
@@ -77,7 +77,7 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
   const catalog = catalogNow();
   const provider = catalog.find((p) => p.id === providerId) || catalog[0];
   const isWeb = provider.kind === 'web';
-  const keyMissing = !isWeb && apiKey.trim().length < 8;
+  const keyMissing = !isWeb && !provider.keyless && apiKey.trim().length < 8;
 
   const submitKey = async () => {
     setTouched(true);
@@ -190,7 +190,7 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
           }
 
           {!isWeb ? (
-            <Input label="API key" placeholder="paste secret key" value={apiKey} mono
+            <Input label="API key" placeholder={provider.keyless ? 'optional · works without a key' : 'paste secret key'} value={apiKey} mono
               type="password" onChange={(e) => setApiKey(e.target.value)}
               invalid={touched && keyMissing}
               hint={touched && keyMissing ? 'Enter a valid API key' : 'Stored locally · never displayed again'} />

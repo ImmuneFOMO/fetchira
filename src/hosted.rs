@@ -350,7 +350,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             }
         }
     }
-    let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"group":provider_group(p.as_str())})).collect();
+    let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"keyless":!p.is_web() && !p.needs_key(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"group":provider_group(p.as_str())})).collect();
     let routes = st.store.recent_routes(1000).await.unwrap_or_default();
     let log: Vec<_> = routes
         .iter()
@@ -728,7 +728,8 @@ async fn admin_providers(
             .ok()
             .flatten()
             .is_some()
-            || account.api_key.is_some();
+            || account.api_key.is_some()
+            || (!account.provider.is_web() && !account.provider.needs_key());
         rows.push(json!({"provider":account.provider.as_str(),"label":account.label,"identity":identities.get(&account.label),"loggedIn":logged_in,"ready":logged_in}));
     }
     Json(json!({"ok":true,"providers":rows})).into_response()

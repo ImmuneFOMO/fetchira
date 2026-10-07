@@ -963,10 +963,7 @@ function AccountRow({
   }, "\u2022\u2022\u2022\u2022 key set") : r.web ? /*#__PURE__*/React.createElement(Badge, {
     tone: r.loggedIn ? 'cyan' : 'off',
     variant: "outline"
-  }, r.loggedIn ? 'session ✓' : 'no session') : /*#__PURE__*/React.createElement(Badge, {
-    tone: "off",
-    variant: "outline"
-  }, "no key")), /*#__PURE__*/React.createElement("td", {
+  }, r.loggedIn ? 'session ✓' : 'no session') : null), /*#__PURE__*/React.createElement("td", {
     style: td
   }, statusBadge(r.status)), /*#__PURE__*/React.createElement("td", {
     style: td

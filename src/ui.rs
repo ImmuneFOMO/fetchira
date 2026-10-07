@@ -1672,6 +1672,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             json!({
                 "id": k.as_str(),
                 "web": k.is_web(),
+                "keyless": !k.is_web() && !k.needs_key(),
                 "blurb": k.blurb(),
                 "signup": k.signup(),
                 "caps": caps,

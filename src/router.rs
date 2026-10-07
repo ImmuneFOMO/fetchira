@@ -184,12 +184,11 @@ impl Router {
                 let client = web::build_client(&sess.cookies, &sess.headers, proxy_url.as_deref())?;
                 (Conn::Web(client, sess.cookies), String::new())
             } else {
-                let Some(key) = acc
-                    .api_key
-                    .as_deref()
-                    .and_then(|s| resolve_secret(s).ok())
-                    .filter(|k| !k.trim().is_empty())
-                else {
+                let key = match acc.api_key.as_deref() {
+                    Some(s) => resolve_secret(s).ok().filter(|k| !k.trim().is_empty()),
+                    None => (!acc.provider.needs_key()).then(String::new),
+                };
+                let Some(key) = key else {
                     tracing::warn!(
                         label = %acc.label,
                         "no usable API key for {}; add a provider account",

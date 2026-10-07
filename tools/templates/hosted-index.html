@@ -386,7 +386,7 @@ window.apiPost = async function (path, body) {
   const csrfPrefix = 'fetchira_csrf=';
   const csrf = document.cookie.split(';').map((x) => x.trim()).find((x) => x.startsWith(csrfPrefix))?.slice(csrfPrefix.length) || '';
   const hostedPath = path === '/api/account/add'
-    ? (body && body.key ? '/admin/providers/key' : (body && body.session ? '/admin/providers/session' : '/admin/login-challenges'))
+    ? (body && 'key' in body ? '/admin/providers/key' : (body && body.session ? '/admin/providers/session' : '/admin/login-challenges'))
     : path === '/api/account/session' ? '/admin/providers/session'
     : path === '/api/account/login' ? '/admin/login-challenges'
     : path.startsWith('/api/debug') ? '/admin' + path.slice(4)

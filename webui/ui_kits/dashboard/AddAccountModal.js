@@ -102,7 +102,8 @@ function catalogNow() {
     id: c.id,
     kind: c.web ? 'web' : 'key',
     note: c.blurb,
-    signup: c.signup
+    signup: c.signup,
+    keyless: c.keyless
   }));
 }
 function AddAccountModal({
@@ -149,7 +150,7 @@ function AddAccountModal({
   const catalog = catalogNow();
   const provider = catalog.find(p => p.id === providerId) || catalog[0];
   const isWeb = provider.kind === 'web';
-  const keyMissing = !isWeb && apiKey.trim().length < 8;
+  const keyMissing = !isWeb && !provider.keyless && apiKey.trim().length < 8;
   const submitKey = async () => {
     setTouched(true);
     if (keyMissing || busy) return;
@@ -442,7 +443,7 @@ function AddAccountModal({
     hint: "Leave blank to auto-name"
   }), !isWeb ? /*#__PURE__*/React.createElement(Input, {
     label: "API key",
-    placeholder: "paste secret key",
+    placeholder: provider.keyless ? 'optional · works without a key' : 'paste secret key',
     value: apiKey,
     mono: true,
     type: "password",

@@ -61,8 +61,9 @@ function KeyProviderCard({
   const [label, setLabel] = React.useState('');
   const [ms, setMs] = React.useState(null);
   const [err, setErr] = React.useState(null);
+  const keyShort = !p.keyless && key.trim().length < 8;
   const connect = async () => {
-    if (key.trim().length < 8 || phase === 'adding' || phase === 'testing') return;
+    if (keyShort || phase === 'adding' || phase === 'testing') return;
     setErr(null);
     setPhase('adding');
     let added;
@@ -213,7 +214,7 @@ function KeyProviderCard({
       flex: 1
     }
   }, /*#__PURE__*/React.createElement(Input, {
-    placeholder: OB_KEY_HINTS[p.id] || 'paste API key',
+    placeholder: OB_KEY_HINTS[p.id] || (p.keyless ? 'optional · works without a key' : 'paste API key'),
     value: key,
     mono: true,
     type: "password",
@@ -224,7 +225,7 @@ function KeyProviderCard({
   })), /*#__PURE__*/React.createElement(Button, {
     variant: "primary",
     onClick: connect,
-    disabled: key.trim().length < 8 || phase === 'adding' || phase === 'testing'
+    disabled: keyShort || phase === 'adding' || phase === 'testing'
   }, phase === 'adding' ? 'Adding…' : phase === 'testing' ? 'Testing…' : 'Connect')), phase === 'bad' && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
