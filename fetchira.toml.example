@@ -96,6 +96,11 @@ provider = "octen"
 label = "octen-1"
 api_key = "env:OCTEN_API_KEY"
 
+[[account]]
+provider = "nimble"
+label = "nimble-1"
+api_key = "env:NIMBLE_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

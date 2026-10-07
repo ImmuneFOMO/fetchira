@@ -18,6 +18,7 @@ mod jina;
 mod keenable;
 mod linkup;
 pub(crate) mod niche;
+mod nimble;
 mod octen;
 mod openalex;
 mod parallel;
@@ -44,6 +45,7 @@ pub enum ProviderKind {
     Linkup,
     You,
     Octen,
+    Nimble,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -169,6 +171,7 @@ impl ProviderKind {
             ProviderKind::Linkup => "linkup",
             ProviderKind::You => "you",
             ProviderKind::Octen => "octen",
+            ProviderKind::Nimble => "nimble",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -191,6 +194,7 @@ impl ProviderKind {
             ProviderKind::Linkup => "https://api.linkup.so",
             ProviderKind::You => "https://ydc-index.io",
             ProviderKind::Octen => "https://api.octen.ai",
+            ProviderKind::Nimble => "https://sdk.nimbleway.com",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -210,7 +214,7 @@ impl ProviderKind {
                 | (Steel, Browser | Read)
                 | (Keenable, Search | Read)
                 | (Jina, Read)
-                | (Openalex | Gdelt | Octen, Search)
+                | (Openalex | Gdelt | Octen | Nimble, Search)
                 | (Tinyfish | Linkup | You, Search | Read | DeepResearch)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
@@ -266,6 +270,7 @@ impl ProviderKind {
             ProviderKind::Linkup => 4000,
             ProviderKind::You => 20_000,
             ProviderKind::Octen => 5000,
+            ProviderKind::Nimble => 5000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -282,6 +287,7 @@ impl ProviderKind {
             | ProviderKind::Steel
             | ProviderKind::You
             | ProviderKind::Octen
+            | ProviderKind::Nimble
             | ProviderKind::Jina => Reset::Once,
             ProviderKind::Openalex | ProviderKind::Gdelt | ProviderKind::Tinyfish => Reset::Daily,
             _ => Reset::Monthly,
@@ -316,7 +322,7 @@ impl ProviderKind {
         use ProviderKind::*;
         &[
             Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, Gdelt,
-            Tinyfish, Linkup, You, Octen, GeminiWeb, GrokWeb, ChatgptWeb,
+            Tinyfish, Linkup, You, Octen, Nimble, GeminiWeb, GrokWeb, ChatgptWeb,
         ]
     }
 
@@ -337,6 +343,7 @@ impl ProviderKind {
             ProviderKind::Linkup => "search + page fetch + async deep research on a $ balance",
             ProviderKind::You => "search + page contents + deep research on a $ credit",
             ProviderKind::Octen => "low-latency web + news search on a $ credit",
+            ProviderKind::Nimble => "web + academic search, SERP snippets or full-page depth",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -361,6 +368,7 @@ impl ProviderKind {
             ProviderKind::Linkup => "https://app.linkup.so",
             ProviderKind::You => "https://you.com/platform",
             ProviderKind::Octen => "https://octen.ai/platform",
+            ProviderKind::Nimble => "https://online.nimbleway.com",
             _ => "",
         }
     }
@@ -385,6 +393,7 @@ impl ProviderKind {
             }
             ProviderKind::You => "$100 credit · one-time",
             ProviderKind::Octen => "$5 credit · one-time",
+            ProviderKind::Nimble => "5,000 free requests · one-time trial",
             _ => "",
         }
     }
@@ -396,8 +405,8 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
         Capability::Search => &[
-            Tavily, Serper, Exa, Parallel, Keenable, Tinyfish, Linkup, You, Octen, GeminiWeb,
-            GrokWeb, ChatgptWeb,
+            Tavily, Serper, Exa, Parallel, Keenable, Tinyfish, Linkup, You, Octen, Nimble,
+            GeminiWeb, GrokWeb, ChatgptWeb,
         ],
         Capability::Read => &[
             Firecrawl, Tavily, Serper, Exa, Keenable, Jina, Tinyfish, Linkup, You,
@@ -479,6 +488,8 @@ pub fn niche_native(kind: ProviderKind, cap: Capability, input: &Input) -> Optio
         Gdelt => !academic,
         Linkup | You => !topic,
         Octen => !academic,
+        // academic focus only on lite depth; news folds into the query
+        Nimble => input.topic.as_deref() != Some("news") && !(academic && input.mode.is_some()),
         // web sessions + read/browser backends: everything is prose/rewrite
         _ => false,
     })
@@ -654,6 +665,18 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             examples: &[
                 "search(query=\"fed rate decision\", provider=\"octen\", topic=\"news\", recency=\"week\")",
                 "search(query=\"tokio runtime\", provider=\"octen\", domains=[\"tokio.rs\"])",
+            ],
+        },
+        Nimble => ProviderExtras {
+            niches: &[
+                "topic=academic → academic focus",
+                "recency → time_range / start_date",
+                "domains → include/exclude_domains",
+            ],
+            modes: &[("standard", "full-page markdown per hit (default: lite SERP snippet)")],
+            examples: &[
+                "search(query=\"crispr off-target\", provider=\"nimble\", topic=\"academic\")",
+                "search(query=\"tokio select\", provider=\"nimble\", mode=\"standard\")",
             ],
         },
         GrokWeb => ProviderExtras {
@@ -845,6 +868,7 @@ impl Provider {
             ProviderKind::Linkup => linkup::call(b, key, client, cap, input).await,
             ProviderKind::You => you::call(b, key, client, cap, input).await,
             ProviderKind::Octen => octen::call(b, key, client, cap, input).await,
+            ProviderKind::Nimble => nimble::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }

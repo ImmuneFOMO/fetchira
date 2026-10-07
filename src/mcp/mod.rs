@@ -35,7 +35,7 @@ pub struct SearchArgs {
     /// names and levels; omit to use its default. Ignored by the API providers.
     pub model: Option<String>,
     /// Provider-specific mode. grok: "auto"/"fast"/"expert"/"heavy" (search defaults to fast,
-    /// deep_research to heavy then expert).
+    /// deep_research to heavy then expert); keenable "realtime"/"pro"; nimble "standard".
     pub mode: Option<String>,
     /// Research niche: "web" (default), "news", or "academic" — steers to a fitting backend.
     pub topic: Option<String>,
