@@ -81,6 +81,11 @@ provider = "tinyfish"
 label = "tinyfish-1"
 api_key = "env:TINYFISH_API_KEY"
 
+[[account]]
+provider = "linkup"
+label = "linkup-1"
+api_key = "env:LINKUP_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

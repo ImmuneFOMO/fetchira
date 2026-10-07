@@ -66,8 +66,8 @@ pub struct ReadArgs {
     /// Force a specific provider instead of the priority order.
     pub provider: Option<ProviderKind>,
     /// Provider-specific escape hatch: firecrawl "crawl"/"extract", tavily "extract",
-    /// serper "scrape", steel "screenshot"/"pdf", jina "screenshot"/"links". Call usage(provider=…)
-    /// for the exact set.
+    /// serper "scrape", steel "screenshot"/"pdf", jina "screenshot"/"links", linkup "js". Call
+    /// usage(provider=…) for the exact set.
     pub mode: Option<String>,
 }
 
@@ -256,7 +256,7 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research over multiple sources (parallel, exa, tavily, tinyfish, gemini_web, grok_web, chatgpt_web); may take minutes. gemini_web and chatgpt_web first return a research PLAN plus a `session`: pass that `session` with query \"start\" to run it, or with a revised request to replace the plan. gemini returns the finished report in the same call; chatgpt runs ~5-30 min after \"start\" — call again with the returned `session` to fetch the report (`model` is ignored there). Knobs: `topic`, `recency`, `domains`, `depth` (\"deep\" is slower/pricier). Provider-specific extras → call usage(provider=…)."
+        description = "Deep research over multiple sources (parallel, exa, tavily, tinyfish, linkup, gemini_web, grok_web, chatgpt_web); may take minutes. gemini_web and chatgpt_web first return a research PLAN plus a `session`: pass that `session` with query \"start\" to run it, or with a revised request to replace the plan. gemini returns the finished report in the same call; chatgpt runs ~5-30 min after \"start\" — call again with the returned `session` to fetch the report (`model` is ignored there). Knobs: `topic`, `recency`, `domains`, `depth` (\"deep\" is slower/pricier). Provider-specific extras → call usage(provider=…)."
     )]
     pub async fn deep_research(
         &self,
