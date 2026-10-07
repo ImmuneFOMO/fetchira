@@ -75,6 +75,12 @@ label = "openalex-1"
 provider = "gdelt"
 label = "gdelt-1"
 
+# tinyfish deep research has its own 5-runs-per-day budget (dr_quota) apart from search/read.
+[[account]]
+provider = "tinyfish"
+label = "tinyfish-1"
+api_key = "env:TINYFISH_API_KEY"
+
 # --- Web-session providers (no api_key). Run `fetchira login <label>` once to capture cookies. ---
 [[account]]
 provider = "gemini_web"

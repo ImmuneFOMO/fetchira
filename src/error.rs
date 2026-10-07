@@ -80,6 +80,14 @@ impl Error {
             retry_after,
         }
     }
+
+    /// A rate limit, 5xx or dropped connection: the same request may well succeed next time.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimit { .. } | Self::Transport(_) | Self::Provider { status: 500.., .. }
+        )
+    }
 }
 
 /// Parse `Retry-After` as delta-seconds or an HTTP date. Malformed/past values fall back to the

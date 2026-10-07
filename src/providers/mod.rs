@@ -22,6 +22,7 @@ mod parallel;
 mod serper;
 mod steel;
 mod tavily;
+mod tinyfish;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +37,7 @@ pub enum ProviderKind {
     Jina,
     Openalex,
     Gdelt,
+    Tinyfish,
     GeminiWeb,
     GrokWeb,
     ChatgptWeb,
@@ -157,6 +159,7 @@ impl ProviderKind {
             ProviderKind::Jina => "jina",
             ProviderKind::Openalex => "openalex",
             ProviderKind::Gdelt => "gdelt",
+            ProviderKind::Tinyfish => "tinyfish",
             ProviderKind::GeminiWeb => "gemini_web",
             ProviderKind::GrokWeb => "grok_web",
             ProviderKind::ChatgptWeb => "chatgpt_web",
@@ -175,6 +178,7 @@ impl ProviderKind {
             ProviderKind::Jina => "https://r.jina.ai",
             ProviderKind::Openalex => "https://api.openalex.org",
             ProviderKind::Gdelt => "https://api.gdeltproject.org",
+            ProviderKind::Tinyfish => "https://api.search.tinyfish.ai",
             ProviderKind::GeminiWeb => "https://gemini.google.com",
             ProviderKind::GrokWeb => "https://grok.com",
             ProviderKind::ChatgptWeb => "https://chatgpt.com",
@@ -195,6 +199,7 @@ impl ProviderKind {
                 | (Keenable, Search | Read)
                 | (Jina, Read)
                 | (Openalex | Gdelt, Search)
+                | (Tinyfish, Search | Read | DeepResearch)
                 | (GeminiWeb | GrokWeb | ChatgptWeb, Search | DeepResearch)
                 | (ChatgptWeb | GrokWeb | GeminiWeb, Image)
         )
@@ -245,6 +250,7 @@ impl ProviderKind {
             ProviderKind::Jina => 2500,
             ProviderKind::Openalex => 100,
             ProviderKind::Gdelt => 1000,
+            ProviderKind::Tinyfish => 1000,
             // Web sessions enforce their live windowed limits; these only seed local accounting.
             ProviderKind::GeminiWeb => 1000,
             ProviderKind::GrokWeb => 100,
@@ -260,18 +266,23 @@ impl ProviderKind {
             | ProviderKind::Exa
             | ProviderKind::Steel
             | ProviderKind::Jina => Reset::Once,
-            ProviderKind::Openalex | ProviderKind::Gdelt => Reset::Daily,
+            ProviderKind::Openalex | ProviderKind::Gdelt | ProviderKind::Tinyfish => Reset::Daily,
             _ => Reset::Monthly,
         }
     }
 
-    /// Local deep-research ceilings for web providers; override `dr_quota`/`dr_reset` for the
-    /// account. API providers share their normal quota. These defaults do not describe a plan.
+    /// Deep research draws on its own `#dr` budget instead of the account quota.
+    pub fn dr_budget(self) -> bool {
+        self.is_web() || self == ProviderKind::Tinyfish
+    }
+
+    /// Default `#dr` ceiling for `dr_budget` providers; others share their normal quota.
     pub fn dr_quota(self) -> i64 {
         match self {
             ProviderKind::GeminiWeb => 10,
             ProviderKind::GrokWeb => 3,
             ProviderKind::ChatgptWeb => 25,
+            ProviderKind::Tinyfish => 5,
             _ => self.default_quota(),
         }
     }
@@ -288,7 +299,7 @@ impl ProviderKind {
         use ProviderKind::*;
         &[
             Serper, Tavily, Exa, Firecrawl, Parallel, Steel, Keenable, Jina, Openalex, Gdelt,
-            GeminiWeb, GrokWeb, ChatgptWeb,
+            Tinyfish, GeminiWeb, GrokWeb, ChatgptWeb,
         ]
     }
 
@@ -305,6 +316,7 @@ impl ProviderKind {
             ProviderKind::Jina => "read any URL as clean markdown, works without a key",
             ProviderKind::Openalex => "scholarly papers search, works without a key",
             ProviderKind::Gdelt => "global news article search, no key",
+            ProviderKind::Tinyfish => "search + page fetch + deep research, free daily allowance",
             ProviderKind::GeminiWeb => "your logged-in Gemini (chat + deep research)",
             ProviderKind::GrokWeb => "your logged-in Grok (search + deepsearch)",
             ProviderKind::ChatgptWeb => {
@@ -325,6 +337,7 @@ impl ProviderKind {
             ProviderKind::Keenable => "https://keenable.ai",
             ProviderKind::Jina => "https://jina.ai/reader",
             ProviderKind::Openalex => "https://openalex.org/settings/api",
+            ProviderKind::Tinyfish => "https://tinyfish.ai",
             _ => "",
         }
     }
@@ -343,6 +356,7 @@ impl ProviderKind {
             ProviderKind::Jina => "keyless 20 / min · key adds 10M free tokens, one-time",
             ProviderKind::Openalex => "keyless ~100 searches / day · free key ~1,000 / day",
             ProviderKind::Gdelt => "free, no key · 1 request / 5 s",
+            ProviderKind::Tinyfish => "12,000 searches + 1,000 reads / day · 5 research runs / day",
             _ => "",
         }
     }
@@ -354,10 +368,12 @@ pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
         Capability::Search => &[
-            Tavily, Serper, Exa, Parallel, Keenable, GeminiWeb, GrokWeb, ChatgptWeb,
+            Tavily, Serper, Exa, Parallel, Keenable, Tinyfish, GeminiWeb, GrokWeb, ChatgptWeb,
         ],
-        Capability::Read => &[Firecrawl, Tavily, Serper, Exa, Keenable, Jina],
-        Capability::DeepResearch => &[GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily],
+        Capability::Read => &[Firecrawl, Tavily, Serper, Exa, Keenable, Jina, Tinyfish],
+        Capability::DeepResearch => &[
+            GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish,
+        ],
         Capability::Browser => &[Steel],
         Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
     }
@@ -406,7 +422,7 @@ pub fn order_for(
 /// Whether every niche knob set on this request is served *natively* by `kind`, vs. baked into the
 /// query by `niche::rewrite_query`. `None` when no niche knob is set. Drives the route log's
 /// native/rewrite marker; mirrors the per-provider mapping each `call` applies.
-pub fn niche_native(kind: ProviderKind, input: &Input) -> Option<bool> {
+pub fn niche_native(kind: ProviderKind, cap: Capability, input: &Input) -> Option<bool> {
     if !niche::any(input) {
         return None;
     }
@@ -417,6 +433,8 @@ pub fn niche_native(kind: ProviderKind, input: &Input) -> Option<bool> {
     use ProviderKind::*;
     Some(match kind {
         Exa => true,
+        // research has no date filter on papers, so that date rides in the query
+        Tinyfish => !(cap == Capability::DeepResearch && academic && recency),
         // topic native only for news; academic falls to query-rewrite
         Tavily => !academic,
         // domains -> site: rewrite
@@ -552,6 +570,20 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
             modes: &[],
             examples: &[
                 "search(query=\"ukraine ceasefire\", provider=\"gdelt\", recency=\"week\")",
+            ],
+        },
+        Tinyfish => ProviderExtras {
+            niches: &[
+                "topic=news → news index",
+                "topic=academic → research papers",
+                "recency → recency_minutes / after_date (academic: pub_year_min)",
+                "domains → include/exclude_domains",
+                "depth=deep → deep research mode",
+            ],
+            modes: &[],
+            examples: &[
+                "search(query=\"rust async runtimes\", provider=\"tinyfish\", domains=[\"docs.rs\"])",
+                "deep_research(query=\"state of solid-state batteries\", provider=\"tinyfish\")",
             ],
         },
         GrokWeb => ProviderExtras {
@@ -739,6 +771,7 @@ impl Provider {
             ProviderKind::Jina => jina::call(b, key, client, cap, input).await,
             ProviderKind::Openalex => openalex::call(b, key, client, cap, input).await,
             ProviderKind::Gdelt => gdelt::call(b, key, client, cap, input).await,
+            ProviderKind::Tinyfish => tinyfish::call(b, key, client, cap, input).await,
             ProviderKind::GeminiWeb | ProviderKind::GrokWeb | ProviderKind::ChatgptWeb => {
                 Err(Error::Unsupported(self.kind.as_str()))
             }
@@ -1062,10 +1095,13 @@ mod tests {
             domains: Some(vec!["nasa.gov".into()]),
             ..Default::default()
         };
-        assert_eq!(niche_native(Exa, &dom), Some(true));
-        assert_eq!(niche_native(Serper, &dom), Some(false)); // domains -> site:
-        assert_eq!(niche_native(GrokWeb, &dom), Some(false));
-        assert_eq!(niche_native(Exa, &Input::default()), None);
+        assert_eq!(niche_native(Exa, Capability::Search, &dom), Some(true));
+        assert_eq!(niche_native(Serper, Capability::Search, &dom), Some(false)); // domains -> site:
+        assert_eq!(niche_native(GrokWeb, Capability::Search, &dom), Some(false));
+        assert_eq!(
+            niche_native(Exa, Capability::Search, &Input::default()),
+            None
+        );
         // tavily serves news natively but rewrites academic
         let news = Input {
             topic: Some("news".into()),
@@ -1075,8 +1111,20 @@ mod tests {
             topic: Some("academic".into()),
             ..Default::default()
         };
-        assert_eq!(niche_native(Tavily, &news), Some(true));
-        assert_eq!(niche_native(Tavily, &acad), Some(false));
+        assert_eq!(niche_native(Tavily, Capability::Search, &news), Some(true));
+        assert_eq!(niche_native(Tavily, Capability::Search, &acad), Some(false));
+        let recent = Input {
+            recency: Some("month".into()),
+            ..acad
+        };
+        assert_eq!(
+            niche_native(Tinyfish, Capability::Search, &recent),
+            Some(true)
+        );
+        assert_eq!(
+            niche_native(Tinyfish, Capability::DeepResearch, &recent),
+            Some(false)
+        );
     }
 
     #[test]

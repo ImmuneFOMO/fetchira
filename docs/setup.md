@@ -71,6 +71,7 @@ Every provider is optional. Start with one or two that match the job, then add m
 | `jina` | Optional API key | Page reads | [jina.ai](https://jina.ai/reader) |
 | `openalex` | Optional API key | Academic paper search | [openalex.org](https://openalex.org/settings/api) |
 | `gdelt` | None | News article search | [gdeltproject.org](https://www.gdeltproject.org) |
+| `tinyfish` | API key | Search, page reads and deep research | [tinyfish.ai](https://tinyfish.ai) |
 | `gemini_web` | Browser login | Search, research, images and file Q&A | Google account |
 | `grok_web` | Browser login | Search, research, images and file Q&A | X/Grok account |
 | `chatgpt_web` | Browser login + Chrome/Chromium | Search, research, images and file Q&A | OpenAI account |

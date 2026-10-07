@@ -494,7 +494,7 @@ impl Router {
                                 .await;
                         }
                         // Best-effort route log (never fail the call over telemetry).
-                        let niche = match providers::niche_native(kind, input) {
+                        let niche = match providers::niche_native(kind, cap, input) {
                             Some(true) => "native",
                             Some(false) => "rewrite",
                             None => "",
@@ -803,8 +803,8 @@ impl Router {
             };
         }
         let mut out = vec![mv];
-        // Web providers track deep_research against a separate daily budget.
-        if b.provider.kind.is_web() {
+        // Web providers and tinyfish track deep_research against a separate budget.
+        if b.provider.kind.dr_budget() {
             let label = format!("{}#dr", b.label);
             let mut dv = self
                 .view(
@@ -1311,7 +1311,7 @@ fn human_wait(wait: Duration) -> String {
 }
 
 fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
-    if b.provider.kind.is_web() {
+    if b.provider.kind.dr_budget() {
         match cap {
             Capability::DeepResearch => return (format!("{}#dr", b.label), b.dr_quota, b.dr_reset),
             // Image limits are feature-specific and normally daily. Never let one exhausted image

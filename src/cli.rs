@@ -286,7 +286,7 @@ fn list_remaining(web: bool, live: bool, remaining: Option<i64>) -> String {
 }
 
 fn list_research(web: bool, live: bool, dr: Option<(i64, i64)>) -> String {
-    if !web || !live {
+    if web && !live {
         return "-".into();
     }
     match dr {
@@ -325,7 +325,7 @@ async fn remaining_cell(store: &Store, a: &Account, ready: bool) -> String {
 
 /// Deep-research budget with its configured reset period, or "-" until authorized.
 async fn research_cell(store: &Store, a: &Account, ready: bool) -> String {
-    if !ready || !a.provider.is_web() {
+    if !ready || !a.provider.dr_budget() {
         return "-".to_string();
     }
     let dq = a.dr_quota.unwrap_or_else(|| a.provider.dr_quota());
@@ -2630,6 +2630,7 @@ mod tests {
         assert_eq!(list_remaining(true, true, Some(12)), "12");
         assert_eq!(list_research(true, true, Some((3, 3))), "3/3/day");
         assert_eq!(list_remaining(false, false, Some(2500)), "2500");
+        assert_eq!(list_research(false, false, Some((5, 5))), "5/5/day");
     }
 
     #[test]
