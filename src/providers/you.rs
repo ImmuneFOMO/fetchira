@@ -200,6 +200,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: (cents * 2.0) as i64,
         total: ProviderKind::You.default_quota(),
         usd: Some(cents / 100.0),
+        reset_at: None,
     })
 }
 

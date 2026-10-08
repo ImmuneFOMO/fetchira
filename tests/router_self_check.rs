@@ -1,5 +1,5 @@
 use fetchira::config::{Account, Config, Priority, Reset};
-use fetchira::providers::{Capability, Input, Provider, ProviderKind};
+use fetchira::providers::{Capability, Input, LiveBalance, Provider, ProviderKind};
 use fetchira::router::{Bucket, Conn, Router};
 use fetchira::usage::{period_key, Store};
 use serde_json::json;
@@ -18,8 +18,26 @@ fn bucket(kind: ProviderKind, base: &str, label: &str) -> Bucket {
         reset: Reset::Monthly,
         dr_quota: 100,
         dr_reset: Reset::Monthly,
+        pinned: true,
+        dr_pinned: true,
         proxy: None,
         balance_conn: None,
+    }
+}
+
+fn unpinned(kind: ProviderKind, base: &str, label: &str) -> Bucket {
+    Bucket {
+        pinned: false,
+        ..bucket(kind, base, label)
+    }
+}
+
+fn live(remaining: i64) -> LiveBalance {
+    LiveBalance {
+        remaining,
+        total: 1000,
+        usd: None,
+        reset_at: None,
     }
 }
 
@@ -525,6 +543,31 @@ async fn payment_required_without_balance_endpoint_recovers_after_successful_pro
     assert!(next.text.contains("TAVILY_HIT"));
 }
 
+#[tokio::test]
+async fn payment_required_probe_runs_past_a_spent_estimate() {
+    let exa = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(exa_body()))
+        .expect(1)
+        .mount(&exa)
+        .await;
+    let store = fresh_store("real_402_past_estimate").await;
+    let period = period_key(Reset::Monthly);
+    store.save_live("exa-1", &period, &live(500)).await.unwrap();
+    store.record("exa", "exa-1", &period, 150).await.unwrap();
+    store.mark_exhausted("exa", "exa-1", &period).await.unwrap();
+    store.drain_live("exa-1", &period).await.unwrap();
+    let probe = Router::from_parts(
+        vec![unpinned(ProviderKind::Exa, &exa.uri(), "exa-1")],
+        store,
+    )
+    .call(Capability::Search, &query("probe"), Some(ProviderKind::Exa))
+    .await
+    .unwrap();
+    assert!(probe.text.contains("EXA_HIT"));
+}
+
 // (c) usage() reports correct remaining after recorded calls.
 #[tokio::test]
 async fn usage_reports_remaining() {
@@ -759,6 +802,465 @@ async fn forced_exhausted_errors() {
         matches!(res, Err(fetchira::Error::ProviderForced(_))),
         "got: {res:?}"
     );
+}
+
+#[tokio::test]
+async fn live_snapshot_moves_the_routing_ceiling() {
+    let tav = MockServer::start().await;
+    mount_search(&tav, tavily_body()).await;
+    let store = fresh_store("live_ceiling").await;
+    let probe = store.clone();
+    let period = period_key(Reset::Monthly);
+    store
+        .record("tavily", "tavily-1", &period, 100)
+        .await
+        .unwrap();
+    store
+        .save_live("tavily-1", &period, &live(50))
+        .await
+        .unwrap();
+    let router = Router::from_parts(
+        vec![unpinned(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    let forced = Some(ProviderKind::Tavily);
+    assert!(router
+        .call(Capability::Search, &query("up"), forced)
+        .await
+        .is_ok());
+
+    probe
+        .save_live("tavily-1", &period, &live(0))
+        .await
+        .unwrap();
+    assert!(router
+        .call(Capability::Search, &query("down"), forced)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn pinned_quota_caps_live_snapshot() {
+    let tav = MockServer::start().await;
+    mount_search(&tav, tavily_body()).await;
+    let store = fresh_store("live_pinned").await;
+    let period = period_key(Reset::Monthly);
+    store
+        .record("tavily", "tavily-1", &period, 100)
+        .await
+        .unwrap();
+    store
+        .save_live("tavily-1", &period, &live(50))
+        .await
+        .unwrap();
+    let router = Router::from_parts(
+        vec![bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    assert!(router
+        .call(Capability::Search, &query("hi"), Some(ProviderKind::Tavily))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn pinned_cap_skips_the_balance_refresh() {
+    let tav = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account": {"plan_usage": 0, "plan_limit": 1000}
+        })))
+        .expect(0)
+        .mount(&tav)
+        .await;
+    let store = fresh_store("live_pinned_spent").await;
+    store
+        .record("tavily", "tavily-1", &period_key(Reset::Monthly), 100)
+        .await
+        .unwrap();
+    let res = Router::from_parts(
+        vec![bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    )
+    .call(Capability::Search, &query("q"), Some(ProviderKind::Tavily))
+    .await;
+    assert!(matches!(res, Err(fetchira::Error::ProviderForced(_))));
+}
+
+#[tokio::test]
+async fn spent_counter_refreshes_live_balance_once() {
+    let tav = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account": {"plan_usage": 100, "plan_limit": 1000}
+        })))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(2)
+        .mount(&tav)
+        .await;
+    let store = fresh_store("live_refresh").await;
+    let probe = store.clone();
+    let period = period_key(Reset::Monthly);
+    store
+        .record("tavily", "tavily-1", &period, 100)
+        .await
+        .unwrap();
+    let router = Router::from_parts(
+        vec![unpinned(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    for q in ["first", "second"] {
+        let out = router
+            .call(Capability::Search, &query(q), Some(ProviderKind::Tavily))
+            .await
+            .unwrap();
+        assert!(out.text.contains("TAVILY_HIT"));
+    }
+    let snap = probe.load_live("tavily-1").await.unwrap().unwrap();
+    assert_eq!((snap.used_at_fetch, snap.remaining), (100, 900));
+}
+
+#[tokio::test]
+async fn sibling_with_room_skips_a_spent_balance_reread() {
+    let spent = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "account": {"plan_usage": 0, "plan_limit": 1000}
+        })))
+        .expect(0)
+        .mount(&spent)
+        .await;
+    let tav = MockServer::start().await;
+    mount_search(&tav, tavily_body()).await;
+    let store = fresh_store("sibling_room").await;
+    store
+        .record("tavily", "tavily-1", &period_key(Reset::Monthly), 100)
+        .await
+        .unwrap();
+    let router = Router::from_parts(
+        vec![
+            unpinned(ProviderKind::Tavily, &spent.uri(), "tavily-1"),
+            unpinned(ProviderKind::Tavily, &tav.uri(), "tavily-2"),
+        ],
+        store,
+    );
+    let out = router
+        .call(Capability::Search, &query("q"), Some(ProviderKind::Tavily))
+        .await
+        .unwrap();
+    assert!(out.text.contains("TAVILY_HIT"));
+}
+
+#[tokio::test]
+async fn failed_balance_reread_hides_the_usd() {
+    let tav = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    let store = fresh_store("live_miss_view").await;
+    let period = period_key(Reset::Monthly);
+    let reading = LiveBalance {
+        usd: Some(10.0),
+        ..live(900)
+    };
+    store
+        .save_live("tavily-1", &period, &reading)
+        .await
+        .unwrap();
+    store
+        .record("tavily", "tavily-1", &period, 10)
+        .await
+        .unwrap();
+    let router = Router::from_parts(
+        vec![unpinned(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    router.usage_snapshot().await.unwrap();
+    let views = router.usage_snapshot_cached().await.unwrap();
+    assert_eq!(
+        (views[0].remaining, views[0].quota, views[0].usd),
+        (890, 1000, None)
+    );
+}
+
+#[tokio::test]
+async fn exhausted_account_without_reading_shows_spent() {
+    let store = fresh_store("exhausted_view").await;
+    let period = period_key(Reset::Once);
+    store
+        .record("octen", "octen-1", &period, 4200)
+        .await
+        .unwrap();
+    store
+        .mark_exhausted("octen", "octen-1", &period)
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 5000,
+        reset: Reset::Once,
+        ..unpinned(ProviderKind::Octen, "http://127.0.0.1:9", "octen-1")
+    };
+    let views = Router::from_parts(vec![b], store)
+        .usage_snapshot_cached()
+        .await
+        .unwrap();
+    assert_eq!((views[0].quota - views[0].used, views[0].remaining), (0, 0));
+}
+
+#[tokio::test]
+async fn spent_estimate_without_balance_shows_exhausted() {
+    let store = fresh_store("spent_estimate_view").await;
+    store
+        .record("octen", "octen-1", &period_key(Reset::Once), 5000)
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 5000,
+        reset: Reset::Once,
+        ..unpinned(ProviderKind::Octen, "http://127.0.0.1:9", "octen-1")
+    };
+    let views = Router::from_parts(vec![b], store)
+        .usage_snapshot_cached()
+        .await
+        .unwrap();
+    assert!(views[0].exhausted);
+}
+
+#[tokio::test]
+async fn exhausted_account_with_positive_reading_shows_spent() {
+    let store = fresh_store("exhausted_reading_view").await;
+    let period = period_key(Reset::Monthly);
+    store
+        .record("tavily", "tavily-1", &period, 10)
+        .await
+        .unwrap();
+    store
+        .mark_exhausted("tavily", "tavily-1", &period)
+        .await
+        .unwrap();
+    store
+        .save_live("tavily-1", &period, &live(900))
+        .await
+        .unwrap();
+    let b = unpinned(ProviderKind::Tavily, "http://127.0.0.1:9", "tavily-1");
+    let views = Router::from_parts(vec![b], store)
+        .usage_snapshot_cached()
+        .await
+        .unwrap();
+    assert_eq!((views[0].exhausted, views[0].remaining), (true, 0));
+}
+
+async fn stale_reading(
+    name: &str,
+    remaining: i64,
+    used: i64,
+    pinned: bool,
+    usage: ResponseTemplate,
+) -> (MockServer, Router) {
+    let tav = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(usage)
+        .expect(1)
+        .mount(&tav)
+        .await;
+    let db = temp_db(name);
+    let _ = std::fs::remove_file(&db);
+    let store = Store::open(db.to_str().expect("temp path")).await.unwrap();
+    let period = period_key(Reset::Monthly);
+    store
+        .save_live("tavily-1", &period, &live(remaining))
+        .await
+        .unwrap();
+    store
+        .record("tavily", "tavily-1", &period, used)
+        .await
+        .unwrap();
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&db))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE live_quota SET fetched_at = 0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let router = Router::from_parts(
+        vec![if pinned {
+            bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1")
+        } else {
+            unpinned(ProviderKind::Tavily, &tav.uri(), "tavily-1")
+        }],
+        store,
+    );
+    (tav, router)
+}
+
+#[tokio::test]
+async fn unreadable_spent_reading_keeps_routing() {
+    let (tav, router) =
+        stale_reading("live_miss_route", 2, 2, false, ResponseTemplate::new(500)).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(2)
+        .mount(&tav)
+        .await;
+    for q in ["first", "second"] {
+        assert!(router
+            .call(Capability::Search, &query(q), Some(ProviderKind::Tavily))
+            .await
+            .is_ok());
+    }
+    assert!(!router.usage_snapshot_cached().await.unwrap()[0].exhausted);
+}
+
+#[tokio::test]
+async fn unreadable_reported_zero_stays_spent() {
+    let (tav, router) =
+        stale_reading("live_miss_zero", 0, 0, false, ResponseTemplate::new(500)).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(0)
+        .mount(&tav)
+        .await;
+    assert!(router
+        .call(Capability::Search, &query("q"), Some(ProviderKind::Tavily))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn unreadable_spent_reading_keeps_a_pinned_account_under_its_cap() {
+    let unread = ResponseTemplate::new(500).set_delay(std::time::Duration::from_millis(300));
+    let (tav, router) = stale_reading("live_miss_pinned", 99, 99, true, unread).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    let q = query("q");
+    let calls = (0..3).map(|_| router.call(Capability::Search, &q, Some(ProviderKind::Tavily)));
+    let res = futures_util::future::join_all(calls).await;
+    assert_eq!(res.iter().filter(|r| r.is_ok()).count(), 1);
+}
+
+#[tokio::test]
+async fn unreadable_balance_routes_past_a_spent_estimate() {
+    let tav = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(2)
+        .mount(&tav)
+        .await;
+    let store = fresh_store("live_miss_estimate").await;
+    store
+        .record("tavily", "tavily-1", &period_key(Reset::Monthly), 100)
+        .await
+        .unwrap();
+    let router = Router::from_parts(
+        vec![unpinned(ProviderKind::Tavily, &tav.uri(), "tavily-1")],
+        store,
+    );
+    for q in ["first", "second"] {
+        assert!(router
+            .call(Capability::Search, &query(q), Some(ProviderKind::Tavily))
+            .await
+            .is_ok());
+    }
+}
+
+#[tokio::test]
+async fn balance_reread_in_flight_holds_parallel_callers() {
+    let spent = ResponseTemplate::new(200)
+        .set_body_json(json!({"account": {"plan_usage": 1000, "plan_limit": 1000}}))
+        .set_delay(std::time::Duration::from_millis(800));
+    let (tav, router) = stale_reading("live_in_flight", 0, 0, false, spent).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(0)
+        .mount(&tav)
+        .await;
+    let q = query("q");
+    let calls = (0..5).map(|_| router.call(Capability::Search, &q, Some(ProviderKind::Tavily)));
+    let res = futures_util::future::join_all(calls).await;
+    assert!(res.iter().all(|r| r.is_err()));
+}
+
+#[tokio::test]
+async fn parallel_callers_follow_a_positive_reread_in_flight() {
+    let fresh = ResponseTemplate::new(200)
+        .set_body_json(json!({"account": {"plan_usage": 0, "plan_limit": 1000}}))
+        .set_delay(std::time::Duration::from_millis(800));
+    let (tav, router) = stale_reading("live_in_flight_ok", 0, 0, false, fresh).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(5)
+        .mount(&tav)
+        .await;
+    let q = query("q");
+    let calls = (0..5).map(|_| router.call(Capability::Search, &q, Some(ProviderKind::Tavily)));
+    let res = futures_util::future::join_all(calls).await;
+    assert!(res.iter().all(|r| r.is_ok()));
+}
+
+#[tokio::test]
+async fn a_cancelled_reread_frees_the_account() {
+    let slow = ResponseTemplate::new(200)
+        .set_body_json(json!({"account": {"plan_usage": 0, "plan_limit": 1000}}))
+        .set_delay(std::time::Duration::from_secs(5));
+    let (tav, router) = stale_reading("live_cancelled", 0, 0, false, slow).await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(1)
+        .mount(&tav)
+        .await;
+    let q = query("q");
+    let first = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        router.call(Capability::Search, &q, Some(ProviderKind::Tavily)),
+    )
+    .await;
+    assert!(first.is_err());
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"account": {"plan_usage": 0, "plan_limit": 1000}})),
+        )
+        .with_priority(1)
+        .expect(1)
+        .mount(&tav)
+        .await;
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        router.call(Capability::Search, &q, Some(ProviderKind::Tavily)),
+    )
+    .await;
+    assert!(second.is_ok_and(|r| r.is_ok()));
 }
 
 #[tokio::test]

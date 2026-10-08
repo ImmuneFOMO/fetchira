@@ -150,6 +150,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: (remaining / cost).round() as i64,
         total: (r["daily_budget_usd"].as_f64().unwrap_or(remaining) / cost).round() as i64,
         usd: None,
+        reset_at: None,
     })
 }
 

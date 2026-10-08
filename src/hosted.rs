@@ -2700,6 +2700,8 @@ mod tests {
             limits,
             usd: None,
             pending: false,
+            reset_at: None,
+            fetched_at: None,
         }
     }
 

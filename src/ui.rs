@@ -1719,6 +1719,13 @@ pub(crate) fn overview_groups(
         e.accounts += 1;
         e.pending |= v.pending;
         e.window_secs = min_opt(e.window_secs, v.window_secs);
+        e.reset_after = sooner_reset(
+            e.reset_after.take(),
+            v.reset_at
+                .and_then(DateTime::from_timestamp_millis)
+                .map(|t| t.to_rfc3339())
+                .as_deref(),
+        );
         if let Some(u) = v.usd {
             e.usd = Some(e.usd.unwrap_or(0.0) + u);
         }
@@ -1860,7 +1867,7 @@ pub(crate) fn overview_groups(
                         a.quota,
                         a.window_secs,
                         Some(&a.period),
-                        None,
+                        a.reset_after.as_deref(),
                         false,
                     );
                     // Estimate providers (a $/token→ops conversion) show "≈" — the count isn't exact.
@@ -1905,6 +1912,8 @@ struct Agg {
     logged: bool,
     /// Summed real $ balance for top-up providers (exa/parallel/steel); None for credit providers.
     usd: Option<f64>,
+    /// Soonest provider-reported renewal (ISO) among the accounts; else the period boundary.
+    reset_after: Option<String>,
     /// Any account still awaiting its first live figure (cached snapshot) → the card shows a loader.
     pending: bool,
 }
@@ -1920,6 +1929,7 @@ impl Agg {
             web: false,
             logged: false,
             usd: None,
+            reset_after: None,
             pending: false,
         }
     }
@@ -2298,6 +2308,8 @@ mod tests {
             limits,
             usd: None,
             pending: false,
+            reset_at: None,
+            fetched_at: None,
         }
     }
 

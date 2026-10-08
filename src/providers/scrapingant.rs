@@ -80,6 +80,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining,
         total: v["plan_total_credits"].as_i64().unwrap_or(remaining),
         usd: None,
+        reset_at: None,
     })
 }
 

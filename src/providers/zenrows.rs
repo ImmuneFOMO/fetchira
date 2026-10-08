@@ -72,6 +72,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: (total - v["usage_credits"].as_i64().unwrap_or(0)).max(0),
         total,
         usd: None,
+        reset_at: None,
     })
 }
 

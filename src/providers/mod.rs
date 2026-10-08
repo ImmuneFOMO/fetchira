@@ -145,6 +145,8 @@ pub struct Outcome {
     /// re-saves them so a web session's rolling token stays fresh across processes. Empty for
     /// API-key providers and for web calls that served from a cached bearer.
     pub cookie_updates: Vec<(String, String)>,
+    /// Live balance reported alongside the reply (rate-limit headers); the router caches it.
+    pub live: Option<LiveBalance>,
 }
 
 /// A base64-encoded image plus its MIME type, carried out-of-band from `text`.
@@ -162,6 +164,7 @@ impl Outcome {
             session: None,
             image: None,
             cookie_updates: Vec::new(),
+            live: None,
         }
     }
 }
@@ -279,8 +282,26 @@ impl ProviderKind {
         matches!(self, ProviderKind::Parallel | ProviderKind::Exa)
     }
 
-    /// Local routing ceilings, not provider plan promises. Live balances update the display;
-    /// they do not raise these ceilings. Override per account to match the intended allowance.
+    /// Kinds `Provider::live_balance` can read with this account's credentials.
+    pub fn has_live_balance(self, keyed: bool) -> bool {
+        match self {
+            ProviderKind::Jina | ProviderKind::Openalex => keyed,
+            ProviderKind::Serper
+            | ProviderKind::Tavily
+            | ProviderKind::Firecrawl
+            | ProviderKind::Steel
+            | ProviderKind::Linkup
+            | ProviderKind::You
+            | ProviderKind::Serpapi
+            | ProviderKind::Scrapingant
+            | ProviderKind::Zenrows
+            | ProviderKind::Hyperbrowser
+            | ProviderKind::Browserless => true,
+            _ => false,
+        }
+    }
+
+    /// Routing estimate until the provider reports a live limit; a configured `quota` caps both.
     pub fn default_quota(self) -> i64 {
         match self {
             ProviderKind::Tavily => 1000,
@@ -857,6 +878,8 @@ pub struct LiveBalance {
     pub total: i64,
     /// Real dollar balance for top-up $ providers (exa/parallel/steel); None for credit providers.
     pub usd: Option<f64>,
+    /// Unix ms when the provider renews this balance, when it says.
+    pub reset_at: Option<i64>,
 }
 
 /// One tool/feature's live allowance for the account's tier (e.g. deep_research, image_gen).

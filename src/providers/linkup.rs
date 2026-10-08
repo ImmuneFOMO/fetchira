@@ -229,6 +229,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: (usd * 200.0) as i64,
         total: ProviderKind::Linkup.default_quota(),
         usd: Some(usd),
+        reset_at: None,
     })
 }
 

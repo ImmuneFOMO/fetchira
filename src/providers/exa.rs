@@ -179,6 +179,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: searches,
         total: searches,
         usd: Some(cents / 100.0),
+        reset_at: None,
     })
 }
 

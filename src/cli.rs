@@ -316,6 +316,12 @@ async fn remaining_cell(store: &Store, a: &Account, ready: bool) -> String {
     }
     let quota = a.quota.unwrap_or_else(|| a.provider.default_quota());
     let period = period_key(a.reset.unwrap_or_else(|| a.provider.default_reset()));
+    let quota = crate::router::effective_quota(
+        quota,
+        a.quota.is_some(),
+        store.load_live(&a.label).await.ok().flatten().as_ref(),
+        &period,
+    );
     store
         .remaining(&a.label, quota, &period)
         .await
@@ -331,16 +337,20 @@ async fn research_cell(store: &Store, a: &Account, ready: bool) -> String {
     let dq = a.dr_quota.unwrap_or_else(|| a.provider.dr_quota());
     let reset = a.dr_reset.unwrap_or_else(|| a.provider.dr_reset());
     let period = period_key(reset);
-    let dr = store
-        .remaining(&format!("{}#dr", a.label), dq, &period)
-        .await
-        .unwrap_or(dq);
+    let label = format!("{}#dr", a.label);
+    let eff = crate::router::effective_quota(
+        dq,
+        a.dr_quota.is_some(),
+        store.load_live(&label).await.ok().flatten().as_ref(),
+        &period,
+    );
+    let dr = store.remaining(&label, eff, &period).await.unwrap_or(eff);
     let unit = match reset {
         crate::config::Reset::Daily => "day",
         crate::config::Reset::Monthly => "month",
         crate::config::Reset::Once => "one-time",
     };
-    format!("{dr}/{dq}/{unit}")
+    format!("{dr}/{eff}/{unit}")
 }
 
 pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -2258,6 +2268,7 @@ pub fn help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Reset;
 
     #[cfg(unix)]
     #[test]
@@ -2637,5 +2648,34 @@ mod tests {
     fn gdelt_takes_no_key() {
         assert!(!ProviderKind::Gdelt.takes_key());
         assert!(ProviderKind::Openalex.takes_key());
+    }
+
+    #[tokio::test]
+    async fn research_cell_divides_by_the_live_ceiling() {
+        let path = std::env::temp_dir().join(format!("fetchira_dr_cell_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        let a = Account {
+            provider: ProviderKind::Tinyfish,
+            label: "tinyfish-1".into(),
+            api_key: Some("k".into()),
+            proxy: None,
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        };
+        let bal = crate::providers::LiveBalance {
+            remaining: 10,
+            total: 10,
+            usd: None,
+            reset_at: None,
+        };
+        store
+            .save_live("tinyfish-1#dr", &period_key(Reset::Daily), &bal)
+            .await
+            .unwrap();
+        assert_eq!(research_cell(&store, &a, true).await, "10/10/day");
+        let _ = std::fs::remove_file(&path);
     }
 }

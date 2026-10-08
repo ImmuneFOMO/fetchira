@@ -145,6 +145,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: total.saturating_sub(used).max(0),
         total,
         usd: None,
+        reset_at: None,
     })
 }
 

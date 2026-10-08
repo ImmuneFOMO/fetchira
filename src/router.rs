@@ -13,7 +13,7 @@ use crate::providers::{
     Provider, ProviderKind,
 };
 use crate::proxy;
-use crate::usage::{period_key, DebugLog, RouteLog, Store};
+use crate::usage::{period_key, DebugLog, LiveRow, RouteLog, Store};
 use crate::web;
 
 /// An account's transport: an API client (reqwest) or a cookie-authed impersonating client (wreq).
@@ -32,6 +32,9 @@ pub struct Bucket {
     pub reset: Reset,
     pub dr_quota: i64,
     pub dr_reset: Reset,
+    /// The quota came from config, so it caps live limits instead of yielding to them.
+    pub pinned: bool,
+    pub dr_pinned: bool,
     pub proxy: Option<String>,
     /// Cookie client for reading the dashboard balance of a `balance_session` provider (exa/parallel),
     /// separate from the api-key `conn` that does the actual calls. `None` until `fetchira login`.
@@ -68,6 +71,12 @@ pub struct UsageView {
     /// instead of the soft placeholder. Never set in a fetching snapshot.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
+    /// Unix ms when the provider renews the live figure, when it says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<i64>,
+    /// Unix ms the live figure was read; our own calls count it down since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<i64>,
 }
 
 pub struct Router {
@@ -81,9 +90,8 @@ pub struct Router {
     // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. Browser misses are
     // cached; HTTP-only misses are not, so a later browser-enabled snapshot can retry.
     live_limits: Mutex<HashMap<String, (Instant, Option<LiveLimits>)>>,
-    // Live API-key balances (serper/tavily/firecrawl/steel), keyed by label. `None` caches a
-    // miss so a provider without a usable balance endpoint isn't re-polled every snapshot.
-    balance: Mutex<HashMap<String, (Instant, Option<LiveBalance>)>>,
+    // Last balance fetch per label, hit or miss: snapshots re-poll at most every 20s.
+    balance: Mutex<HashMap<String, Instant>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
     debug: Option<i64>,
     // ponytail: serialize hosted Chromium work; overlapping browser processes reset CDP on small VPSes.
@@ -95,10 +103,32 @@ pub struct Router {
 
 const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(30);
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+const LIVE_REFRESH: Duration = Duration::from_secs(60);
+// Outlasts the concurrent bounded balance reads plus their writes; also caps a waiter's wait.
+const LIVE_READ: Duration = Duration::from_secs(20);
 
 struct ExhaustionRecovery {
     /// A one-shot probe lease is released only after the provider accepts the request.
     probe_until: Option<i64>,
+}
+
+/// Frees a `#live` lease whose re-read was dropped mid-flight, so waiters don't sit out its expiry.
+struct Lease {
+    store: Store,
+    label: String,
+    until: Option<i64>,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let (Some(until), Ok(rt)) = (self.until, tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        let (store, label) = (self.store.clone(), std::mem::take(&mut self.label));
+        rt.spawn(async move {
+            let _ = store.release_cooldown(&label, until).await;
+        });
+    }
 }
 
 impl Router {
@@ -219,6 +249,8 @@ impl Router {
                 reset: acc.reset.unwrap_or_else(|| acc.provider.default_reset()),
                 dr_quota: acc.dr_quota.unwrap_or_else(|| acc.provider.dr_quota()),
                 dr_reset: acc.dr_reset.unwrap_or_else(|| acc.provider.dr_reset()),
+                pinned: acc.quota.is_some(),
+                dr_pinned: acc.dr_quota.is_some(),
                 provider: Provider::new(acc.provider),
                 conn,
                 key,
@@ -311,6 +343,7 @@ impl Router {
         };
         for &kind in &order {
             let mut cands: Vec<(usize, i64, String, i64, String, Option<i64>)> = Vec::new();
+            let mut spent = Vec::new();
             for (i, b) in self.buckets.iter().enumerate() {
                 if b.provider.kind != kind {
                     continue;
@@ -318,7 +351,7 @@ impl Router {
                 if account_label.is_some_and(|label| b.label != label) {
                     continue;
                 }
-                let (blabel, bquota, breset) = budget(b, cap);
+                let (blabel, bquota, pinned, breset) = budget(b, cap);
                 let period = period_key(breset);
                 if let Some(wait) = self.store.cooldown_remaining(&blabel).await? {
                     last_err = Some(Error::rate_limit_after(
@@ -332,19 +365,27 @@ impl Router {
                     ));
                     continue;
                 }
-                let mut rem = self.store.remaining(&blabel, bquota, &period).await?;
+                let (mut quota, mut rem) = self.headroom(&blabel, bquota, pinned, &period).await?;
                 let mut probe_until = None;
                 if rem == 0 {
                     if let Some(recovery) =
                         self.recover_exhaustion(b, cap, &blabel, &period).await?
                     {
                         probe_until = recovery.probe_until;
-                        rem = self.store.remaining(&blabel, bquota, &period).await?;
+                        (quota, rem) = self.headroom(&blabel, bquota, pinned, &period).await?;
                     } else if self.store.cooldown_remaining(&blabel).await?.is_none() {
                         // A sibling may have cleared the mark from a positive live balance while
                         // this caller waited on recovery. Re-read only when it left no probe lease;
                         // an active lease still owns the sole no-balance request.
-                        rem = self.store.remaining(&blabel, bquota, &period).await?;
+                        (quota, rem) = self.headroom(&blabel, bquota, pinned, &period).await?;
+                    }
+                    if rem == 0 && probe_until.is_some() {
+                        (quota, rem) = self
+                            .provider_decides(&blabel, bquota, pinned, &period)
+                            .await?;
+                    } else if rem == 0 {
+                        spent.push((i, blabel, bquota, pinned, period));
+                        continue;
                     }
                 }
                 // For tool-gated capabilities, trust the provider's live allowance over the soft
@@ -363,12 +404,41 @@ impl Router {
                     }
                 }
                 if rem > 0 {
-                    cands.push((i, rem, blabel, bquota, period, probe_until));
+                    cands.push((i, rem, blabel, quota, period, probe_until));
+                }
+            }
+            // A re-read can stall for seconds, so a spent balance waits until no sibling has room.
+            if cands.is_empty() {
+                for (i, blabel, bquota, pinned, period) in spent {
+                    let Some(landed) = self
+                        .refresh_live(&self.buckets[i], &blabel, bquota, pinned, &period)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    let (mut quota, mut rem) =
+                        self.headroom(&blabel, bquota, pinned, &period).await?;
+                    // A zero the provider reported holds; only our own count-down defers to it.
+                    if rem == 0
+                        && !landed
+                        && self
+                            .store
+                            .load_live(&blabel)
+                            .await?
+                            .is_none_or(|s| s.remaining > 0)
+                    {
+                        (quota, rem) = self
+                            .provider_decides(&blabel, bquota, pinned, &period)
+                            .await?;
+                    }
+                    if rem > 0 {
+                        cands.push((i, rem, blabel, quota, period, None));
+                    }
                 }
             }
             cands.sort_by_key(|a| std::cmp::Reverse(a.1));
 
-            for (i, _rem, blabel, bquota, period, probe_until) in cands {
+            for (i, _rem, blabel, quota, period, probe_until) in cands {
                 let b = &self.buckets[i];
                 // Reserve the slot *before* the network call so concurrent tasks can't all clear the
                 // same `remaining > 0` gate and stampede one account past its quota. Claim a nominal
@@ -376,7 +446,7 @@ impl Router {
                 // A `false` means a sibling took the last slot meanwhile — move to the next account.
                 if !self
                     .store
-                    .reserve(kind.as_str(), &blabel, bquota, &period, 1, probe_until)
+                    .reserve(kind.as_str(), &blabel, quota, &period, 1, probe_until)
                     .await?
                 {
                     continue;
@@ -493,6 +563,9 @@ impl Router {
                                 .record(kind.as_str(), &blabel, &period, o.cost - 1)
                                 .await;
                         }
+                        if let Some(live) = o.live {
+                            let _ = self.store.save_reply_live(&blabel, &period, &live).await;
+                        }
                         // Best-effort route log (never fail the call over telemetry).
                         let niche = match providers::niche_native(kind, cap, input) {
                             Some(true) => "native",
@@ -570,6 +643,7 @@ impl Router {
                                     .store
                                     .mark_exhausted(kind.as_str(), &blabel, &period)
                                     .await;
+                                let _ = self.store.drain_live(&blabel, &period).await;
                                 // A provider-side 402 is authoritative for now, but a top-up must
                                 // eventually revive even a `Reset::Once` account. One process gets
                                 // a fresh balance check/probe after this persisted interval.
@@ -678,9 +752,6 @@ impl Router {
         // API providers with a balance endpoint recover only from a fresh positive balance. When
         // no balance can be read, clear the marker for this claimed one-shot provider probe.
         if let Some(balance) = self.fetch_live_balance(b).await {
-            if let Ok(mut cache) = self.balance.lock() {
-                cache.insert(b.label.clone(), (Instant::now(), Some(balance)));
-            }
             if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
                 return Ok(None);
             }
@@ -691,6 +762,10 @@ impl Router {
             return Ok(cleared.then_some(ExhaustionRecovery { probe_until: None }));
         }
         let cleared = self.store.clear_quota_exhausted(label, period).await?;
+        if cleared {
+            // The 402 drained the cached balance; the probe now decides instead.
+            let _ = self.store.clear_live(label).await;
+        }
         Ok(cleared.then_some(ExhaustionRecovery {
             probe_until: Some(probe_until),
         }))
@@ -727,9 +802,6 @@ impl Router {
                 probe_until: Some(probe_until),
             }));
         };
-        if let Ok(mut cache) = self.balance.lock() {
-            cache.insert(b.label.clone(), (Instant::now(), Some(balance)));
-        }
         if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
             return Ok(None);
         }
@@ -820,6 +892,7 @@ impl Router {
                     &proxy,
                 )
                 .await?;
+            self.overlay_live(b, &mut dv, b.dr_quota, b.dr_pinned).await;
             self.patch_live(b, true, &mut dv, fetch).await;
             // Prefer the provider's live deep-research allowance over the soft counter. A live
             // `total` (grok, tier-aware) overrides the ceiling too, so a locked tier reads 0/0
@@ -836,6 +909,21 @@ impl Router {
                 }
             }
             out.push(dv);
+        }
+        // Exhausted means the router skips it: a spent figure it would still re-read is not.
+        for v in &mut out {
+            let (quota, pinned) = if v.label.ends_with("#dr") {
+                (b.dr_quota, b.dr_pinned)
+            } else {
+                (b.quota, b.pinned)
+            };
+            v.exhausted = v.remaining <= 0
+                && !self
+                    .unconfirmed(b, &v.label, quota, pinned, &v.period)
+                    .await?;
+            if v.exhausted {
+                v.used = v.used.max(v.quota);
+            }
         }
         Ok(out)
     }
@@ -870,43 +958,170 @@ impl Router {
         v.window_secs = Some(lq.window_secs);
     }
 
-    /// Overwrite an API-key bucket's soft counter with the provider's live balance when it reports
-    /// one (serper/tavily/firecrawl, and steel on paid tiers). Cached 20s; a miss is cached too,
-    /// so providers without a usable endpoint (exa/parallel/steel-free) keep the corrected constant.
+    /// Overlay an API-key bucket's live balance, re-read at most every 20s when fetching.
     async fn patch_live_balance(&self, b: &Bucket, v: &mut UsageView, fetch: bool) {
         let Conn::Api(_) = &b.conn else { return };
-        let cached = self.balance.lock().ok().and_then(|m| {
+        let recent = self.balance.lock().ok().is_some_and(|m| {
             m.get(&b.label)
-                .map(|(t, bal)| (t.elapsed() < Duration::from_secs(20), *bal))
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(20))
         });
-        let bal = match cached {
-            Some((true, bal)) => bal,
-            Some((false, bal)) if !fetch => bal,
-            None if !fetch => return,
-            _ => {
-                let fresh = self.fetch_live_balance(b).await;
-                if let Ok(mut m) = self.balance.lock() {
-                    m.insert(b.label.clone(), (Instant::now(), fresh));
-                }
-                fresh
-            }
-        };
-        let Some(bal) = bal else { return };
-        // Top-ups can push the balance past the original grant, so the gauge ceiling follows it.
-        v.quota = bal.total.max(bal.remaining);
-        v.remaining = bal.remaining.max(0);
-        v.used = (v.quota - v.remaining).max(0);
-        v.exhausted = v.remaining <= 0;
-        v.usd = bal.usd;
+        if fetch && !recent {
+            self.fetch_live_balance(b).await;
+        }
+        self.overlay_live(b, v, b.quota, b.pinned).await;
     }
 
-    /// Fetch a balance without consulting the cache. Recovery uses this so a stale positive cache
-    /// can never clear a durable-looking legacy exhaustion mark.
+    /// Overlay the cached live reading on a view, counted down by our calls since it was read.
+    async fn overlay_live(&self, b: &Bucket, v: &mut UsageView, quota: i64, pinned: bool) {
+        let Conn::Api(_) = &b.conn else { return };
+        let Ok(Some(snap)) = self.store.load_live(&v.label).await else {
+            return;
+        };
+        let eff = effective_quota(quota, pinned, Some(&snap), &v.period);
+        // Top-ups can push the balance past the original grant, so the gauge ceiling follows it.
+        let ceiling = snap.total.max(snap.remaining);
+        v.quota = if pinned { ceiling.min(quota) } else { ceiling };
+        // The router honors an exhausted mark over any reading until recovery re-checks it.
+        v.remaining = if v.exhausted {
+            0
+        } else {
+            (eff - v.used).min(v.quota).max(0)
+        };
+        v.used = (v.quota - v.remaining).max(0);
+        v.exhausted = v.remaining <= 0;
+        v.usd = snap.usd;
+        v.reset_at = snap.reset_at;
+        v.fetched_at = Some(snap.fetched_at);
+    }
+
+    /// The routing ceiling for a budget label and what is left of it.
+    async fn headroom(
+        &self,
+        label: &str,
+        quota: i64,
+        pinned: bool,
+        period: &str,
+    ) -> Result<(i64, i64)> {
+        let quota = effective_quota(
+            quota,
+            pinned,
+            self.store.load_live(label).await?.as_ref(),
+            period,
+        );
+        Ok((quota, self.store.remaining(label, quota, period).await?))
+    }
+
+    /// The provider decides a spent ceiling nothing can confirm; a pinned cap still holds.
+    async fn provider_decides(
+        &self,
+        label: &str,
+        quota: i64,
+        pinned: bool,
+        period: &str,
+    ) -> Result<(i64, i64)> {
+        Ok(if pinned {
+            (quota, self.store.remaining(label, quota, period).await?)
+        } else {
+            (i64::MAX, 1)
+        })
+    }
+
+    /// Re-read a spent budget's stale balance, once a minute across processes; `Some(landed)`.
+    async fn refresh_live(
+        &self,
+        b: &Bucket,
+        label: &str,
+        quota: i64,
+        pinned: bool,
+        period: &str,
+    ) -> Result<Option<bool>> {
+        if !self.unconfirmed(b, label, quota, pinned, period).await? {
+            return Ok(None);
+        }
+        // A read that failed within the minute isn't retried yet.
+        let unread = format!("{label}#unread");
+        if self.store.cooldown_remaining(&unread).await?.is_some() {
+            return Ok(Some(false));
+        }
+        let lock = format!("{label}#live");
+        let Some(until) = self.store.claim_cooldown(&lock, LIVE_READ).await? else {
+            return self.await_read(label, &lock, &unread).await;
+        };
+        let mut lease = Lease {
+            store: self.store.clone(),
+            label: lock,
+            until: Some(until),
+        };
+        self.fetch_live_balance(b).await;
+        // Only a reading routing can use counts; one already past its reset is no reading.
+        let landed = self
+            .store
+            .load_live(label)
+            .await?
+            .is_some_and(|s| fresh(&s));
+        if !landed {
+            self.store.set_cooldown(&unread, LIVE_REFRESH).await?;
+        }
+        self.store.release_cooldown(&lease.label, until).await?;
+        lease.until = None;
+        Ok(Some(landed))
+    }
+
+    /// Take the outcome of a sibling's in-flight re-read (any process), waiting at most `LIVE_READ`.
+    async fn await_read(&self, label: &str, lock: &str, unread: &str) -> Result<Option<bool>> {
+        let deadline = Instant::now() + LIVE_READ;
+        loop {
+            // Checked first: a released lock means the reading, if any, is already saved.
+            let done = self.store.cooldown_remaining(lock).await?.is_none();
+            if self
+                .store
+                .load_live(label)
+                .await?
+                .is_some_and(|s| fresh(&s))
+            {
+                return Ok(Some(true));
+            }
+            if done
+                || Instant::now() >= deadline
+                || self.store.cooldown_remaining(unread).await?.is_some()
+            {
+                return Ok(Some(false));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Whether a spent `label` rests on a stale or missing balance reading the router would re-read.
+    async fn unconfirmed(
+        &self,
+        b: &Bucket,
+        label: &str,
+        quota: i64,
+        pinned: bool,
+        period: &str,
+    ) -> Result<bool> {
+        if label != b.label || !reads_balance(b) {
+            return Ok(false);
+        }
+        // No reading can lift a pinned cap the counter already reached.
+        let u = self.store.usage_for(label, period).await?;
+        if u.exhausted || (pinned && u.used >= quota) {
+            return Ok(false);
+        }
+        Ok(self
+            .store
+            .load_live(label)
+            .await?
+            .is_none_or(|s| !fresh(&s)))
+    }
+
+    /// Fetch a balance without consulting the cache and cache the reading. Recovery uses this so a
+    /// stale positive reading can never clear a durable-looking legacy exhaustion mark.
     async fn fetch_live_balance(&self, b: &Bucket) -> Option<LiveBalance> {
         let Conn::Api(c) = &b.conn else { return None };
         // exa/parallel read their $ balance through the dashboard cookie session; the rest through
         // the api-key. Dashboard reads may rotate cookies, so persist those updates.
-        bounded(async {
+        let bal = bounded(async {
             match &b.balance_conn {
                 Some(wc) => match b.provider.live_balance_web(wc).await {
                     Some((balance, updates)) => {
@@ -918,7 +1133,24 @@ impl Router {
                 None => b.provider.live_balance(&b.key, c).await,
             }
         })
-        .await
+        .await;
+        if let Ok(mut m) = self.balance.lock() {
+            m.insert(b.label.clone(), Instant::now());
+        }
+        match &bal {
+            Some(bal) => {
+                let _ = self
+                    .store
+                    .save_live(&b.label, &period_key(b.reset), bal)
+                    .await;
+            }
+            // Routing keeps counting the reading down, but its dollar figure is no longer current.
+            None if reads_balance(b) => {
+                let _ = self.store.forget_live_usd(&b.label).await;
+            }
+            None => {}
+        }
+        bal
     }
 
     /// Re-save a `balance_session` account's stored cookies with the rolling token the dashboard
@@ -989,7 +1221,7 @@ impl Router {
                 return value;
             }
         }
-        let mut fresh =
+        let mut fetched =
             bounded_browser(
                 b.provider
                     .live_limits(c, &b.label, cookies, browser_fallback),
@@ -997,7 +1229,7 @@ impl Router {
             .await;
         // Persist any rotated session cookies captured on a bearer cache-miss, so the next process
         // starts from the freshest token instead of rotating from a stale one.
-        if let Some(ll) = &mut fresh {
+        if let Some(ll) = &mut fetched {
             if !ll.cookie_updates.is_empty() {
                 self.refresh_session(b, &ll.cookie_updates).await;
             }
@@ -1017,12 +1249,12 @@ impl Router {
         }
         // An HTTP-only miss must not hide the browser fallback from a later full snapshot or
         // reset hint. Successful HTTP reads remain reusable; browser attempts may cache misses.
-        if fresh.is_some() || browser_fallback {
+        if fetched.is_some() || browser_fallback {
             if let Ok(mut m) = self.live_limits.lock() {
-                m.insert(b.label.clone(), (Instant::now(), fresh.clone()));
+                m.insert(b.label.clone(), (Instant::now(), fetched.clone()));
             }
         }
-        fresh
+        fetched
     }
 
     /// When a gated call is rate-limited, a "resets …" note from the provider's live limit for that
@@ -1065,6 +1297,8 @@ impl Router {
             limits: None,
             usd: None,
             pending: false,
+            reset_at: None,
+            fetched_at: None,
         })
     }
 }
@@ -1315,17 +1549,59 @@ fn human_wait(wait: Duration) -> String {
     human_dur(seconds.min(i64::MAX as u64) as i64)
 }
 
-fn budget(b: &Bucket, cap: Capability) -> (String, i64, Reset) {
+fn reads_balance(b: &Bucket) -> bool {
+    b.balance_conn.is_some()
+        || (matches!(b.conn, Conn::Api(_)) && b.provider.kind.has_live_balance(!b.key.is_empty()))
+}
+
+/// (db label, quota, pinned, reset) for a bucket+capability.
+fn budget(b: &Bucket, cap: Capability) -> (String, i64, bool, Reset) {
     if b.provider.kind.dr_budget() {
         match cap {
-            Capability::DeepResearch => return (format!("{}#dr", b.label), b.dr_quota, b.dr_reset),
+            Capability::DeepResearch => {
+                return (
+                    format!("{}#dr", b.label),
+                    b.dr_quota,
+                    b.dr_pinned,
+                    b.dr_reset,
+                )
+            }
             // Image limits are feature-specific and normally daily. Never let one exhausted image
             // allowance disable ordinary search/chat on the same web account.
-            Capability::Image => return (format!("{}#image", b.label), b.quota, Reset::Daily),
+            Capability::Image => {
+                return (
+                    format!("{}#image", b.label),
+                    b.quota,
+                    b.pinned,
+                    Reset::Daily,
+                )
+            }
             _ => {}
         }
     }
-    (b.label.clone(), b.quota, b.reset)
+    (b.label.clone(), b.quota, b.pinned, b.reset)
+}
+
+/// A reading young enough that routing trusts it without a re-read.
+fn fresh(s: &LiveRow) -> bool {
+    chrono::Utc::now().timestamp_millis() - s.fetched_at < LIVE_REFRESH.as_millis() as i64
+}
+
+/// Routing ceiling: the cached live limit (capped when pinned), else the configured estimate.
+pub fn effective_quota(quota: i64, pinned: bool, live: Option<&LiveRow>, period: &str) -> i64 {
+    let Some(snap) = live else { return quota };
+    // A reading from an earlier local period still owes the calls made after it in that period.
+    let base = if snap.period == period {
+        snap.used_at_fetch
+    } else {
+        snap.used_at_fetch - snap.used_now
+    };
+    let eff = base + snap.remaining;
+    if pinned {
+        quota.min(eff)
+    } else {
+        eff
+    }
 }
 
 fn image_error_can_failover(err: &Error) -> bool {
@@ -1447,9 +1723,47 @@ mod tests {
             limits: None,
             usd: None,
             pending: false,
+            reset_at: None,
+            fetched_at: None,
         };
         let sheet = provider_sheet(ProviderKind::Serper, &[v]);
         assert!(sheet.contains("2400/2500 left"));
+    }
+
+    #[test]
+    fn effective_quota_follows_live_snapshot() {
+        let snap = |period: &str, used_at_fetch, remaining| LiveRow {
+            period: period.into(),
+            used_at_fetch,
+            used_now: used_at_fetch,
+            remaining,
+            total: 0,
+            usd: None,
+            reset_at: None,
+            fetched_at: 0,
+        };
+        assert_eq!(effective_quota(100, false, None, "p"), 100);
+        assert_eq!(
+            effective_quota(100, false, Some(&snap("p", 90, 910)), "p"),
+            1000
+        );
+        assert_eq!(
+            effective_quota(100, false, Some(&snap("p", 90, 0)), "p"),
+            90
+        );
+        assert_eq!(
+            effective_quota(100, true, Some(&snap("p", 90, 910)), "p"),
+            100
+        );
+        assert_eq!(
+            effective_quota(100, false, Some(&snap("old", 90, 40)), "p"),
+            40
+        );
+        let rolled = LiveRow {
+            used_now: 94,
+            ..snap("old", 90, 40)
+        };
+        assert_eq!(effective_quota(100, false, Some(&rolled), "p"), 36);
     }
 
     #[test]
@@ -1502,16 +1816,18 @@ mod tests {
             reset: Reset::Monthly,
             dr_quota: 10,
             dr_reset: Reset::Daily,
+            pinned: false,
+            dr_pinned: false,
             proxy: None,
             balance_conn: None,
         };
         assert_eq!(
             budget(&bucket, Capability::Image),
-            ("gemini-1#image".into(), 100, Reset::Daily)
+            ("gemini-1#image".into(), 100, false, Reset::Daily)
         );
         assert_eq!(
             budget(&bucket, Capability::Search),
-            ("gemini-1".into(), 100, Reset::Monthly)
+            ("gemini-1".into(), 100, false, Reset::Monthly)
         );
     }
 
@@ -1566,6 +1882,8 @@ mod tests {
             reset: Reset::Monthly,
             dr_quota: 100,
             dr_reset: Reset::Monthly,
+            pinned: false,
+            dr_pinned: false,
             proxy: None,
             balance_conn: None,
         };

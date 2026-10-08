@@ -61,10 +61,12 @@ processes after changing configuration through the CLI. Dashboard changes reload
 
 A `--provider` argument restricts the request to that backend; it does not fall back to a
 different provider. A returned session also pins the account, so a follow-up cannot silently
-continue another conversation. Provider plans, balances and limits are authoritative;
-configured quotas are local routing ceilings, not grants of free usage. Live balances update
-the display but do not raise those ceilings: set `quota`/`reset` and, for web research,
-`dr_quota`/`dr_reset` to match your plan. A forced provider still obeys these limits.
+continue another conversation. Provider plans, balances and limits are authoritative. Where a
+provider reports its real remaining balance, Fetchira caches it and routes on it, counting its
+own calls down between reads; built-in quotas are only estimates for providers that report
+nothing. An explicit `quota` (or, for deep research, `dr_quota`) caps a live balance, so it can
+hold back a paid one; set `reset`/`dr_reset` to match your plan. A forced provider still obeys
+these limits.
 
 Dollar balances are real balances; the displayed `≈` call counts are estimates that vary by
 operation and plan. Steel requests use its proxy: the Launch plan requires a paid $10 deposit

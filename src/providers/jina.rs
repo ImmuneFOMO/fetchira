@@ -87,6 +87,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: tokens / TOKENS_PER_READ,
         total: 10_000_000 / TOKENS_PER_READ,
         usd: None,
+        reset_at: None,
     })
 }
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::auth;
 use crate::config::Reset;
 use crate::error::{Error, Result};
+use crate::providers::LiveBalance;
 
 tokio::task_local! { pub static HOSTED_REQUEST_ID: String; }
 
@@ -26,6 +27,18 @@ pub struct Store {
 pub struct UsageRow {
     pub used: i64,
     pub exhausted: bool,
+}
+
+/// A provider-reported balance, anchored to the local `used` it was read against.
+pub struct LiveRow {
+    pub period: String,
+    pub used_at_fetch: i64,
+    pub used_now: i64,
+    pub remaining: i64,
+    pub total: i64,
+    pub usd: Option<f64>,
+    pub reset_at: Option<i64>,
+    pub fetched_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +378,15 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS login_challenge (
             id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
             api_key_id TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT
+        )",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS live_quota (
+            label TEXT PRIMARY KEY, period TEXT NOT NULL, used_at_fetch INTEGER NOT NULL,
+            remaining INTEGER NOT NULL, total INTEGER NOT NULL, usd REAL, reset_at INTEGER,
+            fetched_at INTEGER NOT NULL
         )",
         )
         .execute(&pool)
@@ -938,7 +960,7 @@ impl Store {
             .collect())
     }
 
-    /// Remove all rows for an account (usage, cooldown, proxy assignment, web session).
+    /// Remove all rows for an account (usage, cooldown, live limits, proxy assignment, web session).
     pub async fn delete_account(&self, label: &str) -> Result<()> {
         for owned in [
             label.to_string(),
@@ -950,6 +972,10 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
             sqlx::query("DELETE FROM provider_cooldown WHERE label = ?")
+                .bind(&owned)
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("DELETE FROM live_quota WHERE label = ?")
                 .bind(&owned)
                 .execute(&self.pool)
                 .await?;
@@ -975,9 +1001,7 @@ impl Store {
         Ok(())
     }
 
-    /// Move an account's rows to a new label — usage (incl. feature budgets), cooldown, proxy
-    /// assignment, and web session. The label is the identity key, so a rename must carry these or
-    /// the session/quota are orphaned. Mirrors `delete_account`.
+    /// Move an account's rows to a new label, its identity key across tables.
     pub async fn rename_account(&self, old: &str, new: &str) -> Result<()> {
         for (from, to) in [
             (old.to_string(), new.to_string()),
@@ -990,6 +1014,11 @@ impl Store {
                 .execute(&self.pool)
                 .await?;
             sqlx::query("UPDATE provider_cooldown SET label = ? WHERE label = ?")
+                .bind(&to)
+                .bind(&from)
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("UPDATE live_quota SET label = ? WHERE label = ?")
                 .bind(&to)
                 .bind(&from)
                 .execute(&self.pool)
@@ -1255,6 +1284,115 @@ impl Store {
         .bind(period)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Cache a provider-reported balance with the local count it was read against.
+    pub async fn save_live(&self, label: &str, period: &str, bal: &LiveBalance) -> Result<()> {
+        self.upsert_live(label, period, bal, false).await
+    }
+
+    /// Cache a reply's header reading; a reply landing late can't raise its window's ceiling.
+    pub async fn save_reply_live(
+        &self,
+        label: &str,
+        period: &str,
+        bal: &LiveBalance,
+    ) -> Result<()> {
+        self.upsert_live(label, period, bal, true).await
+    }
+
+    async fn upsert_live(
+        &self,
+        label: &str,
+        period: &str,
+        bal: &LiveBalance,
+        keep_lower: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO live_quota
+             (label, period, used_at_fetch, remaining, total, usd, reset_at, fetched_at)
+             VALUES (?, ?, COALESCE((SELECT used FROM usage WHERE label = ? AND period = ?), 0),
+                     ?, ?, ?, ?, ?)
+             ON CONFLICT(label) DO UPDATE SET period = excluded.period,
+                used_at_fetch = excluded.used_at_fetch, remaining = excluded.remaining,
+                total = excluded.total, usd = excluded.usd, reset_at = excluded.reset_at,
+                fetched_at = excluded.fetched_at
+             WHERE NOT ? OR live_quota.period != excluded.period
+                OR live_quota.reset_at IS NOT excluded.reset_at
+                OR excluded.used_at_fetch + excluded.remaining
+                   <= live_quota.used_at_fetch + live_quota.remaining",
+        )
+        .bind(label)
+        .bind(period)
+        .bind(label)
+        .bind(period)
+        .bind(bal.remaining)
+        .bind(bal.total)
+        .bind(bal.usd)
+        .bind(bal.reset_at)
+        .bind(Utc::now().timestamp_millis())
+        .bind(keep_lower)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The cached live balance, until the provider's own renewal passes.
+    pub async fn load_live(&self, label: &str) -> Result<Option<LiveRow>> {
+        let row = sqlx::query(
+            "SELECT period, used_at_fetch, remaining, total, usd, reset_at, fetched_at,
+                COALESCE((SELECT used FROM usage
+                          WHERE usage.label = live_quota.label
+                            AND usage.period = live_quota.period), 0) AS used_now
+             FROM live_quota WHERE label = ? AND (reset_at IS NULL OR reset_at > ?)",
+        )
+        .bind(label)
+        .bind(Utc::now().timestamp_millis())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| LiveRow {
+            period: r.get("period"),
+            used_at_fetch: r.get("used_at_fetch"),
+            used_now: r.get("used_now"),
+            remaining: r.get("remaining"),
+            total: r.get("total"),
+            usd: r.get("usd"),
+            reset_at: r.get("reset_at"),
+            fetched_at: r.get("fetched_at"),
+        }))
+    }
+
+    /// A provider 402 spends the cached balance but keeps its ceiling and renewal date.
+    pub async fn drain_live(&self, label: &str, period: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE live_quota SET remaining = 0, period = ?, fetched_at = ?,
+                used_at_fetch = COALESCE((SELECT used FROM usage WHERE label = ? AND period = ?), 0)
+             WHERE label = ?",
+        )
+        .bind(period)
+        .bind(Utc::now().timestamp_millis())
+        .bind(label)
+        .bind(period)
+        .bind(label)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn clear_live(&self, label: &str) -> Result<()> {
+        sqlx::query("DELETE FROM live_quota WHERE label = ?")
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn forget_live_usd(&self, label: &str) -> Result<()> {
+        sqlx::query("UPDATE live_quota SET usd = NULL WHERE label = ?")
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -1761,6 +1899,42 @@ mod tests {
             .await
             .unwrap());
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_anchors_to_usage_and_expires_at_reset() {
+        let path = std::env::temp_dir().join(format!("fetchira_live_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        store.record("serpapi", "serpapi-1", "m", 7).await.unwrap();
+        let bal = LiveBalance {
+            remaining: 40,
+            total: 250,
+            usd: None,
+            reset_at: None,
+        };
+        store.save_live("serpapi-1", "m", &bal).await.unwrap();
+        let snap = store.load_live("serpapi-1").await.unwrap().unwrap();
+        assert_eq!(
+            (snap.used_at_fetch, snap.remaining, snap.total),
+            (7, 40, 250)
+        );
+
+        store.record("serpapi", "serpapi-1", "m", 3).await.unwrap();
+        store.drain_live("serpapi-1", "m").await.unwrap();
+        let snap = store.load_live("serpapi-1").await.unwrap().unwrap();
+        assert_eq!(
+            (snap.used_at_fetch, snap.remaining, snap.total),
+            (10, 0, 250)
+        );
+
+        let expired = LiveBalance {
+            reset_at: Some(Utc::now().timestamp_millis() - 1000),
+            ..bal
+        };
+        store.save_live("serpapi-1", "m", &expired).await.unwrap();
+        assert!(store.load_live("serpapi-1").await.unwrap().is_none());
         let _ = std::fs::remove_file(&path);
     }
 

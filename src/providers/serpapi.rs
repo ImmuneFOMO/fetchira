@@ -144,6 +144,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
             .unwrap_or_default()
             .max(left),
         usd: None,
+        reset_at: None,
     })
 }
 
