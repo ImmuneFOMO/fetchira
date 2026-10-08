@@ -920,7 +920,17 @@ function AccountRow({
       fontSize: 11,
       color: 'var(--text-faint)'
     }
-  }, "\u2014") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(QuotaMeter, {
+  }, "\u2014") : r.unmetered ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: 'var(--text-lo)'
+    }
+  }, "\u221E ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-faint)'
+    }
+  }, "(rate-limited)")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(QuotaMeter, {
     used: r.used,
     quota: r.quota,
     variant: "bar",

@@ -713,7 +713,17 @@ function FxProviderCard(p) {
       display: 'inline-block',
       animation: 'fx-spin 0.8s linear infinite'
     }
-  }), "loading limits\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, active.map(l => /*#__PURE__*/React.createElement(LimitRow, _extends({
+  }), "loading limits\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, p.unmetered && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 12,
+      color: 'var(--text-lo)'
+    }
+  }, "\u221E ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: 'var(--text-faint)'
+    }
+  }, "(rate-limited)")), active.map(l => /*#__PURE__*/React.createElement(LimitRow, _extends({
     key: l.label
   }, l, {
     off: needsLogin

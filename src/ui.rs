@@ -1431,7 +1431,11 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
     let mains: Vec<&crate::router::UsageView> =
         views.iter().filter(|v| !v.label.ends_with("#dr")).collect();
 
-    let total_remaining: i64 = mains.iter().map(|v| v.remaining).sum();
+    let total_remaining: i64 = mains
+        .iter()
+        .filter(|v| !v.unmetered)
+        .map(|v| v.remaining)
+        .sum();
 
     // Recent route history (live log + per-account "last seen" + sparklines). Empty until an
     // MCP server built from this code records calls into the shared usage.db.
@@ -1477,6 +1481,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "loggedIn": logged,
                 "email": idents.get(v.label.as_str()),
                 "pending": v.pending,
+                "unmetered": v.unmetered,
                 "limits": v.limits.as_ref().map(|ll| json!({
                     "tier": ll.tier,
                     "features": ll.features.iter().map(|f| json!({
@@ -1587,7 +1592,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             1.0
         }
     };
-    let mut burn_ord = mains.clone();
+    let mut burn_ord: Vec<_> = mains.iter().filter(|v| !v.unmetered).copied().collect();
     burn_ord.sort_by(|a, b| {
         empty_frac(a)
             .partial_cmp(&empty_frac(b))
@@ -1714,8 +1719,11 @@ pub(crate) fn overview_groups(
             order.push(v.provider);
             Agg::new(v.period.clone())
         });
-        e.used += v.used;
-        e.quota += v.quota;
+        if !v.unmetered {
+            e.used += v.used;
+            e.quota += v.quota;
+        }
+        e.unmetered &= v.unmetered;
         e.accounts += 1;
         e.pending |= v.pending;
         e.window_secs = min_opt(e.window_secs, v.window_secs);
@@ -1832,6 +1840,9 @@ pub(crate) fn overview_groups(
                     tile["webSession"] = json!(true);
                     tile["loggedIn"] = json!(a.logged);
                 }
+                if a.unmetered {
+                    tile["unmetered"] = json!(true);
+                }
                 // Each limit becomes its own cube bar (with its real window + reset); count-less
                 // models (chatgpt/gemini) fall to a text catalog line.
                 let models = catalogs.get(name).cloned().unwrap_or_default();
@@ -1860,7 +1871,7 @@ pub(crate) fn overview_groups(
                 // provider's account counter is just a soft failover placeholder; showing it as a
                 // "messages/search" limit misleads (chatgpt caps are per-model, gemini has none), so
                 // web cards show only real live limits (grok modes, deep research) + the model catalog.
-                if !has_model_bar && !a.web {
+                if !has_model_bar && !a.web && !a.unmetered {
                     let mut q = limit_bar(
                         "quota",
                         a.used,
@@ -1916,6 +1927,8 @@ struct Agg {
     reset_after: Option<String>,
     /// Any account still awaiting its first live figure (cached snapshot) → the card shows a loader.
     pending: bool,
+    /// Every account is rate-limited only, so the card has no quota bar.
+    unmetered: bool,
 }
 
 impl Agg {
@@ -1931,6 +1944,7 @@ impl Agg {
             usd: None,
             reset_after: None,
             pending: false,
+            unmetered: true,
         }
     }
 }
@@ -2310,6 +2324,7 @@ mod tests {
             pending: false,
             reset_at: None,
             fetched_at: None,
+            unmetered: false,
         }
     }
 
@@ -2319,6 +2334,25 @@ mod tests {
             .flat_map(|g| g["providers"].as_array().into_iter().flatten())
             .find(|p| p["name"] == name)
             .expect("tile")
+    }
+
+    #[test]
+    fn overview_leaves_unmetered_out_of_quota() {
+        let mut keyless = view("keenable", "keenable-1", 3, 1_000_000_000, None);
+        keyless.unmetered = true;
+        let keyed = view("keenable", "keenable-2", 10, 100, None);
+        let mut gdelt = view("gdelt", "gdelt-1", 1, 1_000_000_000, None);
+        gdelt.unmetered = true;
+        let groups = overview_groups(&[&keyless, &keyed, &gdelt], |_| true);
+        let k = tile(&groups, "keenable");
+        assert_eq!(
+            (k["quota"].as_i64(), k["used"].as_i64()),
+            (Some(100), Some(10))
+        );
+        assert!(k["unmetered"].is_null());
+        let g = tile(&groups, "gdelt");
+        assert_eq!(g["unmetered"], true);
+        assert!(g["limits"].as_array().unwrap().is_empty());
     }
 
     #[test]

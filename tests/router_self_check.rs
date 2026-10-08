@@ -1,6 +1,6 @@
 use fetchira::config::{Account, Config, Priority, Reset};
 use fetchira::providers::{Capability, Input, LiveBalance, Provider, ProviderKind};
-use fetchira::router::{Bucket, Conn, Router};
+use fetchira::router::{compact_usage, Bucket, Conn, Router};
 use fetchira::usage::{period_key, Store};
 use serde_json::json;
 use std::path::PathBuf;
@@ -1261,6 +1261,41 @@ async fn a_cancelled_reread_frees_the_account() {
     )
     .await;
     assert!(second.is_ok_and(|r| r.is_ok()));
+}
+
+#[tokio::test]
+async fn rate_limited_providers_are_unmetered() {
+    let account = |provider, label: &str, quota| Account {
+        provider,
+        label: label.into(),
+        api_key: None,
+        proxy: None,
+        quota,
+        reset: None,
+        dr_quota: None,
+        dr_reset: None,
+    };
+    let cfg = Config {
+        accounts: vec![
+            account(ProviderKind::Gdelt, "gdelt-1", None),
+            account(ProviderKind::Jina, "jina-1", None),
+            account(ProviderKind::Gdelt, "gdelt-2", Some(5)),
+        ],
+        ..Default::default()
+    };
+    let router = Router::build(cfg, fresh_store("unmetered").await)
+        .await
+        .unwrap();
+    let views = router.usage_snapshot().await.unwrap();
+    let unmetered: Vec<_> = views
+        .iter()
+        .map(|v| (v.label.as_str(), v.unmetered))
+        .collect();
+    assert_eq!(
+        unmetered,
+        [("gdelt-1", true), ("jina-1", true), ("gdelt-2", false)]
+    );
+    assert!(compact_usage(&views).contains("gdelt ∞ (rate-limited)"));
 }
 
 #[tokio::test]

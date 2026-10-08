@@ -282,6 +282,15 @@ impl ProviderKind {
         matches!(self, ProviderKind::Parallel | ProviderKind::Exa)
     }
 
+    /// No quota to count against, only rate limits (reactive 429 cooldowns).
+    pub fn unmetered(self, keyed: bool) -> bool {
+        match self {
+            ProviderKind::Gdelt => true,
+            ProviderKind::Jina | ProviderKind::Keenable => !keyed,
+            _ => false,
+        }
+    }
+
     /// Kinds `Provider::live_balance` can read with this account's credentials.
     pub fn has_live_balance(self, keyed: bool) -> bool {
         match self {

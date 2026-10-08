@@ -346,6 +346,8 @@ function AccountRow({ r }) {
         <td style={{ ...td, width: 220 }}>
           {r.pending ? spinner('loading…') : (r.web && !r.limits) ? (
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>—</span>
+          ) : r.unmetered ? (
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>∞ <span style={{ color: 'var(--text-faint)' }}>(rate-limited)</span></span>
           ) : (
             <React.Fragment>
               <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />

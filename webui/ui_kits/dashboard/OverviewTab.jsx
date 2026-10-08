@@ -307,6 +307,7 @@ function FxProviderCard(p) {
           </div>
         ) : (
           <React.Fragment>
+            {p.unmetered && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-lo)' }}>∞ <span style={{ color: 'var(--text-faint)' }}>(rate-limited)</span></span>}
             {active.map((l) => <LimitRow key={l.label} {...l} off={needsLogin} />)}
             {showSpent && spent.map((l) => <LimitRow key={l.label} {...l} off={needsLogin} />)}
           </React.Fragment>

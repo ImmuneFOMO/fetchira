@@ -298,7 +298,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             "remaining": v.remaining, "resetWindow": window_or_period(v.window_secs, &v.period),
             "proxy": mask_proxy(proxy),
             "status": if v.exhausted { "exhausted" } else if !ready { "needs-login" } else { "healthy" },
-            "key": !web, "web": web, "loggedIn": ready, "pending": v.pending,
+            "key": !web, "web": web, "loggedIn": ready, "pending": v.pending, "unmetered": v.unmetered,
             "email": idents.get(v.label.as_str()),
             "limits": v.limits.as_ref().map(limits_json), "usd": v.usd
         })
@@ -388,7 +388,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
         .collect::<Vec<_>>();
     let mut burn = accounts.iter().filter_map(|a| {
         let quota = a["quota"].as_i64().unwrap_or(0);
-        (quota > 0).then(|| json!({"provider":a["provider"],"label":a["label"],"remaining":a["remaining"],"resetWindow":a["resetWindow"],"ratePerHour":0}))
+        (quota > 0 && a["unmetered"] != true).then(|| json!({"provider":a["provider"],"label":a["label"],"remaining":a["remaining"],"resetWindow":a["resetWindow"],"ratePerHour":0}))
     }).collect::<Vec<_>>();
     burn.sort_by_key(|a| a["remaining"].as_i64().unwrap_or(0));
     burn.truncate(5);
@@ -399,7 +399,11 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
         json!({"capability":cap.as_str(),"order":order.iter().map(|p|p.as_str()).collect::<Vec<_>>(),"custom":!custom.is_empty(),"available":[]})
     }).collect::<Vec<_>>();
     let capabilities = mains.iter().filter_map(|v| provider_kind(v.provider)).map(|p| { let x = crate::providers::extras(p); json!({"provider":p.as_str(),"niches":x.niches,"modes":x.modes.iter().map(|(m,d)|json!([m,d])).collect::<Vec<_>>()}) }).collect::<Vec<_>>();
-    let total_remaining: i64 = mains.iter().map(|v| v.remaining).sum();
+    let total_remaining: i64 = mains
+        .iter()
+        .filter(|v| !v.unmetered)
+        .map(|v| v.remaining)
+        .sum();
     Json(json!({"accounts":accounts,"groups":groups,"catalog":catalog,"log":log,"stream":[],"health":health,"usage":usage,"burn":burn,"capabilities":capabilities,"priority":priority,"totalRemaining":total_remaining,"summary":{"accounts":accounts.len(),"healthy":healthy,"needsLogin":accounts.iter().filter(|a|a["status"]=="needs-login").count(),"exhausted":accounts.iter().filter(|a|a["status"]=="exhausted").count()}})).into_response()
 }
 
@@ -2702,6 +2706,7 @@ mod tests {
             pending: false,
             reset_at: None,
             fetched_at: None,
+            unmetered: false,
         }
     }
 

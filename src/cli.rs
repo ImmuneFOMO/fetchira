@@ -194,7 +194,7 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             } else {
                 "NEEDS LOGIN"
             }
-        } else if a.api_key.is_none() && ready {
+        } else if ready && !keyed(a) {
             "keyless"
         } else if ready {
             "key"
@@ -208,7 +208,10 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             .and_then(|l| l.tier.as_deref())
             .unwrap_or("-");
         let live = main.and_then(|v| v.limits.as_ref()).is_some();
-        let remaining = list_remaining(a.provider.is_web(), live, main.map(|v| v.remaining));
+        let remaining = match main {
+            Some(v) if v.unmetered => "∞".to_string(),
+            _ => list_remaining(a.provider.is_web(), live, main.map(|v| v.remaining)),
+        };
         let research = list_research(
             a.provider.is_web(),
             live,
@@ -301,12 +304,15 @@ async fn account_ready(store: &Store, a: &Account) -> bool {
     if a.provider.is_web() {
         matches!(store.load_session(&a.label).await, Ok(Some(_)))
     } else {
-        !a.provider.needs_key()
-            || a.api_key
-                .as_deref()
-                .and_then(|s| config::resolve_secret(s).ok())
-                .is_some_and(|k| !k.trim().is_empty())
+        keyed(a) || a.api_key.is_none() && !a.provider.needs_key()
     }
+}
+
+fn keyed(a: &Account) -> bool {
+    a.api_key
+        .as_deref()
+        .and_then(|s| config::resolve_secret(s).ok())
+        .is_some_and(|k| !k.trim().is_empty())
 }
 
 /// Remaining chat/search quota for this period, or "-" until the account is authorized.
@@ -314,14 +320,15 @@ async fn remaining_cell(store: &Store, a: &Account, ready: bool) -> String {
     if !ready {
         return "-".to_string();
     }
-    let quota = a.quota.unwrap_or_else(|| a.provider.default_quota());
+    let quota = a
+        .quota
+        .unwrap_or_else(|| crate::router::default_ceiling(a.provider, keyed(a)));
     let period = period_key(a.reset.unwrap_or_else(|| a.provider.default_reset()));
-    let quota = crate::router::effective_quota(
-        quota,
-        a.quota.is_some(),
-        store.load_live(&a.label).await.ok().flatten().as_ref(),
-        &period,
-    );
+    let live = store.load_live(&a.label).await.ok().flatten();
+    if quota == crate::router::UNMETERED && live.is_none() {
+        return "∞".to_string();
+    }
+    let quota = crate::router::effective_quota(quota, a.quota.is_some(), live.as_ref(), &period);
     store
         .remaining(&a.label, quota, &period)
         .await
@@ -1008,6 +1015,8 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
             } else {
                 "needs login"
             }
+        } else if ready && !keyed(a) {
+            "keyless"
         } else if ready {
             "key set"
         } else {
@@ -2648,6 +2657,27 @@ mod tests {
     fn gdelt_takes_no_key() {
         assert!(!ProviderKind::Gdelt.takes_key());
         assert!(ProviderKind::Openalex.takes_key());
+    }
+
+    #[tokio::test]
+    async fn unresolved_key_reference_is_not_ready() {
+        let path = std::env::temp_dir().join(format!("fetchira_ready_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        let mut a = Account {
+            provider: ProviderKind::Jina,
+            label: "jina-1".into(),
+            api_key: None,
+            proxy: None,
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        };
+        assert!(account_ready(&store, &a).await);
+        a.api_key = Some("env:FETCHIRA_TEST_UNSET_JINA_KEY".into());
+        assert!(!account_ready(&store, &a).await);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

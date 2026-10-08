@@ -77,6 +77,9 @@ pub struct UsageView {
     /// Unix ms the live figure was read; our own calls count it down since.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fetched_at: Option<i64>,
+    /// Rate-limited only: no quota to show, so routing uses an effectively unlimited ceiling.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unmetered: bool,
 }
 
 pub struct Router {
@@ -106,6 +109,7 @@ const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 const LIVE_REFRESH: Duration = Duration::from_secs(60);
 // Outlasts the concurrent bounded balance reads plus their writes; also caps a waiter's wait.
 const LIVE_READ: Duration = Duration::from_secs(20);
+pub const UNMETERED: i64 = 1_000_000_000;
 
 struct ExhaustionRecovery {
     /// A one-shot probe lease is released only after the provider accepts the request.
@@ -245,7 +249,9 @@ impl Router {
                 false => None,
             };
             buckets.push(Bucket {
-                quota: acc.quota.unwrap_or_else(|| acc.provider.default_quota()),
+                quota: acc
+                    .quota
+                    .unwrap_or_else(|| default_ceiling(acc.provider, !key.is_empty())),
                 reset: acc.reset.unwrap_or_else(|| acc.provider.default_reset()),
                 dr_quota: acc.dr_quota.unwrap_or_else(|| acc.provider.dr_quota()),
                 dr_reset: acc.dr_reset.unwrap_or_else(|| acc.provider.dr_reset()),
@@ -859,6 +865,7 @@ impl Router {
         let mut mv = self
             .view(b.provider.kind.as_str(), &b.label, b.quota, b.reset, &proxy)
             .await?;
+        mv.unmetered = !b.pinned && b.provider.kind.unmetered(!b.key.is_empty());
         self.patch_live(b, false, &mut mv, fetch).await;
         self.patch_live_balance(b, &mut mv, fetch).await;
         mv.limits = ll.clone();
@@ -992,6 +999,7 @@ impl Router {
         v.usd = snap.usd;
         v.reset_at = snap.reset_at;
         v.fetched_at = Some(snap.fetched_at);
+        v.unmetered = false;
     }
 
     /// The routing ceiling for a budget label and what is left of it.
@@ -1299,6 +1307,7 @@ impl Router {
             pending: false,
             reset_at: None,
             fetched_at: None,
+            unmetered: false,
         })
     }
 }
@@ -1379,6 +1388,10 @@ pub fn compact_usage(views: &[UsageView]) -> String {
         if v.label.ends_with("#dr") {
             continue;
         }
+        if v.unmetered {
+            api.push(format!("{} ∞ (rate-limited)", v.provider));
+            continue;
+        }
         if !v.provider.ends_with("_web") {
             api.push(format!("{} {}", v.provider, v.remaining));
             continue;
@@ -1450,7 +1463,16 @@ pub fn provider_sheet(kind: ProviderKind, views: &[UsageView]) -> String {
         .iter()
         .filter(|v| v.provider == kind.as_str() && !v.label.ends_with("#dr"))
     {
-        let _ = writeln!(s, "  {} — {}/{} left", v.label, v.remaining, v.quota);
+        if v.unmetered {
+            let _ = writeln!(s, "  {} — ∞ (rate-limited)", v.label);
+        } else {
+            let reset = v
+                .reset_at
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|t| format!(" · resets {}", t.format("%Y-%m-%d %H:%M UTC")))
+                .unwrap_or_default();
+            let _ = writeln!(s, "  {} — {}/{} left{reset}", v.label, v.remaining, v.quota);
+        }
         if let Some(ll) = &v.limits {
             if let Some(t) = &ll.tier {
                 let _ = writeln!(s, "    tier: {t}");
@@ -1585,6 +1607,15 @@ fn budget(b: &Bucket, cap: Capability) -> (String, i64, bool, Reset) {
 /// A reading young enough that routing trusts it without a re-read.
 fn fresh(s: &LiveRow) -> bool {
     chrono::Utc::now().timestamp_millis() - s.fetched_at < LIVE_REFRESH.as_millis() as i64
+}
+
+/// Routing ceiling for an account without a configured quota.
+pub fn default_ceiling(kind: ProviderKind, keyed: bool) -> i64 {
+    if kind.unmetered(keyed) {
+        UNMETERED
+    } else {
+        kind.default_quota()
+    }
 }
 
 /// Routing ceiling: the cached live limit (capped when pinned), else the configured estimate.
@@ -1725,9 +1756,16 @@ mod tests {
             pending: false,
             reset_at: None,
             fetched_at: None,
+            unmetered: false,
+        };
+        let sheet = provider_sheet(ProviderKind::Serper, std::slice::from_ref(&v));
+        assert!(sheet.contains("2400/2500 left"));
+        let v = UsageView {
+            reset_at: Some(1_791_541_677_000),
+            ..v
         };
         let sheet = provider_sheet(ProviderKind::Serper, &[v]);
-        assert!(sheet.contains("2400/2500 left"));
+        assert!(sheet.contains("2400/2500 left · resets 2026-10-09 10:27 UTC"));
     }
 
     #[test]
