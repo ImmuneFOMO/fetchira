@@ -703,7 +703,10 @@ async fn api_test(
     let kind = meta.kind;
     let (cap, input) = test_call(kind);
     let t0 = Instant::now();
-    let res = inner.router.call(cap, &input, Some(kind)).await;
+    let res = inner
+        .router
+        .call_account(cap, &input, kind, &req.label)
+        .await;
     let ms = t0.elapsed().as_millis() as i64;
     match res {
         Ok(_) => Json(json!({ "ok": true, "latencyMs": ms })).into_response(),
