@@ -162,11 +162,11 @@ function RoutingPriority() {
                     </React.Fragment>
                   );
                 })}
-                {/* steel is read's built-in last resort (browser escalation) even when not in the order */}
-                {row.capability === 'read' && !orderOf(row).includes('steel') && (
-                  <span title="when every read provider fails or returns empty, the router retries via the steel headless browser automatically"
+                {/* the browser order is read's built-in last resort (browser escalation) */}
+                {row.capability === 'read' && (
+                  <span title="when every read provider fails or returns empty, the router retries via the browser providers automatically"
                     style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)', userSelect: 'none' }}>
-                    → steel · auto
+                    → browser · auto
                   </span>
                 )}
                 {row.available.map((p) => (

@@ -513,11 +513,17 @@ impl Router {
                                 debug_id,
                             })
                             .await;
-                        // Deep-research honesty: exa/parallel `deep` bills a live $ balance.
+                        // Deep-research honesty: `deep` on these bills a live $ balance.
                         let mut text = o.text;
                         if cap == Capability::DeepResearch
                             && input.depth.as_deref() == Some("deep")
-                            && matches!(kind, ProviderKind::Exa | ProviderKind::Parallel)
+                            && matches!(
+                                kind,
+                                ProviderKind::Exa
+                                    | ProviderKind::Parallel
+                                    | ProviderKind::Linkup
+                                    | ProviderKind::You
+                            )
                         {
                             text = format!(
                                 "⟦deep research via {} — spends live $ balance⟧\n{text}",
@@ -602,8 +608,7 @@ impl Router {
             }
         }
 
-        // Read escalation: if every read backend failed or returned nothing, the page likely needs a
-        // real browser — try Steel once before giving up.
+        // Every read failed or came back empty: the page likely needs a real browser.
         if cap == Capability::Read && forced.is_none() && last_err.is_some() {
             if let Ok(reply) = Box::pin(self.call(Capability::Browser, input, None)).await {
                 return Ok(reply);

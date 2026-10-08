@@ -358,15 +358,15 @@ function RoutingPriority() {
         color: i === 0 ? 'var(--lime-500)' : 'var(--text-faint)'
       }
     }, i + 1), p));
-  }), row.capability === 'read' && !orderOf(row).includes('steel') && /*#__PURE__*/React.createElement("span", {
-    title: "when every read provider fails or returns empty, the router retries via the steel headless browser automatically",
+  }), row.capability === 'read' && /*#__PURE__*/React.createElement("span", {
+    title: "when every read provider fails or returns empty, the router retries via the browser providers automatically",
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 11,
       color: 'var(--text-faint)',
       userSelect: 'none'
     }
-  }, "\u2192 steel \xB7 auto"), row.available.map(p => /*#__PURE__*/React.createElement("button", {
+  }, "\u2192 browser \xB7 auto"), row.available.map(p => /*#__PURE__*/React.createElement("button", {
     key: p,
     onClick: () => post(row.capability, [...orderOf(row), p]),
     disabled: busy,

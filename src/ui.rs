@@ -2081,8 +2081,7 @@ fn group_color(provider: &str) -> &'static str {
     }
 }
 
-/// Providers whose op-count is a $/token→ops conversion (exa/parallel/steel = $ balance) rather
-/// than an exact request count — shown with a leading "≈".
+/// Op-counts converted from a $/token balance, shown with a leading "≈".
 fn approx_quota(provider: &str) -> bool {
     matches!(
         provider,

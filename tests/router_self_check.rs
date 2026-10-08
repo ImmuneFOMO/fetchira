@@ -126,15 +126,15 @@ async fn picks_preferred_available() {
 
     let store = fresh_store("a").await;
     let period = period_key(Reset::Monthly);
-    store
-        .record("serper", "serper-1", &period, 100)
-        .await
-        .unwrap();
+    store.record("exa", "exa-1", &period, 100).await.unwrap();
     store
         .record("tavily", "tavily-1", &period, 20)
         .await
         .unwrap();
-    store.record("exa", "exa-1", &period, 80).await.unwrap();
+    store
+        .record("serper", "serper-1", &period, 80)
+        .await
+        .unwrap();
 
     let buckets = vec![
         bucket(ProviderKind::Serper, "http://127.0.0.1:9/dead", "serper-1"),
@@ -156,7 +156,7 @@ async fn picks_preferred_available() {
 // (b) 429 is temporary: refund, persist Retry-After, and fail over without poisoning the month.
 #[tokio::test]
 async fn rate_limit_cools_down_refunds_and_fails_over() {
-    let tav = MockServer::start().await;
+    let exa = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/search"))
         .respond_with(
@@ -165,14 +165,14 @@ async fn rate_limit_cools_down_refunds_and_fails_over() {
                 .set_body_string("slow down"),
         )
         .expect(1)
-        .mount(&tav)
+        .mount(&exa)
         .await;
-    let exa = MockServer::start().await;
+    let tav = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(exa_body()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
         .expect(2)
-        .mount(&exa)
+        .mount(&tav)
         .await;
 
     let store = fresh_store("b").await;
@@ -191,15 +191,15 @@ async fn rate_limit_cools_down_refunds_and_fails_over() {
         .await
         .unwrap();
     assert!(
-        out.text.contains("EXA_HIT"),
-        "expected failover to exa, got: {}",
+        out.text.contains("TAVILY_HIT"),
+        "expected failover to tavily, got: {}",
         out.text
     );
-    let usage = probe.usage_for("tavily-1", &period).await.unwrap();
+    let usage = probe.usage_for("exa-1", &period).await.unwrap();
     assert_eq!(usage.used, 0, "failed reservation must be refunded");
     assert!(!usage.exhausted, "temporary 429 must not exhaust the month");
     let wait = probe
-        .cooldown_remaining("tavily-1")
+        .cooldown_remaining("exa-1")
         .await
         .unwrap()
         .expect("Retry-After cooldown");
@@ -208,13 +208,12 @@ async fn rate_limit_cools_down_refunds_and_fails_over() {
         "got {wait:?}"
     );
 
-    // A fresh router (the next one-shot CLI process) reads the same cooldown and skips Tavily.
     let router = Router::from_parts(make_buckets(), probe);
     let out = router
         .call(Capability::Search, &query("again"), None)
         .await
         .unwrap();
-    assert!(out.text.contains("EXA_HIT"));
+    assert!(out.text.contains("TAVILY_HIT"));
 }
 
 #[tokio::test]

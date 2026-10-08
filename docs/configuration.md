@@ -54,7 +54,9 @@ fetchira priority search reset
 ```
 
 Capabilities with configurable priority are `search`, `read`, `deep_research`, and `image`.
-Unlisted providers follow the listed ones in built-in order. Restart running MCP/server
+Unlisted providers follow the listed ones in built-in order, which ranks providers by public
+search, research and scraping benchmarks; `topic=academic` adds OpenAlex and `topic=news` adds
+GDELT. Restart running MCP/server
 processes after changing configuration through the CLI. Dashboard changes reload its router.
 
 A `--provider` argument restricts the request to that backend; it does not fall back to a

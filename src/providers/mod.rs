@@ -477,68 +477,56 @@ impl ProviderKind {
 }
 
 /// Preference order per capability: try providers left-to-right, skipping exhausted.
-/// These are defaults, not a quality ranking or a promise of free usage.
 pub fn order(cap: Capability) -> &'static [ProviderKind] {
     use ProviderKind::*;
     match cap {
         Capability::Search => &[
-            Tavily, Serper, Exa, Parallel, Keenable, Tinyfish, Linkup, You, Octen, Nimble, Serpapi,
-            Langsearch, GeminiWeb, GrokWeb, ChatgptWeb,
+            Parallel, Exa, Octen, Firecrawl, You, Nimble, Linkup, Tinyfish, Tavily, Keenable,
+            Serper, Serpapi, Langsearch, ChatgptWeb, GrokWeb, GeminiWeb,
         ],
         Capability::Read => &[
             Firecrawl,
-            Tavily,
-            Serper,
             Exa,
-            Keenable,
-            Jina,
             Tinyfish,
-            Linkup,
-            You,
-            Scrapingant,
+            Jina,
             Zenrows,
+            Tavily,
+            You,
+            Linkup,
+            Scrapingant,
+            Serper,
+            Keenable,
         ],
         Capability::DeepResearch => &[
-            GeminiWeb, ChatgptWeb, Parallel, Exa, GrokWeb, Tavily, Tinyfish, Linkup, You,
+            GeminiWeb, ChatgptWeb, Parallel, GrokWeb, You, Linkup, Tinyfish, Exa, Tavily,
         ],
-        Capability::Browser => &[Steel, Hyperbrowser, Browserless],
-        Capability::Image => &[ChatgptWeb, GeminiWeb, GrokWeb],
+        Capability::Browser => &[Hyperbrowser, Browserless, Steel],
+        Capability::Image => &[ChatgptWeb, GrokWeb, GeminiWeb],
     }
 }
 
-/// `order(cap)` re-ranked. A user `custom` list (`fetchira priority`) comes first verbatim —
-/// filtered to providers serving the cap, with the remaining built-in order appended — and beats
-/// the niche re-rank, since the user set it explicitly. Otherwise a research niche floats its
-/// native providers: academic → OpenAlex, Exa (papers) then Serper (scholar), news → Serper, Tavily
-/// then GDELT. Niche-only providers absent from the base order (OpenAlex, GDELT) join only for
-/// their niche.
-/// Quota-aware failover still runs within the returned list.
+/// `order(cap)` led by the user's `custom` list when set, else by the topic niche's providers.
 pub fn order_for(
     cap: Capability,
     topic: Option<&str>,
     custom: &[ProviderKind],
 ) -> Vec<ProviderKind> {
     use ProviderKind::*;
+    let front: &[ProviderKind] = match topic {
+        Some("academic") => &[Openalex, Exa, Tinyfish, Serper, Serpapi],
+        Some("news") => &[Serper, Exa, Octen, Tavily, Tinyfish, Serpapi, Gdelt],
+        _ => &[],
+    };
     if !custom.is_empty() {
         let mut list: Vec<ProviderKind> = Vec::with_capacity(custom.len());
-        for &p in custom {
+        for &p in custom.iter().chain(order(cap)).chain(front) {
             if p.supports(cap) && !list.contains(&p) {
-                list.push(p);
-            }
-        }
-        for &p in order(cap) {
-            if !list.contains(&p) {
                 list.push(p);
             }
         }
         return list;
     }
     let mut list = order(cap).to_vec();
-    let front: &[ProviderKind] = match topic {
-        Some("academic") => &[Openalex, Exa, Serper],
-        Some("news") => &[Serper, Tavily, Gdelt],
-        _ => return list,
-    };
     for &p in front.iter().rev().filter(|p| p.supports(cap)) {
         list.retain(|&k| k != p);
         list.insert(0, p);
@@ -695,7 +683,7 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
         },
         Gdelt => ProviderExtras {
             niches: &[
-                "topic=news → routed after serper/tavily",
+                "topic=news → last news fallback",
                 "recency → timespan (last 3 months only)",
                 "domains → domain: operators",
             ],
@@ -1306,13 +1294,12 @@ mod tests {
 
     #[test]
     fn order_for_floats_niche_providers() {
-        // academic -> OpenAlex (niche-only, inserted) then Exa then Serper, rest preserved
         let acad = order_for(Capability::Search, Some("academic"), &[]);
-        assert_eq!(&acad[..3], &[Openalex, Exa, Serper]);
+        assert_eq!(&acad[..3], &[Openalex, Exa, Tinyfish]);
         assert_eq!(acad.len(), order(Capability::Search).len() + 1);
-        // news -> Serper, Tavily, then GDELT (niche-only, inserted)
         let news = order_for(Capability::Search, Some("news"), &[]);
-        assert_eq!(&news[..3], &[Serper, Tavily, Gdelt]);
+        assert_eq!(&news[..3], &[Serper, Exa, Octen]);
+        assert_eq!(news[6], Gdelt);
         assert_eq!(news.len(), order(Capability::Search).len() + 1);
         // web / none leaves the base order untouched
         assert_eq!(
@@ -1340,6 +1327,7 @@ mod tests {
         // beats the niche re-rank
         let acad = order_for(Capability::Search, Some("academic"), &[GrokWeb]);
         assert_eq!(acad[0], GrokWeb);
+        assert_eq!(acad.last(), Some(&Openalex));
         // providers not serving the cap are dropped; duplicates collapse
         let dr = order_for(Capability::DeepResearch, None, &[Serper, Exa, Exa]);
         assert_eq!(dr[0], Exa);
