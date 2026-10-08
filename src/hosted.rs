@@ -288,17 +288,16 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
         let kind = provider_kind(v.provider);
         let web = kind.is_some_and(|p| p.is_web());
         let ready = logged.contains(&v.label);
-        let proxy = cfg
+        let account = cfg
             .as_ref()
-            .and_then(|c| c.accounts.iter().find(|a| a.label == v.label))
-            .and_then(|a| a.proxy.as_deref())
-            .unwrap_or("direct");
+            .and_then(|c| c.accounts.iter().find(|a| a.label == v.label));
+        let proxy = account.and_then(|a| a.proxy.as_deref()).unwrap_or("direct");
         json!({
             "provider": v.provider, "label": v.label, "used": v.used, "quota": v.quota,
             "remaining": v.remaining, "resetWindow": window_or_period(v.window_secs, &v.period),
             "proxy": mask_proxy(proxy),
             "status": if v.exhausted { "exhausted" } else if !ready { "needs-login" } else { "healthy" },
-            "key": !web, "web": web, "loggedIn": ready, "pending": v.pending, "unmetered": v.unmetered,
+            "key": account.is_some_and(|a| a.api_key.is_some()), "web": web, "loggedIn": ready, "pending": v.pending, "unmetered": v.unmetered,
             "email": idents.get(v.label.as_str()),
             "limits": v.limits.as_ref().map(limits_json), "usd": v.usd
         })
@@ -350,7 +349,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             }
         }
     }
-    let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"keyless":!p.is_web() && !p.needs_key(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"group":provider_group(p.as_str())})).collect();
+    let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"keyless":!p.is_web() && !p.needs_key(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"free":p.free_tier(),"group":provider_group(p.as_str())})).collect();
     let routes = st.store.recent_routes(1000).await.unwrap_or_default();
     let log: Vec<_> = routes
         .iter()
@@ -396,7 +395,8 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
     let priority = cli::PRIORITY_CAPS.iter().map(|cap| {
         let custom = cfg.as_ref().map(|c| c.priority.for_cap(*cap)).unwrap_or(&[]);
         let order = crate::providers::order_for(*cap, None, custom);
-        json!({"capability":cap.as_str(),"order":order.iter().map(|p|p.as_str()).collect::<Vec<_>>(),"custom":!custom.is_empty(),"available":[]})
+        let available = crate::providers::ProviderKind::all().iter().filter(|p| p.supports(*cap) && !order.contains(p)).map(|p| p.as_str()).collect::<Vec<_>>();
+        json!({"capability":cap.as_str(),"order":order.iter().map(|p|p.as_str()).collect::<Vec<_>>(),"custom":!custom.is_empty(),"available":available})
     }).collect::<Vec<_>>();
     let capabilities = mains.iter().filter_map(|v| provider_kind(v.provider)).map(|p| { let x = crate::providers::extras(p); json!({"provider":p.as_str(),"niches":x.niches,"modes":x.modes.iter().map(|(m,d)|json!([m,d])).collect::<Vec<_>>()}) }).collect::<Vec<_>>();
     let total_remaining: i64 = mains
