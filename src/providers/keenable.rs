@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, niche, s, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -41,7 +41,9 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
         request(client, reqwest::Method::POST, base, "search", key).json(&body(input)?),
     )
     .await?;
-    let v: Value = check("keenable", resp).await?.json().await?;
+    let resp = check("keenable", resp).await?;
+    let live = hourly(resp.headers());
+    let v: Value = resp.json().await?;
     let hits = v["results"]
         .as_array()
         .map(|a| {
@@ -54,7 +56,27 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok(Outcome::new(fmt_hits(&hits), 1))
+    let mut out = Outcome::new(fmt_hits(&hits), 1);
+    out.live = live;
+    Ok(out)
+}
+
+// Only keyless replies carry these: a fixed hour per IP, counted apart for search and fetch.
+fn hourly(h: &reqwest::header::HeaderMap) -> Option<LiveBalance> {
+    let get = |name: &str| h.get(name)?.to_str().ok();
+    Some(LiveBalance {
+        remaining: get("x-ratelimit-remaining")?.parse().ok()?,
+        total: get("x-ratelimit-limit")?.parse().ok()?,
+        usd: None,
+        // A reading must expire, or a spent one would bench the account for good.
+        reset_at: Some(
+            get("x-ratelimit-reset")
+                .and_then(iso_ms)
+                .unwrap_or_else(|| {
+                    (chrono::Utc::now() + chrono::TimeDelta::hours(1)).timestamp_millis()
+                }),
+        ),
+    })
 }
 
 /// The one include-only domain keenable filters natively; any other domain mix goes into the query.
@@ -105,12 +127,16 @@ async fn fetch(base: &str, key: &str, client: &reqwest::Client, input: &Input) -
             .query(&[("url", input.need_url()?), ("live", "true")]),
     )
     .await?;
-    let v: Value = check("keenable", resp).await?.json().await?;
+    let resp = check("keenable", resp).await?;
+    let live = hourly(resp.headers());
+    let v: Value = resp.json().await?;
     let text = s(&v, "content");
     if text.is_empty() {
         return Err(Error::BadResponse("keenable"));
     }
-    Ok(Outcome::new(text, 1))
+    let mut out = Outcome::new(text, 1);
+    out.live = live;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -208,7 +234,11 @@ mod tests {
             .and(header("X-Keenable-Title", "fetchira"))
             .and(query_param("live", "true"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "content": "# Example" })),
+                ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-limit", "1000")
+                    .insert_header("x-ratelimit-remaining", "999")
+                    .insert_header("x-ratelimit-reset", "2026-10-08T17:18:43.005Z")
+                    .set_body_json(json!({ "content": "# Example" })),
             )
             .mount(&server)
             .await;
@@ -226,5 +256,21 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.text, "# Example");
+        let live = out.live.unwrap();
+        assert_eq!(
+            (live.remaining, live.total, live.reset_at),
+            (999, 1000, Some(1_791_479_923_005))
+        );
+    }
+
+    #[test]
+    fn reading_without_reset_expires_within_the_hour() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("x-ratelimit-limit", "1000".parse().unwrap());
+        h.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        h.insert("x-ratelimit-reset", "1791479923".parse().unwrap());
+        let now = chrono::Utc::now().timestamp_millis();
+        let reset = hourly(&h).unwrap().reset_at.unwrap();
+        assert!(reset > now && reset <= now + 3_600_000 + 1000);
     }
 }

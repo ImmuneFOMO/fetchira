@@ -1670,3 +1670,270 @@ async fn tinyfish_research_recovers_from_its_own_reading() {
             .exhausted
     );
 }
+
+#[tokio::test]
+async fn keyless_keenable_follows_hourly_headers() {
+    let kn = MockServer::start().await;
+    let reset = (chrono::Utc::now() + chrono::TimeDelta::minutes(30)).to_rfc3339();
+    let reply = |remaining: &str| {
+        ResponseTemplate::new(200)
+            .insert_header("x-ratelimit-limit", "1000")
+            .insert_header("x-ratelimit-remaining", remaining)
+            .insert_header("x-ratelimit-reset", reset.as_str())
+            .set_body_json(
+                json!({ "results": [{ "title": "KEENABLE_HIT", "url": "https://k.example" }] }),
+            )
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("998"))
+        .up_to_n_times(1)
+        .mount(&kn)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("0"))
+        .expect(1)
+        .mount(&kn)
+        .await;
+    let store = fresh_store("keenable_hourly").await;
+    let probe = store.clone();
+    let b = Bucket {
+        key: String::new(),
+        quota: 1_000_000_000,
+        ..unpinned(ProviderKind::Keenable, &kn.uri(), "keenable-1")
+    };
+    let router = Router::from_parts(vec![b], store);
+    let forced = Some(ProviderKind::Keenable);
+    let out = router
+        .call(Capability::Search, &query("first"), forced)
+        .await
+        .unwrap();
+    assert!(out.text.contains("KEENABLE_HIT"));
+    let views = router.usage_snapshot().await.unwrap();
+    assert_eq!(
+        (views[0].remaining, views[0].quota, views[0].unmetered),
+        (998, 1000, false)
+    );
+    assert_eq!(views[0].window_secs, Some(3600));
+    assert!(views[0].reset_at.is_some());
+    assert!(compact_usage(&views).contains("keenable 998"));
+
+    router
+        .call(Capability::Search, &query("second"), forced)
+        .await
+        .unwrap();
+    let snap = probe.load_live("keenable-1").await.unwrap().unwrap();
+    assert_eq!((snap.used_at_fetch, snap.remaining), (2, 0));
+    assert!(router
+        .call(Capability::Search, &query("third"), forced)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn keyless_keenable_ignores_a_late_older_reply() {
+    let kn = MockServer::start().await;
+    let reset = (chrono::Utc::now() + chrono::TimeDelta::minutes(30)).to_rfc3339();
+    let reply = |remaining: &str| {
+        ResponseTemplate::new(200)
+            .insert_header("x-ratelimit-limit", "1000")
+            .insert_header("x-ratelimit-remaining", remaining)
+            .insert_header("x-ratelimit-reset", reset.as_str())
+            .set_body_json(
+                json!({ "results": [{ "title": "KEENABLE_HIT", "url": "https://k.example" }] }),
+            )
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("1").set_delay(std::time::Duration::from_millis(300)))
+        .up_to_n_times(1)
+        .mount(&kn)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("0"))
+        .expect(1)
+        .mount(&kn)
+        .await;
+    let b = Bucket {
+        key: String::new(),
+        quota: 1_000_000_000,
+        ..unpinned(ProviderKind::Keenable, &kn.uri(), "keenable-1")
+    };
+    let router = Router::from_parts(vec![b], fresh_store("keenable_late_reply").await);
+    let q = query("q");
+    let forced = Some(ProviderKind::Keenable);
+    let calls = (0..2).map(|_| router.call(Capability::Search, &q, forced));
+    let res = futures_util::future::join_all(calls).await;
+    assert!(res.iter().all(|r| r.is_ok()));
+    assert!(router.call(Capability::Search, &q, forced).await.is_err());
+}
+
+#[tokio::test]
+async fn keyless_keenable_spent_search_leaves_fetch_open() {
+    let kn = MockServer::start().await;
+    let reset = (chrono::Utc::now() + chrono::TimeDelta::minutes(30)).to_rfc3339();
+    let reply = |remaining: &str, body: serde_json::Value| {
+        ResponseTemplate::new(200)
+            .insert_header("x-ratelimit-limit", "1000")
+            .insert_header("x-ratelimit-remaining", remaining)
+            .insert_header("x-ratelimit-reset", reset.as_str())
+            .set_body_json(body)
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("0", json!({ "results": [] })))
+        .expect(1)
+        .mount(&kn)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/fetch/public"))
+        .respond_with(reply("999", json!({ "content": "KEENABLE_PAGE" })))
+        .expect(1)
+        .mount(&kn)
+        .await;
+    let b = Bucket {
+        key: String::new(),
+        quota: 1_000_000_000,
+        ..unpinned(ProviderKind::Keenable, &kn.uri(), "keenable-1")
+    };
+    let router = Router::from_parts(vec![b], fresh_store("keenable_split").await);
+    let forced = Some(ProviderKind::Keenable);
+    router
+        .call(Capability::Search, &query("q"), forced)
+        .await
+        .unwrap();
+    let read = Input {
+        url: Some("https://example.com".into()),
+        ..Default::default()
+    };
+    let page = router.call(Capability::Read, &read, forced).await.unwrap();
+    assert_eq!(page.text, "KEENABLE_PAGE");
+    assert!(router
+        .call(Capability::Search, &query("q"), forced)
+        .await
+        .is_err());
+    let views = router.usage_snapshot().await.unwrap();
+    assert_eq!((views[0].remaining, views[0].quota), (0, 1000));
+    assert!(!views[0].exhausted);
+    let feats = &views[0].limits.as_ref().unwrap().features;
+    assert_eq!(
+        feats
+            .iter()
+            .map(|f| (f.feature.as_str(), f.remaining, f.total, f.window_secs))
+            .collect::<Vec<_>>(),
+        vec![
+            ("search", 0, Some(1000), Some(3600)),
+            ("read", 999, Some(1000), Some(3600))
+        ]
+    );
+    assert!(feats.iter().all(|f| f.reset_after.is_some()));
+    assert!(compact_usage(&views).contains("keenable 0 (search 0/1000, read 999/1000)"));
+}
+
+#[tokio::test]
+async fn keyless_keenable_shows_spent_fetch() {
+    let kn = MockServer::start().await;
+    let reset = (chrono::Utc::now() + chrono::TimeDelta::minutes(30)).to_rfc3339();
+    Mock::given(method("GET"))
+        .and(path("/v1/fetch/public"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-ratelimit-limit", "1000")
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", reset.as_str())
+                .set_body_json(json!({ "content": "KEENABLE_PAGE" })),
+        )
+        .expect(1)
+        .mount(&kn)
+        .await;
+    let b = Bucket {
+        key: String::new(),
+        quota: 1_000_000_000,
+        ..unpinned(ProviderKind::Keenable, &kn.uri(), "keenable-1")
+    };
+    let router = Router::from_parts(vec![b], fresh_store("keenable_spent_read").await);
+    let read = Input {
+        url: Some("https://example.com".into()),
+        ..Default::default()
+    };
+    let forced = Some(ProviderKind::Keenable);
+    router.call(Capability::Read, &read, forced).await.unwrap();
+    assert!(router.call(Capability::Read, &read, forced).await.is_err());
+    let views = router.usage_snapshot().await.unwrap();
+    assert!(views[0].unmetered);
+    let feats = &views[0].limits.as_ref().unwrap().features;
+    assert_eq!(
+        feats
+            .iter()
+            .map(|f| (f.feature.as_str(), f.remaining))
+            .collect::<Vec<_>>(),
+        vec![("read", 0)]
+    );
+    assert!(compact_usage(&views).contains("keenable ∞ (rate-limited) (read 0/1000)"));
+}
+
+#[tokio::test]
+async fn keyless_keenable_routes_before_keyed_credits() {
+    let kn = MockServer::start().await;
+    let reset = (chrono::Utc::now() + chrono::TimeDelta::minutes(30)).to_rfc3339();
+    let reply = |remaining: &str| {
+        ResponseTemplate::new(200)
+            .insert_header("x-ratelimit-limit", "1000")
+            .insert_header("x-ratelimit-remaining", remaining)
+            .insert_header("x-ratelimit-reset", reset.as_str())
+            .set_body_json(
+                json!({ "results": [{ "title": "KEYLESS_HIT", "url": "https://k.example" }] }),
+            )
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("998"))
+        .up_to_n_times(1)
+        .mount(&kn)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search/public"))
+        .respond_with(reply("0"))
+        .expect(1)
+        .mount(&kn)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "results": [{ "title": "KEYED_HIT", "url": "https://k.example" }] }),
+        ))
+        .expect(1)
+        .mount(&kn)
+        .await;
+    let keyless = Bucket {
+        key: String::new(),
+        quota: 1_000_000_000,
+        ..unpinned(ProviderKind::Keenable, &kn.uri(), "keenable-1")
+    };
+    let keyed = Bucket {
+        quota: 100_000,
+        ..unpinned(ProviderKind::Keenable, &kn.uri(), "keenable-2")
+    };
+    let router = Router::from_parts(
+        vec![keyed, keyless],
+        fresh_store("keenable_free_first").await,
+    );
+    let mut hits = Vec::new();
+    for _ in 0..3 {
+        hits.push(
+            router
+                .call(
+                    Capability::Search,
+                    &query("q"),
+                    Some(ProviderKind::Keenable),
+                )
+                .await
+                .unwrap()
+                .text,
+        );
+    }
+    assert!(hits[0].contains("KEYLESS_HIT") && hits[1].contains("KEYLESS_HIT"));
+    assert!(hits[2].contains("KEYED_HIT"));
+}

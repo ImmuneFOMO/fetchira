@@ -442,7 +442,8 @@ impl Router {
                     }
                 }
             }
-            cands.sort_by_key(|a| std::cmp::Reverse(a.1));
+            // Free rate-limited accounts go first; metered credits only cover their overflow.
+            cands.sort_by_key(|a| std::cmp::Reverse((self.buckets[a.0].quota == UNMETERED, a.1)));
 
             for (i, _rem, blabel, quota, period, probe_until) in cands {
                 let b = &self.buckets[i];
@@ -870,6 +871,31 @@ impl Router {
         self.patch_live_balance(b, &mut mv, fetch).await;
         mv.limits = ll.clone();
         let mut split_open = false;
+        // Keyless search and fetch spend apart, so each hourly allowance shows on its own.
+        if b.provider.kind.split_window(!b.key.is_empty()).is_some() {
+            let mut rv = self
+                .view(
+                    b.provider.kind.as_str(),
+                    &format!("{}#read", b.label),
+                    b.quota,
+                    b.reset,
+                    &proxy,
+                )
+                .await?;
+            self.overlay_live(b, &mut rv, b.quota, b.pinned).await;
+            split_open = rv.remaining > 0;
+            let features: Vec<FeatureLimit> = [("search", &mv), ("read", &rv)]
+                .into_iter()
+                .filter(|(_, v)| v.fetched_at.is_some())
+                .map(|(feature, v)| view_feature(feature, v))
+                .collect();
+            if !features.is_empty() {
+                mv.limits = Some(LiveLimits {
+                    features,
+                    ..Default::default()
+                });
+            }
+        }
         // Tinyfish search draws on its own pool, apart from the reads this view counts.
         if b.provider.kind == ProviderKind::Tinyfish {
             let (label, quota, _, reset) = budget(b, Capability::Search);
@@ -1022,6 +1048,9 @@ impl Router {
         v.reset_at = snap.reset_at;
         v.fetched_at = Some(snap.fetched_at);
         v.unmetered = false;
+        if let Some(w) = b.provider.kind.split_window(!b.key.is_empty()) {
+            v.window_secs = Some(w);
+        }
     }
 
     /// The routing ceiling for a budget label and what is left of it.
@@ -1384,6 +1413,7 @@ fn strip_budget(label: &str) -> &str {
         .strip_suffix("#dr")
         .or_else(|| label.strip_suffix("#image"))
         .or_else(|| label.strip_suffix("#search"))
+        .or_else(|| label.strip_suffix("#read"))
         .unwrap_or(label)
 }
 
@@ -1439,12 +1469,17 @@ pub fn compact_usage(views: &[UsageView]) -> String {
         if v.label.ends_with("#dr") {
             continue;
         }
-        if v.unmetered {
-            api.push(format!("{} ∞ (rate-limited)", v.provider));
-            continue;
-        }
-        if !v.provider.ends_with("_web") {
-            api.push(format!("{} {}", v.provider, v.remaining));
+        if v.unmetered || !v.provider.ends_with("_web") {
+            let mut line = if v.unmetered {
+                format!("{} ∞ (rate-limited)", v.provider)
+            } else {
+                format!("{} {}", v.provider, v.remaining)
+            };
+            if let Some(ll) = v.limits.as_ref().filter(|l| !l.features.is_empty()) {
+                let feats: Vec<String> = ll.features.iter().map(fmt_feature).collect();
+                line.push_str(&format!(" ({})", feats.join(", ")));
+            }
+            api.push(line);
             continue;
         }
         let tier = v
@@ -1461,14 +1496,7 @@ pub fn compact_usage(views: &[UsageView]) -> String {
             None => web.push_str("    models: (none — authenticate this provider account)\n"),
         }
         if let Some(ll) = v.limits.as_ref().filter(|l| !l.features.is_empty()) {
-            let feats: Vec<String> = ll
-                .features
-                .iter()
-                .map(|f| match f.total {
-                    Some(t) => format!("{} {}/{}", f.feature, f.remaining, t),
-                    None => format!("{} {}", f.feature, f.remaining),
-                })
-                .collect();
+            let feats: Vec<String> = ll.features.iter().map(fmt_feature).collect();
             web.push_str(&format!("    limits: {}\n", feats.join(" · ")));
         } else if let Some(d) = dr.get(v.label.as_str()) {
             web.push_str(&format!(
@@ -1533,14 +1561,7 @@ pub fn provider_sheet(kind: ProviderKind, views: &[UsageView]) -> String {
                 let _ = writeln!(s, "    models: {}", parts.join(" · "));
             }
             if !ll.features.is_empty() {
-                let feats: Vec<String> = ll
-                    .features
-                    .iter()
-                    .map(|f| match f.total {
-                        Some(t) => format!("{} {}/{}", f.feature, f.remaining, t),
-                        None => format!("{} {}", f.feature, f.remaining),
-                    })
-                    .collect();
+                let feats: Vec<String> = ll.features.iter().map(fmt_feature).collect();
                 let _ = writeln!(s, "    limits: {}", feats.join(" · "));
             }
         }
@@ -1566,6 +1587,13 @@ pub fn provider_sheet(kind: ProviderKind, views: &[UsageView]) -> String {
         let _ = writeln!(s, "  {e}");
     }
     s
+}
+
+fn fmt_feature(f: &FeatureLimit) -> String {
+    match f.total {
+        Some(t) => format!("{} {}/{}", f.feature, f.remaining, t),
+        None => format!("{} {}", f.feature, f.remaining),
+    }
 }
 
 /// One model/mode as a compact token: `name[levels] value·window`, `LOCKED` when the tier can't use it.
@@ -1656,6 +1684,10 @@ fn budget(b: &Bucket, cap: Capability) -> (String, i64, bool, Reset) {
         if let Some(pool) = b.provider.kind.search_pool() {
             return (format!("{}#search", b.label), pool, false, b.reset);
         }
+    }
+    // Keyless search and fetch each get their own hourly allowance.
+    if cap == Capability::Read && b.provider.kind.split_window(!b.key.is_empty()).is_some() {
+        return (format!("{}#read", b.label), b.quota, b.pinned, b.reset);
     }
     (b.label.clone(), b.quota, b.pinned, b.reset)
 }

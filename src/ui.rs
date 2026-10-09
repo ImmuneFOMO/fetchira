@@ -1719,13 +1719,17 @@ pub(crate) fn overview_groups(
             order.push(v.provider);
             Agg::new(v.period.clone())
         });
+        e.accounts += 1;
+        e.pending |= v.pending;
+        // Keyless keenable's hourly reading can't sum into a monthly pool; its features show it.
+        if v.window_secs.is_some() && !v.provider.ends_with("_web") {
+            continue;
+        }
         if !v.unmetered {
             e.used += v.used;
             e.quota += v.quota;
         }
         e.unmetered &= v.unmetered;
-        e.accounts += 1;
-        e.pending |= v.pending;
         e.window_secs = min_opt(e.window_secs, v.window_secs);
         e.reset_after = sooner_reset(
             e.reset_after.take(),
@@ -1840,9 +1844,6 @@ pub(crate) fn overview_groups(
                     tile["webSession"] = json!(true);
                     tile["loggedIn"] = json!(a.logged);
                 }
-                if a.unmetered {
-                    tile["unmetered"] = json!(true);
-                }
                 // Each limit becomes its own cube bar (with its real window + reset); count-less
                 // models (chatgpt/gemini) fall to a text catalog line.
                 let models = catalogs.get(name).cloned().unwrap_or_default();
@@ -1896,6 +1897,9 @@ pub(crate) fn overview_groups(
                             bars.push(f.to_bar());
                         }
                     }
+                }
+                if a.unmetered && bars.is_empty() {
+                    tile["unmetered"] = json!(true);
                 }
                 tile["limits"] = json!(bars);
                 tile["catalog"] = json!(catalog);
@@ -2019,11 +2023,11 @@ fn reset_at(
     period: Option<&str>,
     reset_after: Option<&str>,
 ) -> Option<String> {
-    if window_secs.is_some() {
-        return None;
-    }
     if let Some(iso) = reset_after {
         return Some(iso.to_string());
+    }
+    if window_secs.is_some() {
+        return None;
     }
     let now = chrono::Utc::now().date_naive();
     let boundary = match period.map(reset_window) {
@@ -2373,6 +2377,84 @@ mod tests {
         let v = view("openalex", "openalex-1", 4, 100, None);
         let groups = overview_groups(&[&v], |_| true);
         assert_eq!(tile(&groups, "openalex")["limits"][0]["approx"], true);
+    }
+
+    #[test]
+    fn overview_keeps_keyless_hour_apart_from_monthly_pool() {
+        let reset = "2026-10-09T05:42:55+00:00";
+        let hour = |feature: &str, remaining| crate::providers::FeatureLimit {
+            feature: feature.into(),
+            remaining,
+            total: Some(1000),
+            window_secs: Some(3600),
+            reset_after: Some(reset.into()),
+        };
+        let mut keyless = view(
+            "keenable",
+            "keenable-1",
+            2,
+            1000,
+            Some(crate::providers::LiveLimits {
+                features: vec![hour("search", 998), hour("read", 1000)],
+                ..Default::default()
+            }),
+        );
+        keyless.window_secs = Some(3600);
+        keyless.reset_at = DateTime::parse_from_rfc3339(reset)
+            .ok()
+            .map(|t| t.timestamp_millis());
+        let keyed = view("keenable", "keenable-2", 10, 100_000, None);
+
+        let groups = overview_groups(&[&keyless, &keyed], |_| true);
+        let k = tile(&groups, "keenable");
+        assert_eq!(
+            (k["quota"].as_i64(), k["used"].as_i64()),
+            (Some(100_000), Some(10))
+        );
+        assert_eq!(k["resetWindow"], "monthly");
+        assert!(k["resetsIn"].is_string());
+        let limits = k["limits"].as_array().unwrap();
+        let quota = limits.iter().find(|l| l["label"] == "quota").unwrap();
+        assert_eq!(
+            (quota["quota"].as_i64(), quota["window"].as_str()),
+            (Some(100_000), Some("monthly"))
+        );
+        assert_ne!(quota["resetAt"], reset);
+        let search = limits.iter().find(|l| l["label"] == "search").unwrap();
+        assert_eq!(
+            (search["used"].as_i64(), search["window"].as_str()),
+            (Some(2), Some("1h"))
+        );
+        assert_eq!(search["resetAt"], reset);
+        assert!(limits.iter().any(|l| l["label"] == "read"));
+
+        let groups = overview_groups(&[&keyless], |_| true);
+        let k = tile(&groups, "keenable");
+        let labels: Vec<&str> = k["limits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l["label"].as_str())
+            .collect();
+        assert_eq!(labels, vec!["search", "read"]);
+        assert!(k["unmetered"].is_null());
+    }
+
+    #[test]
+    fn windowed_bar_keeps_known_reset() {
+        let bar = limit_bar(
+            "search",
+            2,
+            1000,
+            Some(3600),
+            None,
+            Some("2026-10-09T05:42:55+00:00"),
+            false,
+        );
+        assert_eq!(bar["window"], "1h");
+        assert_eq!(bar["resetAt"], "2026-10-09T05:42:55+00:00");
+        let grok = limit_bar("expert", 0, 20, Some(7200), None, None, false);
+        assert!(grok["resetAt"].is_null());
     }
 
     #[test]

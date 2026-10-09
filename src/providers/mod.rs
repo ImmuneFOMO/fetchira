@@ -363,6 +363,11 @@ impl ProviderKind {
         }
     }
 
+    /// Window (secs) of separate search and read allowances: keyless keenable's hour.
+    pub fn split_window(self, keyed: bool) -> Option<i64> {
+        (self == ProviderKind::Keenable && !keyed).then_some(3600)
+    }
+
     /// Search draws on its own `#search` pool, apart from the account quota and its pin.
     pub fn search_pool(self) -> Option<i64> {
         (self == ProviderKind::Tinyfish).then_some(12_000)

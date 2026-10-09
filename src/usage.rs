@@ -967,6 +967,7 @@ impl Store {
             format!("{label}#dr"),
             format!("{label}#image"),
             format!("{label}#search"),
+            format!("{label}#read"),
         ] {
             sqlx::query("DELETE FROM usage WHERE label = ?")
                 .bind(&owned)
@@ -1009,6 +1010,7 @@ impl Store {
             (format!("{old}#dr"), format!("{new}#dr")),
             (format!("{old}#image"), format!("{new}#image")),
             (format!("{old}#search"), format!("{new}#search")),
+            (format!("{old}#read"), format!("{new}#read")),
         ] {
             sqlx::query("UPDATE usage SET label = ? WHERE label = ?")
                 .bind(&to)
