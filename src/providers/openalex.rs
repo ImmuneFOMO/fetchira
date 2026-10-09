@@ -4,6 +4,7 @@ use super::{check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outc
 use crate::error::{Error, Result};
 
 const ABSTRACT_WORDS: usize = 40;
+const SEARCH_USD: f64 = 0.001;
 
 pub async fn call(
     base: &str,
@@ -26,13 +27,16 @@ pub async fn call(
     if !key.is_empty() {
         req = req.bearer_auth(key);
     }
-    let resp = crate::httptrace::send_traced(req).await?;
-    let v: Value = check("openalex", resp).await?.json().await?;
+    let resp = check("openalex", crate::httptrace::send_traced(req).await?).await?;
+    let live = budget(resp.headers());
+    let v: Value = resp.json().await?;
     let hits = v["results"]
         .as_array()
         .map(|a| a.iter().map(hit).collect::<Vec<_>>())
         .unwrap_or_default();
-    Ok(Outcome::new(fmt_hits(&hits), 1))
+    let mut out = Outcome::new(fmt_hits(&hits), 1);
+    out.live = live;
+    Ok(out)
 }
 
 // Full work records run to tens of KB each; `select` keeps only what a hit shows.
@@ -124,33 +128,33 @@ fn abstract_start(idx: &Value) -> String {
     text
 }
 
-/// `GET /rate-limit` (key only) → today's dollar budget, in searches.
+/// A singleton lookup, or its 404, is free and carries the same budget headers as a search.
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
-    if key.is_empty() {
-        return Err(Error::MissingArg("api_key"));
+    let mut req = client
+        .get(format!("{base}/works/W2741809807"))
+        .query(&[("select", "id")]);
+    if !key.is_empty() {
+        req = req.bearer_auth(key);
     }
-    let resp = client
-        .get(format!("{base}/rate-limit"))
-        .query(&[("api_key", key)])
-        .send()
-        .await?;
-    parse_balance(&check("openalex", resp).await?.json().await?)
+    let resp = req.send().await?;
+    if let Some(b) = budget(resp.headers()) {
+        return Ok(b);
+    }
+    check("openalex", resp).await?;
+    Err(Error::BadResponse("openalex"))
 }
 
-fn parse_balance(v: &Value) -> Result<LiveBalance> {
-    let r = &v["rate_limit"];
-    let remaining = r["daily_remaining_usd"]
-        .as_f64()
-        .ok_or(Error::BadResponse("openalex"))?;
-    let cost = r["endpoint_costs_usd"]["search"]
-        .as_f64()
-        .filter(|c| *c > 0.0)
-        .unwrap_or(0.001);
-    Ok(LiveBalance {
-        remaining: (remaining / cost).round() as i64,
-        total: (r["daily_budget_usd"].as_f64().unwrap_or(remaining) / cost).round() as i64,
+// Every reply reports the day's dollar budget; `x-ratelimit-reset` is seconds to 00:00 UTC.
+fn budget(h: &reqwest::header::HeaderMap) -> Option<LiveBalance> {
+    let num = |name: &str| -> Option<f64> { h.get(name)?.to_str().ok()?.parse().ok() };
+    let remaining =
+        num("x-ratelimit-remaining-usd")? + num("x-ratelimit-prepaid-remaining-usd").unwrap_or(0.0);
+    Some(LiveBalance {
+        remaining: (remaining / SEARCH_USD).round() as i64,
+        total: (num("x-ratelimit-limit-usd").unwrap_or(remaining) / SEARCH_USD).round() as i64,
         usd: None,
-        reset_at: None,
+        reset_at: num("x-ratelimit-reset")
+            .map(|secs| chrono::Utc::now().timestamp_millis() + (secs * 1000.0) as i64),
     })
 }
 
@@ -228,15 +232,64 @@ mod tests {
     }
 
     #[test]
-    fn parses_rate_limit_budget() {
-        let b = parse_balance(&json!({ "rate_limit": {
-            "daily_budget_usd": 1.0,
-            "daily_remaining_usd": 0.982,
-            "endpoint_costs_usd": { "search": 0.001 }
-        }}))
-        .unwrap();
-        assert_eq!(b.remaining, 982);
-        assert_eq!(b.total, 1000);
-        assert!(parse_balance(&json!({ "error": "x" })).is_err());
+    fn parses_budget_headers() {
+        let mut h = reqwest::header::HeaderMap::new();
+        for (k, v) in [
+            ("x-ratelimit-limit-usd", "0.1"),
+            ("x-ratelimit-remaining-usd", "0.0959"),
+            ("x-ratelimit-prepaid-remaining-usd", "0"),
+            ("x-ratelimit-reset", "3600"),
+        ] {
+            h.insert(k, v.parse().unwrap());
+        }
+        let b = budget(&h).unwrap();
+        assert_eq!((b.remaining, b.total), (96, 100));
+        let in_an_hour = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        assert!(b.reset_at.is_some_and(|r| (in_an_hour - r).abs() < 5000));
+        assert!(budget(&reqwest::header::HeaderMap::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn keyless_balance_probes_a_free_lookup() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/works/W2741809807"))
+            .and(query_param("select", "id"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-limit-usd", "0.1")
+                    .insert_header("x-ratelimit-remaining-usd", "0.1")
+                    .set_body_json(json!({"id": "https://openalex.org/W2741809807"})),
+            )
+            .mount(&server)
+            .await;
+        let b = balance(&server.uri(), "", &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!((b.remaining, b.total, b.reset_at), (100, 100, None));
+    }
+
+    #[tokio::test]
+    async fn missing_work_still_reports_the_budget() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .insert_header("x-ratelimit-limit-usd", "0.1")
+                    .insert_header("x-ratelimit-remaining-usd", "0.05")
+                    .set_body_json(json!({"error": "Not Found"})),
+            )
+            .mount(&server)
+            .await;
+        let b = balance(&server.uri(), "", &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!((b.remaining, b.total), (50, 100));
     }
 }

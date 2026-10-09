@@ -2109,7 +2109,7 @@ fn group_color(provider: &str) -> &'static str {
 fn approx_quota(provider: &str) -> bool {
     matches!(
         provider,
-        "parallel" | "exa" | "steel" | "linkup" | "you" | "octen" | "jina"
+        "parallel" | "exa" | "steel" | "linkup" | "you" | "octen" | "jina" | "openalex"
     )
 }
 
@@ -2366,6 +2366,13 @@ mod tests {
         assert_eq!(bar["window"], "lifetime");
         assert!(bar["resetAt"].is_null());
         assert_eq!(bar["approx"], true);
+    }
+
+    #[test]
+    fn openalex_budget_reads_as_approximate() {
+        let v = view("openalex", "openalex-1", 4, 100, None);
+        let groups = overview_groups(&[&v], |_| true);
+        assert_eq!(tile(&groups, "openalex")["limits"][0]["approx"], true);
     }
 
     #[test]

@@ -294,7 +294,7 @@ impl ProviderKind {
     /// Kinds `Provider::live_balance` can read with this account's credentials.
     pub fn has_live_balance(self, keyed: bool) -> bool {
         match self {
-            ProviderKind::Jina | ProviderKind::Openalex => keyed,
+            ProviderKind::Jina => keyed,
             ProviderKind::Serper
             | ProviderKind::Tavily
             | ProviderKind::Firecrawl
@@ -306,7 +306,8 @@ impl ProviderKind {
             | ProviderKind::Zenrows
             | ProviderKind::Hyperbrowser
             | ProviderKind::Browserless
-            | ProviderKind::Nimble => true,
+            | ProviderKind::Nimble
+            | ProviderKind::Openalex => true,
             _ => false,
         }
     }
