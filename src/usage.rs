@@ -1623,13 +1623,8 @@ pub fn period_key(reset: Reset) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     use tokio::sync::Barrier;
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     #[test]
     fn schema_version_asset_matches_const() {
@@ -1947,7 +1942,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn hosted_sessions_are_encrypted_and_legacy_rows_migrate() {
-        let _guard = env_lock();
+        let _guard = crate::secrets::env_lock();
         let path =
             std::env::temp_dir().join(format!("fetchira_session_crypto_{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);

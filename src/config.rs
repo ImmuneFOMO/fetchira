@@ -278,6 +278,11 @@ pub fn protect_hosted_secrets(cfg: &mut Config) -> Result<bool> {
     })
 }
 
+/// One api key from the hosted API, encrypted as typed so `env:`/`enc:` can't name server secrets.
+pub fn protect_hosted_key(value: String) -> Result<String> {
+    crate::secrets::encrypt_literal(&value).map_err(|e| Error::Config(e.to_string()))
+}
+
 fn protect_secrets_with(
     cfg: &mut Config,
     encrypt: impl Fn(&str) -> Result<String>,
@@ -413,6 +418,17 @@ mod tests {
         assert!(!format!("{remote:?}").contains("fk_live_secret"));
         assert!(!format!("{account:?}").contains("tvly-secret"));
         assert!(!format!("{account:?}").contains("password"));
+    }
+
+    #[test]
+    fn hosted_key_references_stay_literal() {
+        let _guard = crate::secrets::env_lock();
+        std::env::set_var("FETCHIRA_MASTER_KEY", "hosted-key-test");
+        for key in ["env:FETCHIRA_MASTER_KEY", "enc:abc"] {
+            let sealed = protect_hosted_key(key.into()).unwrap();
+            assert_eq!(crate::secrets::decrypt(&sealed).unwrap(), key);
+        }
+        std::env::remove_var("FETCHIRA_MASTER_KEY");
     }
 
     #[test]

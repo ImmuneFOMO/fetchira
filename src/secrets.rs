@@ -40,10 +40,19 @@ pub fn encrypt(value: &str) -> anyhow::Result<String> {
     encrypt_with_master(value, &master_key()?)
 }
 
+/// Encrypts even a value that already looks like `enc:` ciphertext.
+pub fn encrypt_literal(value: &str) -> anyhow::Result<String> {
+    seal(value, &master_key()?)
+}
+
 pub(crate) fn encrypt_with_master(value: &str, master: &str) -> anyhow::Result<String> {
     if value.starts_with(PREFIX) {
         return Ok(value.to_string());
     }
+    seal(value, master)
+}
+
+fn seal(value: &str, master: &str) -> anyhow::Result<String> {
     if master.is_empty() {
         anyhow::bail!("FETCHIRA_MASTER_KEY cannot be empty");
     }
@@ -99,6 +108,12 @@ pub fn resolve(value: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -108,6 +123,8 @@ mod tests {
         assert_ne!(e, "secret");
         assert_eq!(decrypt_with_master(&e, "test-master").unwrap(), "secret");
         assert_eq!(encrypt_with_master(&e, "test-master").unwrap(), e);
+        let sealed = seal(&e, "test-master").unwrap();
+        assert_eq!(decrypt_with_master(&sealed, "test-master").unwrap(), e);
     }
 
     #[test]

@@ -782,13 +782,17 @@ async fn admin_provider_key(
         )
             .into_response();
     }
-    match cli::add_account(
-        &st.home,
-        req.provider,
-        req.label.as_deref(),
-        req.key,
-        req.proxy,
-    ) {
+    // Encrypted before add_account's save, so a literal key never lands on disk.
+    let key = match req
+        .key
+        .filter(|k| !k.trim().is_empty())
+        .map(config::protect_hosted_key)
+        .transpose()
+    {
+        Ok(key) => key,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match cli::add_account(&st.home, req.provider, req.label.as_deref(), key, req.proxy) {
         Ok(label) => {
             if let Err(e) = config::load_hosted(&st.home.join("fetchira.toml")) {
                 let _ = cli::remove_account(&st.home, &label).await;
