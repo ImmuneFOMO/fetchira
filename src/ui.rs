@@ -1741,9 +1741,12 @@ pub(crate) fn overview_groups(
                 .map(|t| t.to_rfc3339())
                 .as_deref(),
         );
-        if let Some(u) = v.usd {
-            e.usd = Some(e.usd.unwrap_or(0.0) + u);
-        }
+        // One account's dollars would pass for the whole pool next to every account's count.
+        e.usd = if e.accounts == 1 {
+            v.usd
+        } else {
+            e.usd.zip(v.usd).map(|(a, b)| a + b)
+        };
         if v.provider.ends_with("_web") {
             e.web = true;
             e.logged |= logged_in(&v.label);
@@ -2360,6 +2363,15 @@ mod tests {
         let g = tile(&groups, "gdelt");
         assert_eq!(g["unmetered"], true);
         assert!(g["limits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn partial_dollar_balance_stays_off_the_tile() {
+        let mut read = view("you", "you-1", 100, 16_000, None);
+        read.usd = Some(80.0);
+        let unread = view("you", "you-2", 100, 20_000, None);
+        let groups = overview_groups(&[&read, &unread], |_| true);
+        assert!(tile(&groups, "you")["limits"][0]["usd"].is_null());
     }
 
     #[test]
