@@ -305,7 +305,8 @@ impl ProviderKind {
             | ProviderKind::Scrapingant
             | ProviderKind::Zenrows
             | ProviderKind::Hyperbrowser
-            | ProviderKind::Browserless => true,
+            | ProviderKind::Browserless
+            | ProviderKind::Nimble => true,
             _ => false,
         }
     }
@@ -1146,6 +1147,7 @@ impl Provider {
             ProviderKind::Zenrows => zenrows::balance(&self.base, key, client).await.ok(),
             ProviderKind::Hyperbrowser => hyperbrowser::balance(&self.base, key, client).await.ok(),
             ProviderKind::Browserless => browserless::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Nimble => nimble::balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }

@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, niche, s, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 const SNIPPET_CHARS: usize = 500;
@@ -95,6 +95,40 @@ fn hits(v: &Value) -> Vec<Hit> {
         .collect()
 }
 
+// Account details live on the platform host, not the search one.
+fn api(base: &str) -> String {
+    base.replace("sdk.nimbleway.com", "api.nimbleway.com")
+}
+
+/// `GET /api/v1/account/details` is free; the free tier is a one-time 12-month trial.
+pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
+    let resp = client
+        .get(format!("{}/api/v1/account/details", api(base)))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    parse_balance(&check("nimble", resp).await?.json().await?)
+}
+
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
+    let trial = &v["services"]["data"]["trial"];
+    let remaining = trial["remaining_quota"]
+        .as_i64()
+        .ok_or(Error::BadResponse("nimble"))?;
+    // An ended trial keeps its unused quota, but every search 402s.
+    let ended = trial["status"].as_str().is_some_and(|s| s != "active")
+        || trial["trial_period_end"]
+            .as_str()
+            .and_then(iso_ms)
+            .is_some_and(|end| end <= chrono::Utc::now().timestamp_millis());
+    Ok(LiveBalance {
+        remaining: if ended { 0 } else { remaining },
+        total: trial["quota_granted"].as_i64().unwrap_or(remaining),
+        usd: None,
+        reset_at: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +183,32 @@ mod tests {
             ..Default::default()
         })
         .is_err());
+    }
+
+    #[test]
+    fn parses_trial_quota() {
+        let b = parse_balance(&json!({"services": {"data": {"trial": {
+            "status": "active", "quota_used": 14, "remaining_quota": 4986, "quota_granted": 5000,
+            "trial_period_end": "2027-10-07T09:19:48.261Z"
+        }}}}))
+        .unwrap();
+        assert_eq!((b.remaining, b.total, b.reset_at), (4986, 5000, None));
+        for (status, end) in [
+            ("expired", "2027-10-07T09:19:48.261Z"),
+            ("active", "2025-10-07T09:19:48.261Z"),
+        ] {
+            let b = parse_balance(&json!({"services": {"data": {"trial": {
+                "status": status, "remaining_quota": 4986, "quota_granted": 5000,
+                "trial_period_end": end
+            }}}}))
+            .unwrap();
+            assert_eq!((b.remaining, b.total), (0, 5000));
+        }
+        assert!(parse_balance(&json!({"detail": "Unauthorized"})).is_err());
+        assert_eq!(
+            api("https://sdk.nimbleway.com"),
+            "https://api.nimbleway.com"
+        );
     }
 
     #[test]
