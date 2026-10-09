@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{check, header_cost, s, Capability, Input, LiveBalance, Outcome};
+use super::{check, header_cost, iso_ms, s, Capability, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -80,7 +80,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining,
         total: v["plan_total_credits"].as_i64().unwrap_or(remaining),
         usd: None,
-        reset_at: None,
+        reset_at: v["end_date"].as_str().and_then(iso_ms),
     })
 }
 
@@ -127,9 +127,15 @@ mod tests {
 
     #[test]
     fn parses_usage() {
-        let b =
-            parse_balance(&json!({"plan_total_credits": 10000, "remained_credits": 9986})).unwrap();
-        assert_eq!((b.remaining, b.total), (9986, 10000));
+        let b = parse_balance(&json!({
+            "plan_total_credits": 10000, "remained_credits": 9986,
+            "end_date": "2026-11-06T09:21:38.100056"
+        }))
+        .unwrap();
+        assert_eq!(
+            (b.remaining, b.total, b.reset_at),
+            (9986, 10000, Some(1_793_956_898_100))
+        );
         assert!(parse_balance(&json!({"detail": "x"})).is_err());
     }
 

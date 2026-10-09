@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
+use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -185,7 +185,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining,
         total: total.max(remaining),
         usd: None,
-        reset_at: None,
+        reset_at: d["billingPeriodEnd"].as_str().and_then(iso_ms),
     })
 }
 
@@ -273,11 +273,12 @@ mod tests {
     fn parses_credit_usage() {
         let b = parse_balance(&json!({
             "success": true,
-            "data": {"remainingCredits": 1357, "planCredits": 1000},
+            "data": {"remainingCredits": 1357, "planCredits": 1000, "billingPeriodEnd": null},
         }))
         .unwrap();
         assert_eq!(b.remaining, 1357);
         assert_eq!(b.total, 1357); // top-ups exceed the plan base
+        assert_eq!(b.reset_at, None);
         assert!(parse_balance(&json!({"success": true, "data": {}})).is_err());
     }
 }

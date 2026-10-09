@@ -351,7 +351,6 @@ impl ProviderKind {
             | ProviderKind::You
             | ProviderKind::Octen
             | ProviderKind::Nimble
-            | ProviderKind::Hyperbrowser
             | ProviderKind::Jina => Reset::Once,
             ProviderKind::Openalex
             | ProviderKind::Gdelt
@@ -499,7 +498,7 @@ impl ProviderKind {
             ProviderKind::Langsearch => "free · daily token allowance, resets 00:00 UTC",
             ProviderKind::Scrapingant => "10,000 credits / month · JS render 10 per read",
             ProviderKind::Zenrows => "5,000 credits / month · JS render 5 per read",
-            ProviderKind::Hyperbrowser => "5,000 credits · one-time",
+            ProviderKind::Hyperbrowser => "5,000 credits / month",
             ProviderKind::Browserless => "1,000 units / month · 2 concurrent",
             _ => "",
         }
@@ -1292,6 +1291,24 @@ fn header_cost(resp: &reqwest::Response, name: &str) -> i64 {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .unwrap_or(1)
+}
+
+/// An ISO-8601 instant or date as unix ms; zone-less values are UTC.
+fn iso_ms(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|d| d.timestamp_millis())
+        .or_else(|_| {
+            s.parse::<chrono::NaiveDateTime>()
+                .map(|d| d.and_utc().timestamp_millis())
+        })
+        .or_else(|_| {
+            s.parse::<chrono::NaiveDate>().map(|d| {
+                d.and_time(chrono::NaiveTime::MIN)
+                    .and_utc()
+                    .timestamp_millis()
+            })
+        })
+        .ok()
 }
 
 /// Map a non-2xx response to the right error. A 429 is temporary and carries `Retry-After` into

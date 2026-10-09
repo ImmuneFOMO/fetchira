@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::{check, header_cost, Capability, Input, LiveBalance, Outcome};
+use super::{check, header_cost, iso_ms, Capability, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -72,7 +72,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining: (total - v["usage_credits"].as_i64().unwrap_or(0)).max(0),
         total,
         usd: None,
-        reset_at: None,
+        reset_at: v["period_ends_at"].as_str().and_then(iso_ms),
     })
 }
 
@@ -114,8 +114,14 @@ mod tests {
 
     #[test]
     fn parses_subscription() {
-        let b = parse_balance(&json!({"credit_limit": 5000, "usage_credits": 17})).unwrap();
-        assert_eq!((b.remaining, b.total), (4983, 5000));
+        let b = parse_balance(&json!({
+            "credit_limit": 5000, "usage_credits": 17, "period_ends_at": "2026-11-07T09:22:32Z"
+        }))
+        .unwrap();
+        assert_eq!(
+            (b.remaining, b.total, b.reset_at),
+            (4983, 5000, Some(1_794_043_352_000))
+        );
         assert!(parse_balance(&json!({"code": "AUTH002"})).is_err());
     }
 

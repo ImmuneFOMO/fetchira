@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, Capability, Input, LiveBalance, Outcome};
+use super::{check, iso_ms, Capability, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -46,17 +46,26 @@ fn page(v: &Value) -> Result<String> {
     })
 }
 
-/// `GET /api/team/credit-info` is free and counts outside usage too.
+/// Credits from the free `/api/team/credit-info`; the renewal date only comes from `/api/me`.
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
     let resp = client
         .get(format!("{base}/api/team/credit-info"))
         .header("x-api-key", key)
         .send()
         .await?;
-    parse_balance(&check("hyperbrowser", resp).await?.json().await?)
+    let credits: Value = check("hyperbrowser", resp).await?.json().await?;
+    let me = async {
+        let resp = client
+            .get(format!("{base}/api/me"))
+            .header("x-api-key", key)
+            .send()
+            .await?;
+        Ok::<Value, Error>(check("hyperbrowser", resp).await?.json().await?)
+    };
+    parse_balance(&credits, &me.await.unwrap_or_default())
 }
 
-fn parse_balance(v: &Value) -> Result<LiveBalance> {
+fn parse_balance(v: &Value, me: &Value) -> Result<LiveBalance> {
     let remaining = v["remaining"]
         .as_i64()
         .ok_or(Error::BadResponse("hyperbrowser"))?;
@@ -64,7 +73,9 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining,
         total: v["limit"].as_i64().unwrap_or(remaining),
         usd: None,
-        reset_at: None,
+        reset_at: me["user"]["personalTeam"]["billingEnd"]
+            .as_str()
+            .and_then(iso_ms),
     })
 }
 
@@ -101,8 +112,38 @@ mod tests {
 
     #[test]
     fn parses_credit_info() {
-        let b = parse_balance(&json!({"usage": 27, "limit": 5000, "remaining": 4973})).unwrap();
-        assert_eq!((b.remaining, b.total), (4973, 5000));
-        assert!(parse_balance(&json!({"error": "NOT AUTHENTICATED"})).is_err());
+        let me = json!({"user": {"personalTeam": {"billingEnd": "2026-11-07T00:00:00.000Z"}}});
+        let b =
+            parse_balance(&json!({"usage": 27, "limit": 5000, "remaining": 4973}), &me).unwrap();
+        assert_eq!(
+            (b.remaining, b.total, b.reset_at),
+            (4973, 5000, Some(1_794_009_600_000))
+        );
+        assert!(parse_balance(&json!({"error": "NOT AUTHENTICATED"}), &me).is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_renewal_lookup_keeps_the_balance() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/team/credit-info"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"usage": 27, "limit": 5000, "remaining": 4973})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let b = balance(&server.uri(), "k", &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!((b.remaining, b.total, b.reset_at), (4973, 5000, None));
     }
 }

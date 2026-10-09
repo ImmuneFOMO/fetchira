@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
+use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -144,7 +144,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
             .unwrap_or_default()
             .max(left),
         usd: None,
-        reset_at: None,
+        reset_at: v["plan_renewal_date"].as_str().and_then(iso_ms),
     })
 }
 
@@ -247,11 +247,15 @@ mod tests {
 
     #[test]
     fn parses_account() {
-        let b = parse_balance(
-            &json!({"searches_per_month": 250, "plan_searches_left": 246, "total_searches_left": 246}),
-        )
+        let b = parse_balance(&json!({
+            "searches_per_month": 250, "plan_searches_left": 246, "total_searches_left": 246,
+            "plan_renewal_date": "2026-11-07"
+        }))
         .unwrap();
-        assert_eq!((b.remaining, b.total), (246, 250));
+        assert_eq!(
+            (b.remaining, b.total, b.reset_at),
+            (246, 250, Some(1_794_009_600_000))
+        );
         assert!(parse_balance(&json!({"plan_id": "free"})).is_err());
     }
 

@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{check, header_cost, Capability, Input, LiveBalance, Outcome};
+use super::{check, header_cost, iso_ms, Capability, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
 pub async fn call(
@@ -91,7 +91,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         remaining,
         total: v["units"]["included"].as_i64().unwrap_or(remaining),
         usd: None,
-        reset_at: None,
+        reset_at: v["billingPeriod"]["end"].as_str().and_then(iso_ms),
     })
 }
 
@@ -135,9 +135,15 @@ mod tests {
 
     #[test]
     fn parses_units() {
-        let b = parse_balance(&json!({"units": {"included": 1000, "used": 9, "remaining": 983}}))
-            .unwrap();
-        assert_eq!((b.remaining, b.total), (983, 1000));
+        let b = parse_balance(&json!({
+            "units": {"included": 1000, "used": 9, "remaining": 983},
+            "billingPeriod": {"end": "2026-11-07T09:25:11.000Z"}
+        }))
+        .unwrap();
+        assert_eq!(
+            (b.remaining, b.total, b.reset_at),
+            (983, 1000, Some(1_794_043_511_000))
+        );
         assert!(parse_balance(&json!({"error": "Invalid API token"})).is_err());
         assert_eq!(
             api("https://production-sfo.browserless.io"),
