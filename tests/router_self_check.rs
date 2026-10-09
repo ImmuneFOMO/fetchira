@@ -1937,3 +1937,39 @@ async fn keyless_keenable_routes_before_keyed_credits() {
     assert!(hits[0].contains("KEYLESS_HIT") && hits[1].contains("KEYLESS_HIT"));
     assert!(hits[2].contains("KEYED_HIT"));
 }
+
+#[tokio::test]
+async fn octen_balance_reads_through_dashboard_session() {
+    let dash = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/credit/balance"))
+        .and(wiremock::matchers::header("X-Apt-CSRF-Token", "rotated"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"credit_balance": "4.97"}, "code": 0})),
+        )
+        .expect(1)
+        .mount(&dash)
+        .await;
+    let store = fresh_store("octen_session").await;
+    let session = json!({"cookies": [
+        {"name": "x_apt_session_code_v2", "value": "s", "domain": ".octen.ai"},
+        {"name": "x_apt_csrf_token_v2", "value": "rotated", "domain": ".octen.ai"}
+    ]});
+    store
+        .save_session("octen-1", "octen", &session.to_string())
+        .await
+        .unwrap();
+    let b = Bucket {
+        balance_conn: Some(wreq::Client::new()),
+        ..unpinned(ProviderKind::Octen, &dash.uri(), "octen-1")
+    };
+    let views = Router::from_parts(vec![b], store)
+        .usage_snapshot()
+        .await
+        .unwrap();
+    assert_eq!(
+        (views[0].remaining, views[0].quota, views[0].usd),
+        (4970, 5000, Some(4.97))
+    );
+}

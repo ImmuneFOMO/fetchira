@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, niche, s, Capability, Hit, Input, Outcome};
+use super::{
+    check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outcome, ProviderKind,
+};
 use crate::error::{Error, Result};
 
 // Read and research need a payment method on the account, so only search is wired.
@@ -27,6 +29,13 @@ pub async fn call(
         .map_err(no_balance)?
         .json()
         .await?;
+    if let Some(code) = v["code"].as_u64().filter(|&c| c != 0) {
+        return Err(no_balance(Error::Provider {
+            provider: "octen",
+            status: code as u16,
+            body: v.to_string(),
+        }));
+    }
     let hits = v["data"]["results"]
         .as_array()
         .map(|a| {
@@ -92,6 +101,52 @@ fn no_balance(e: Error) -> Error {
     }
 }
 
+/// Dashboard-session balance; its CSRF check wants the `x_apt_csrf_token_v2` cookie echoed.
+pub async fn balance(
+    base: &str,
+    client: &wreq::Client,
+    cookies: &[crate::web::Cookie],
+) -> Result<(LiveBalance, Vec<(String, String)>)> {
+    let csrf = cookies
+        .iter()
+        .find(|c| c.name == "x_apt_csrf_token_v2")
+        .ok_or(Error::BadResponse("octen"))?;
+    let resp = client
+        .post(format!(
+            "{}/api/v1/credit/balance",
+            base.replace("api.octen.ai", "octen.ai")
+        ))
+        .header("content-type", "application/json")
+        .header("X-Apt-CSRF-Token", csrf.value.as_str())
+        .body("{}")
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "octen",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    let updates = crate::web::set_cookie_updates(resp.headers());
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("octen"))?;
+    Ok((parse_balance(&v)?, updates))
+}
+
+fn parse_balance(v: &Value) -> Result<LiveBalance> {
+    let usd: f64 = v["data"]["credit_balance"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .ok_or(Error::BadResponse("octen"))?;
+    Ok(LiveBalance {
+        remaining: (usd * 1000.0) as i64,
+        total: ProviderKind::Octen.default_quota(),
+        usd: Some(usd),
+        reset_at: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +194,70 @@ mod tests {
         .unwrap();
         assert_eq!(path, "search");
         assert_eq!(b["query"], "crispr (peer-reviewed OR research paper)");
+    }
+
+    #[tokio::test]
+    async fn dashboard_balance_echoes_csrf_cookie() {
+        use wiremock::matchers::{body_string, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/credit/balance"))
+            .and(header("X-Apt-CSRF-Token", "tok"))
+            .and(body_string("{}"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"data": {"credit_balance": "4.97"}, "code": 0, "msg": ""}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let csrf: crate::web::Cookie = serde_json::from_value(
+            json!({"name": "x_apt_csrf_token_v2", "value": "tok", "domain": ".octen.ai"}),
+        )
+        .unwrap();
+        let (b, _) = balance(&server.uri(), &wreq::Client::new(), &[csrf])
+            .await
+            .unwrap();
+        assert_eq!((b.remaining, b.total, b.usd), (4970, 5000, Some(4.97)));
+        assert!(balance(&server.uri(), &wreq::Client::new(), &[])
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn envelope_error_code_is_an_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"code": 403, "msg": "Insufficient balance in account", "request_id": "r"}),
+            ))
+            .mount(&server)
+            .await;
+        let input = Input {
+            query: Some("tokio".into()),
+            ..Default::default()
+        };
+        let out = call(
+            &server.uri(),
+            "k",
+            &reqwest::Client::new(),
+            Capability::Search,
+            &input,
+        )
+        .await;
+        assert!(matches!(out, Err(Error::QuotaExceeded(_))));
+    }
+
+    #[test]
+    fn dust_is_not_a_search() {
+        let b = parse_balance(&json!({"data": {"credit_balance": "0.0009"}})).unwrap();
+        assert_eq!(b.remaining, 0);
     }
 
     #[test]

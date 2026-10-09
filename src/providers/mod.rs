@@ -275,11 +275,12 @@ impl ProviderKind {
         !self.is_web() && self != ProviderKind::Gdelt
     }
 
-    /// Api-key providers whose live balance is only readable through their dashboard's cookie session
-    /// (no key-usable endpoint). `fetchira login <them>` captures that session; the api-key still does
-    /// the actual calls. exa/parallel are real $ balances the api can't report.
+    /// Api-key providers whose live balance needs a `fetchira login` dashboard session.
     pub fn balance_session(self) -> bool {
-        matches!(self, ProviderKind::Parallel | ProviderKind::Exa)
+        matches!(
+            self,
+            ProviderKind::Parallel | ProviderKind::Exa | ProviderKind::Octen
+        )
     }
 
     /// No quota to count against, only rate limits (reactive 429 cooldowns).
@@ -1177,15 +1178,16 @@ impl Provider {
         }
     }
 
-    /// Live balance for a `balance_session` provider (exa/parallel), read through its dashboard's
-    /// cookie session (the `client` carries the captured cookies). Best-effort.
+    /// Live balance for a `balance_session` provider via its dashboard cookies; best-effort.
     pub async fn live_balance_web(
         &self,
         client: &wreq::Client,
+        cookies: &[crate::web::Cookie],
     ) -> Option<(LiveBalance, Vec<(String, String)>)> {
         match self.kind {
             ProviderKind::Parallel => parallel::balance(client).await.ok(),
             ProviderKind::Exa => exa::balance(client).await.ok(),
+            ProviderKind::Octen => octen::balance(&self.base, client, cookies).await.ok(),
             _ => None,
         }
     }

@@ -286,6 +286,12 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
             "next-auth.session-token", // NextAuth session JWT on .exa.ai; present only when signed in
             None,
         ),
+        ProviderKind::Octen => (
+            "https://octen.ai/platform",
+            "octen.ai",
+            "x_apt_session_code_v2", // httpOnly session cookie on .octen.ai, set at sign-in
+            None,
+        ),
         other => return Err(Error::Unsupported(other.as_str())),
     })
 }

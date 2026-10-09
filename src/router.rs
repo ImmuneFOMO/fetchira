@@ -1187,7 +1187,12 @@ impl Router {
         // the api-key. Dashboard reads may rotate cookies, so persist those updates.
         let main = bounded(async {
             match &b.balance_conn {
-                Some(wc) => match b.provider.live_balance_web(wc).await {
+                // Stored cookies carry the rotations `refresh_session` saved, like the client's jar.
+                Some(wc) => match b
+                    .provider
+                    .live_balance_web(wc, &self.session_cookies(&b.label).await)
+                    .await
+                {
                     Some((balance, updates)) => {
                         self.refresh_session(b, &updates).await;
                         Some(balance)
@@ -1224,6 +1229,13 @@ impl Router {
             dr
         } else {
             bal
+        }
+    }
+
+    async fn session_cookies(&self, label: &str) -> Vec<web::Cookie> {
+        match self.store.load_session(label).await {
+            Ok(Some(raw)) => web::parse_session(&raw).cookies,
+            _ => Vec::new(),
         }
     }
 
