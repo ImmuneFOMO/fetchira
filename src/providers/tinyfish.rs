@@ -1,8 +1,12 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, SecondsFormat, TimeDelta, Utc, Weekday};
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, niche, s, with_sources, Capability, Hit, Input, Outcome};
+use super::{
+    check, fmt_hits, niche, s, with_sources, Capability, Hit, Input, LiveBalance, Outcome,
+    ProviderKind,
+};
 use crate::error::{Error, Result};
 
 const POLL: Duration = Duration::from_secs(10);
@@ -46,9 +50,7 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    // Searches draw on their own, much larger daily pool (enforced by its 429s); the local quota
-    // tracks the 1,000/day fetch cap.
-    Ok(Outcome::new(fmt_hits(&hits), 0))
+    Ok(Outcome::new(fmt_hits(&hits), 1))
 }
 
 fn domain_type(input: &Input) -> &'static str {
@@ -209,6 +211,87 @@ fn daily_cap(e: Error) -> Error {
     }
 }
 
+/// Reads completed since 00:00 UTC, from the free `GET /usage`.
+pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
+    let day = Utc::now().date_naive().and_time(NaiveTime::MIN).and_utc();
+    let resp = client
+        .get(format!("{}/usage", base.replace("api.search", "api.fetch")))
+        .header("X-API-Key", key)
+        .query(&[
+            ("status", "completed"),
+            (
+                "start_after",
+                &day.to_rfc3339_opts(SecondsFormat::Secs, true),
+            ),
+            ("limit", "1"),
+        ])
+        .send()
+        .await?;
+    let v: Value = check("tinyfish", resp).await?.json().await?;
+    left(
+        v["total"].as_i64(),
+        ProviderKind::Tinyfish.default_quota(),
+        day + TimeDelta::days(1),
+    )
+}
+
+/// Research runs since Pacific midnight; `status` filters one value per call.
+pub async fn dr_balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
+    let (start, end) = pacific_day(Utc::now());
+    let since = start.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let url = format!("{}/v1/research-run", base.replace("api.search", "agent"));
+    let totals = futures_util::future::try_join_all(["QUEUED", "RUNNING", "COMPLETED"].map(|st| {
+        let req = client.get(&url).header("X-API-Key", key).query(&[
+            ("created_after", since.as_str()),
+            ("status", st),
+            ("limit", "1"),
+        ]);
+        async move {
+            let v: Value = check("tinyfish", req.send().await?).await?.json().await?;
+            Ok::<_, Error>(v["pagination"]["total"].as_i64())
+        }
+    }))
+    .await?;
+    left(
+        totals.into_iter().sum(),
+        ProviderKind::Tinyfish.dr_quota(),
+        end,
+    )
+}
+
+fn left(used: Option<i64>, cap: i64, reset: DateTime<Utc>) -> Result<LiveBalance> {
+    let used = used.ok_or(Error::BadResponse("tinyfish"))?;
+    Ok(LiveBalance {
+        remaining: (cap - used).max(0),
+        total: cap,
+        usd: None,
+        reset_at: Some(reset.timestamp_millis()),
+    })
+}
+
+// Today's and tomorrow's Pacific midnight, each at the offset in force at 08:00Z that day.
+fn pacific_day(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+    let midnight = |d: NaiveDate| {
+        let t = d.and_time(NaiveTime::MIN).and_utc();
+        t + TimeDelta::hours(pacific_offset(t + TimeDelta::hours(8)))
+    };
+    let today = (now - TimeDelta::hours(pacific_offset(now))).date_naive();
+    (midnight(today), midnight(today + TimeDelta::days(1)))
+}
+
+// PDT runs from the second Sunday of March 10:00Z to the first Sunday of November 09:00Z.
+fn pacific_offset(t: DateTime<Utc>) -> i64 {
+    let sunday = |month, n, hour| {
+        NaiveDate::from_weekday_of_month_opt(t.year(), month, Weekday::Sun, n)
+            .and_then(|d| d.and_hms_opt(hour, 0, 0))
+            .map(|d| d.and_utc())
+    };
+    match (sunday(3, 2, 10), sunday(11, 1, 9)) {
+        (Some(start), Some(end)) if (start..end).contains(&t) => 7,
+        _ => 8,
+    }
+}
+
 // Standard runs report under `quick_result`, deep under `deep_result`; `[n]` index the citations.
 fn report(v: &Value) -> Result<String> {
     let (r, field) = match &v["deep_result"] {
@@ -347,6 +430,85 @@ mod tests {
         .unwrap();
         assert_eq!(quick, "Brief");
         assert!(report(&json!({"quick_result": {"answer": ""}})).is_err());
+    }
+
+    #[test]
+    fn pacific_day_follows_dst() {
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let day = |now| {
+            let (a, b) = pacific_day(at(now));
+            (a.to_rfc3339(), b.to_rfc3339())
+        };
+        assert_eq!(
+            day("2026-10-09T02:40:00Z"),
+            (
+                "2026-10-08T07:00:00+00:00".into(),
+                "2026-10-09T07:00:00+00:00".into()
+            )
+        );
+        assert_eq!(
+            day("2026-11-01T12:00:00Z"),
+            (
+                "2026-11-01T07:00:00+00:00".into(),
+                "2026-11-02T08:00:00+00:00".into()
+            )
+        );
+        assert_eq!(
+            day("2026-03-08T09:00:00Z"),
+            (
+                "2026-03-08T08:00:00+00:00".into(),
+                "2026-03-09T07:00:00+00:00".into()
+            )
+        );
+        assert_eq!(
+            day("2026-12-15T05:00:00Z"),
+            (
+                "2026-12-14T08:00:00+00:00".into(),
+                "2026-12-15T08:00:00+00:00".into()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_and_research_left_today() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/usage"))
+            .and(header("X-API-Key", "k"))
+            .and(query_param("status", "completed"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"total": 4, "limit": 1})))
+            .mount(&server)
+            .await;
+        for (status, total) in [("QUEUED", 0), ("RUNNING", 1), ("COMPLETED", 2)] {
+            Mock::given(method("GET"))
+                .and(path("/v1/research-run"))
+                .and(query_param("status", status))
+                .and(query_param("limit", "1"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"data": [], "pagination": {"total": total}})),
+                )
+                .mount(&server)
+                .await;
+        }
+        let client = reqwest::Client::new();
+        let reads = balance(&server.uri(), "k", &client).await.unwrap();
+        assert_eq!((reads.remaining, reads.total), (996, 1000));
+        let next_utc_midnight = (Utc::now().date_naive() + TimeDelta::days(1))
+            .and_time(NaiveTime::MIN)
+            .and_utc()
+            .timestamp_millis();
+        assert_eq!(reads.reset_at, Some(next_utc_midnight));
+        let dr = dr_balance(&server.uri(), "k", &client).await.unwrap();
+        assert_eq!((dr.remaining, dr.total), (2, 5));
+        assert_eq!(
+            dr.reset_at,
+            Some(pacific_day(Utc::now()).1.timestamp_millis())
+        );
     }
 
     #[test]

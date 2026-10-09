@@ -9,8 +9,8 @@ use crate::config::{resolve_secret, Config, Priority, Reset};
 use crate::error::{Error, Result};
 use crate::httptrace;
 use crate::providers::{
-    self, order_for, Capability, Input, LiveBalance, LiveLimits, LiveQuota, ModelInfo, OutImage,
-    Provider, ProviderKind,
+    self, order_for, Capability, FeatureLimit, Input, LiveBalance, LiveLimits, LiveQuota,
+    ModelInfo, OutImage, Provider, ProviderKind,
 };
 use crate::proxy;
 use crate::usage::{period_key, DebugLog, LiveRow, RouteLog, Store};
@@ -757,7 +757,7 @@ impl Router {
 
         // API providers with a balance endpoint recover only from a fresh positive balance. When
         // no balance can be read, clear the marker for this claimed one-shot provider probe.
-        if let Some(balance) = self.fetch_live_balance(b).await {
+        if let Some(balance) = self.fetch_live_balance(b, label).await {
             if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
                 return Ok(None);
             }
@@ -802,7 +802,7 @@ impl Router {
                 probe_until: Some(probe_until),
             }));
         }
-        let Some(balance) = self.fetch_live_balance(b).await else {
+        let Some(balance) = self.fetch_live_balance(b, label).await else {
             let cleared = self.store.clear_legacy_exhausted(label, period).await?;
             return Ok(cleared.then_some(ExhaustionRecovery {
                 probe_until: Some(probe_until),
@@ -869,6 +869,19 @@ impl Router {
         self.patch_live(b, false, &mut mv, fetch).await;
         self.patch_live_balance(b, &mut mv, fetch).await;
         mv.limits = ll.clone();
+        let mut split_open = false;
+        // Tinyfish search draws on its own pool, apart from the reads this view counts.
+        if b.provider.kind == ProviderKind::Tinyfish {
+            let (label, quota, _, reset) = budget(b, Capability::Search);
+            let sv = self
+                .view(b.provider.kind.as_str(), &label, quota, reset, &proxy)
+                .await?;
+            split_open = sv.remaining > 0;
+            mv.limits
+                .get_or_insert_with(Default::default)
+                .features
+                .push(view_feature("search", &sv));
+        }
         // Cached snapshot: flag accounts whose live figure isn't cached yet so the UI shows a loader
         // instead of a soft placeholder. Web → limits cache; API-key → balance cache.
         if !fetch {
@@ -915,6 +928,14 @@ impl Router {
                     dv.window_secs = Some(w);
                 }
             }
+            // No live feature carries an API provider's research budget, so the main view does.
+            if !b.provider.kind.is_web() {
+                out[0]
+                    .limits
+                    .get_or_insert_with(Default::default)
+                    .features
+                    .push(view_feature("deep_research", &dv));
+            }
             out.push(dv);
         }
         // Exhausted means the router skips it: a spent figure it would still re-read is not.
@@ -925,6 +946,7 @@ impl Router {
                 (b.quota, b.pinned)
             };
             v.exhausted = v.remaining <= 0
+                && !(split_open && v.label == b.label)
                 && !self
                     .unconfirmed(b, &v.label, quota, pinned, &v.period)
                     .await?;
@@ -973,7 +995,7 @@ impl Router {
                 .is_some_and(|t| t.elapsed() < Duration::from_secs(20))
         });
         if fetch && !recent {
-            self.fetch_live_balance(b).await;
+            self.fetch_live_balance(b, &b.label).await;
         }
         self.overlay_live(b, v, b.quota, b.pinned).await;
     }
@@ -1060,7 +1082,7 @@ impl Router {
             label: lock,
             until: Some(until),
         };
-        self.fetch_live_balance(b).await;
+        self.fetch_live_balance(b, label).await;
         // Only a reading routing can use counts; one already past its reset is no reading.
         let landed = self
             .store
@@ -1108,7 +1130,8 @@ impl Router {
         pinned: bool,
         period: &str,
     ) -> Result<bool> {
-        if label != b.label || !reads_balance(b) {
+        let own = label == b.label || label.strip_suffix("#dr") == Some(b.label.as_str());
+        if !own || !reads_balance(b) {
             return Ok(false);
         }
         // No reading can lift a pinned cap the counter already reached.
@@ -1123,13 +1146,17 @@ impl Router {
             .is_none_or(|s| !fresh(&s)))
     }
 
-    /// Fetch a balance without consulting the cache and cache the reading. Recovery uses this so a
-    /// stale positive reading can never clear a durable-looking legacy exhaustion mark.
-    async fn fetch_live_balance(&self, b: &Bucket) -> Option<LiveBalance> {
+    /// Fetch `label`'s balance past the cache, so a stale reading can't clear a mark.
+    async fn fetch_live_balance(&self, b: &Bucket, label: &str) -> Option<LiveBalance> {
         let Conn::Api(c) = &b.conn else { return None };
+        let research = match label.strip_prefix(b.label.as_str()) {
+            Some("") => false,
+            Some("#dr") => true,
+            _ => return None,
+        };
         // exa/parallel read their $ balance through the dashboard cookie session; the rest through
         // the api-key. Dashboard reads may rotate cookies, so persist those updates.
-        let bal = bounded(async {
+        let main = bounded(async {
             match &b.balance_conn {
                 Some(wc) => match b.provider.live_balance_web(wc).await {
                     Some((balance, updates)) => {
@@ -1140,8 +1167,8 @@ impl Router {
                 },
                 None => b.provider.live_balance(&b.key, c).await,
             }
-        })
-        .await;
+        });
+        let (bal, dr) = tokio::join!(main, bounded(b.provider.live_dr_balance(&b.key, c)));
         if let Ok(mut m) = self.balance.lock() {
             m.insert(b.label.clone(), Instant::now());
         }
@@ -1158,7 +1185,17 @@ impl Router {
             }
             None => {}
         }
-        bal
+        if let Some(dr) = &dr {
+            let _ = self
+                .store
+                .save_live(&format!("{}#dr", b.label), &period_key(b.dr_reset), dr)
+                .await;
+        }
+        if research {
+            dr
+        } else {
+            bal
+        }
     }
 
     /// Re-save a `balance_session` account's stored cookies with the rolling token the dashboard
@@ -1312,6 +1349,19 @@ impl Router {
     }
 }
 
+fn view_feature(feature: &str, v: &UsageView) -> FeatureLimit {
+    FeatureLimit {
+        feature: feature.into(),
+        remaining: v.remaining,
+        total: Some(v.quota),
+        window_secs: v.window_secs,
+        reset_after: v
+            .reset_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.to_rfc3339()),
+    }
+}
+
 /// Bound on a live limit/balance read: one stalled endpoint must never hang the usage fan-out.
 async fn bounded<T>(fut: impl std::future::Future<Output = Option<T>>) -> Option<T> {
     tokio::time::timeout(Duration::from_secs(10), fut)
@@ -1333,6 +1383,7 @@ fn strip_budget(label: &str) -> &str {
     label
         .strip_suffix("#dr")
         .or_else(|| label.strip_suffix("#image"))
+        .or_else(|| label.strip_suffix("#search"))
         .unwrap_or(label)
 }
 
@@ -1599,6 +1650,11 @@ fn budget(b: &Bucket, cap: Capability) -> (String, i64, bool, Reset) {
                 )
             }
             _ => {}
+        }
+    }
+    if cap == Capability::Search {
+        if let Some(pool) = b.provider.kind.search_pool() {
+            return (format!("{}#search", b.label), pool, false, b.reset);
         }
     }
     (b.label.clone(), b.quota, b.pinned, b.reset)

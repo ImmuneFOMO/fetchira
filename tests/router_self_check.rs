@@ -1,6 +1,6 @@
 use fetchira::config::{Account, Config, Priority, Reset};
 use fetchira::providers::{Capability, Input, LiveBalance, Provider, ProviderKind};
-use fetchira::router::{compact_usage, Bucket, Conn, Router};
+use fetchira::router::{compact_usage, provider_sheet, Bucket, Conn, Router};
 use fetchira::usage::{period_key, Store};
 use serde_json::json;
 use std::path::PathBuf;
@@ -1264,6 +1264,59 @@ async fn a_cancelled_reread_frees_the_account() {
 }
 
 #[tokio::test]
+async fn slow_research_reread_still_holds_waiters_at_zero() {
+    let tf = MockServer::start().await;
+    let slow = |body| {
+        ResponseTemplate::new(200)
+            .set_body_json(body)
+            .set_delay(std::time::Duration::from_secs(9))
+    };
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(slow(json!({"total": 0})))
+        .mount(&tf)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/research-run"))
+        .respond_with(slow(json!({"pagination": {"total": 5}})))
+        .mount(&tf)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/automation/run-research-async"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&tf)
+        .await;
+    let db = temp_db("slow_dr_reread");
+    let _ = std::fs::remove_file(&db);
+    let store = Store::open(db.to_str().expect("temp path")).await.unwrap();
+    let period = period_key(Reset::Monthly);
+    store.save_live("tf-1#dr", &period, &live(2)).await.unwrap();
+    store
+        .record("tinyfish", "tf-1#dr", &period, 2)
+        .await
+        .unwrap();
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&db))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE live_quota SET fetched_at = 0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let router = Router::from_parts(
+        vec![bucket(ProviderKind::Tinyfish, &tf.uri(), "tf-1")],
+        store,
+    );
+    let q = query("q");
+    let calls =
+        (0..3).map(|_| router.call(Capability::DeepResearch, &q, Some(ProviderKind::Tinyfish)));
+    let res = futures_util::future::join_all(calls).await;
+    assert!(res.iter().all(|r| r.is_err()));
+}
+
+#[tokio::test]
 async fn rate_limited_providers_are_unmetered() {
     let account = |provider, label: &str, quota| Account {
         provider,
@@ -1317,4 +1370,303 @@ async fn unresolved_key_reference_skips_a_keyless_provider() {
         .await
         .unwrap();
     assert!(router.usage_snapshot_cached().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tinyfish_reads_and_research_come_live() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"total": 4})))
+        .mount(&tf)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/research-run"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": [], "pagination": {"total": 1}})),
+        )
+        .mount(&tf)
+        .await;
+    let store = fresh_store("tinyfish_live").await;
+    let probe = store.clone();
+    let b = Bucket {
+        quota: 1000,
+        reset: Reset::Daily,
+        dr_quota: 5,
+        dr_reset: Reset::Daily,
+        pinned: false,
+        dr_pinned: false,
+        ..bucket(ProviderKind::Tinyfish, &tf.uri(), "tinyfish-1")
+    };
+    let views = Router::from_parts(vec![b], store)
+        .usage_snapshot()
+        .await
+        .unwrap();
+    let left: Vec<_> = views
+        .iter()
+        .map(|v| (v.label.as_str(), v.remaining, v.quota))
+        .collect();
+    assert_eq!(left, [("tinyfish-1", 996, 1000), ("tinyfish-1#dr", 2, 5)]);
+    let dr = probe.load_live("tinyfish-1#dr").await.unwrap().unwrap();
+    assert!(dr.reset_at.is_some());
+    assert!(compact_usage(&views).contains("tinyfish 996 (search 12000/12000, deep_research 2/5)"));
+    assert!(provider_sheet(ProviderKind::Tinyfish, &views).contains("deep_research 2/5"));
+}
+
+#[tokio::test]
+async fn tinyfish_spent_reads_leave_search_open() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{"title": "TINYFISH_HIT", "url": "https://t.example", "snippet": "s"}]
+        })))
+        .expect(1)
+        .mount(&tf)
+        .await;
+    let store = fresh_store("tinyfish_search_pool").await;
+    store
+        .save_live("tinyfish-1", &period_key(Reset::Daily), &live(0))
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 1000,
+        reset: Reset::Daily,
+        pinned: false,
+        ..bucket(ProviderKind::Tinyfish, &tf.uri(), "tinyfish-1")
+    };
+    let router = Router::from_parts(vec![b], store);
+    let forced = Some(ProviderKind::Tinyfish);
+    let hit = router
+        .call(Capability::Search, &query("q"), forced)
+        .await
+        .unwrap();
+    assert!(hit.text.contains("TINYFISH_HIT"));
+    let read = Input {
+        url: Some("https://example.com".into()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        router.call(Capability::Read, &read, forced).await,
+        Err(fetchira::Error::ProviderForced(_))
+    ));
+    let views = router.usage_snapshot_cached().await.unwrap();
+    assert!(!views[0].exhausted);
+    assert!(compact_usage(&views).contains("tinyfish 0 (search 11999/12000"));
+}
+
+#[tokio::test]
+async fn tinyfish_search_outlasts_the_fetch_allowance() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{"title": "TINYFISH_HIT", "url": "https://t.example", "snippet": "s"}]
+        })))
+        .expect(1)
+        .mount(&tf)
+        .await;
+    let store = fresh_store("tinyfish_search_quota").await;
+    let probe = store.clone();
+    let period = period_key(Reset::Daily);
+    store
+        .record("tinyfish", "tinyfish-1#search", &period, 1000)
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 1000,
+        reset: Reset::Daily,
+        pinned: false,
+        ..bucket(ProviderKind::Tinyfish, &tf.uri(), "tinyfish-1")
+    };
+    let hit = Router::from_parts(vec![b], store)
+        .call(
+            Capability::Search,
+            &query("q"),
+            Some(ProviderKind::Tinyfish),
+        )
+        .await
+        .unwrap();
+    assert!(hit.text.contains("TINYFISH_HIT"));
+    let used = probe.usage_for("tinyfish-1#search", &period).await.unwrap();
+    assert_eq!(used.used, 1001);
+}
+
+#[tokio::test]
+async fn pinned_tinyfish_reads_leave_the_search_pool_whole() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{"title": "TINYFISH_HIT", "url": "https://t.example", "snippet": "s"}]
+        })))
+        .expect(1)
+        .mount(&tf)
+        .await;
+    let store = fresh_store("tinyfish_pinned_reads").await;
+    store
+        .record(
+            "tinyfish",
+            "tinyfish-1#search",
+            &period_key(Reset::Daily),
+            600,
+        )
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 500,
+        reset: Reset::Daily,
+        ..bucket(ProviderKind::Tinyfish, &tf.uri(), "tinyfish-1")
+    };
+    let hit = Router::from_parts(vec![b], store)
+        .call(
+            Capability::Search,
+            &query("q"),
+            Some(ProviderKind::Tinyfish),
+        )
+        .await
+        .unwrap();
+    assert!(hit.text.contains("TINYFISH_HIT"));
+}
+
+#[tokio::test]
+async fn tinyfish_search_recovery_ignores_reads_and_research_readings() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"total": 1000})))
+        .expect(0)
+        .mount(&tf)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/research-run"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": [], "pagination": {"total": 5}})),
+        )
+        .expect(0)
+        .mount(&tf)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{"title": "TINYFISH_HIT", "url": "https://t.example", "snippet": "s"}]
+        })))
+        .expect(1)
+        .mount(&tf)
+        .await;
+    let store = fresh_store("tinyfish_search_recover").await;
+    store
+        .mark_exhausted("tinyfish", "tinyfish-1#search", &period_key(Reset::Daily))
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 1000,
+        reset: Reset::Daily,
+        dr_quota: 5,
+        dr_reset: Reset::Daily,
+        pinned: false,
+        dr_pinned: false,
+        ..bucket(ProviderKind::Tinyfish, &tf.uri(), "tinyfish-1")
+    };
+    let hit = Router::from_parts(vec![b], store)
+        .call(
+            Capability::Search,
+            &query("q"),
+            Some(ProviderKind::Tinyfish),
+        )
+        .await
+        .unwrap();
+    assert!(hit.text.contains("TINYFISH_HIT"));
+}
+
+#[tokio::test]
+async fn research_reading_keeps_runs_from_the_previous_utc_day() {
+    let store = fresh_store("tinyfish_dr_rollover").await;
+    let reset_at = Some(chrono::Utc::now().timestamp_millis() + 3_600_000);
+    let dr = LiveBalance {
+        remaining: 5,
+        total: 5,
+        usd: None,
+        reset_at,
+    };
+    store
+        .save_live("tinyfish-1#dr", "2000-01-01", &dr)
+        .await
+        .unwrap();
+    store
+        .record("tinyfish", "tinyfish-1#dr", "2000-01-01", 4)
+        .await
+        .unwrap();
+    let b = Bucket {
+        dr_quota: 5,
+        dr_reset: Reset::Daily,
+        dr_pinned: false,
+        ..bucket(ProviderKind::Tinyfish, "http://127.0.0.1:9", "tinyfish-1")
+    };
+    let views = Router::from_parts(vec![b], store)
+        .usage_snapshot_cached()
+        .await
+        .unwrap();
+    let dr = views.iter().find(|v| v.label == "tinyfish-1#dr").unwrap();
+    assert_eq!((dr.remaining, dr.quota), (1, 5));
+}
+
+#[tokio::test]
+async fn tinyfish_research_recovers_from_its_own_reading() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"total": 1000})))
+        .mount(&tf)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/research-run"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": [], "pagination": {"total": 0}})),
+        )
+        .mount(&tf)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/automation/run-research-async"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("probe"))
+        .expect(1)
+        .mount(&tf)
+        .await;
+    let store = fresh_store("tinyfish_dr_recover").await;
+    let probe = store.clone();
+    let period = period_key(Reset::Daily);
+    store
+        .mark_exhausted("tinyfish", "tinyfish-1#dr", &period)
+        .await
+        .unwrap();
+    let b = Bucket {
+        quota: 1000,
+        reset: Reset::Daily,
+        dr_quota: 5,
+        dr_reset: Reset::Daily,
+        pinned: false,
+        dr_pinned: false,
+        ..bucket(ProviderKind::Tinyfish, &tf.uri(), "tinyfish-1")
+    };
+    let res = Router::from_parts(vec![b], store)
+        .call(
+            Capability::DeepResearch,
+            &query("q"),
+            Some(ProviderKind::Tinyfish),
+        )
+        .await;
+    assert!(matches!(
+        res,
+        Err(fetchira::Error::Provider { status: 400, .. })
+    ));
+    assert!(
+        !probe
+            .usage_for("tinyfish-1#dr", &period)
+            .await
+            .unwrap()
+            .exhausted
+    );
 }

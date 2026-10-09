@@ -307,7 +307,8 @@ impl ProviderKind {
             | ProviderKind::Hyperbrowser
             | ProviderKind::Browserless
             | ProviderKind::Nimble
-            | ProviderKind::Openalex => true,
+            | ProviderKind::Openalex
+            | ProviderKind::Tinyfish => true,
             _ => false,
         }
     }
@@ -360,6 +361,11 @@ impl ProviderKind {
             | ProviderKind::Langsearch => Reset::Daily,
             _ => Reset::Monthly,
         }
+    }
+
+    /// Search draws on its own `#search` pool, apart from the account quota and its pin.
+    pub fn search_pool(self) -> Option<i64> {
+        (self == ProviderKind::Tinyfish).then_some(12_000)
     }
 
     /// Deep research draws on its own `#dr` budget instead of the account quota.
@@ -1149,6 +1155,19 @@ impl Provider {
             ProviderKind::Hyperbrowser => hyperbrowser::balance(&self.base, key, client).await.ok(),
             ProviderKind::Browserless => browserless::balance(&self.base, key, client).await.ok(),
             ProviderKind::Nimble => nimble::balance(&self.base, key, client).await.ok(),
+            ProviderKind::Tinyfish => tinyfish::balance(&self.base, key, client).await.ok(),
+            _ => None,
+        }
+    }
+
+    /// Live `#dr` allowance for a `dr_budget` API-key provider, read alongside `live_balance`.
+    pub async fn live_dr_balance(
+        &self,
+        key: &str,
+        client: &reqwest::Client,
+    ) -> Option<LiveBalance> {
+        match self.kind {
+            ProviderKind::Tinyfish => tinyfish::dr_balance(&self.base, key, client).await.ok(),
             _ => None,
         }
     }
