@@ -216,6 +216,7 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             a.provider.is_web(),
             live,
             drs.get(a.label.as_str()).map(|v| (v.remaining, v.quota)),
+            a.dr_reset.unwrap_or_else(|| a.provider.dr_reset()),
         );
         println!(
             "{:15} {:14} {:12} {:10} {:>10} {:>13}  {}",
@@ -233,16 +234,15 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
     // them (chatgpt tier/features, grok per-mode limits, gemini model list).
     for v in &views {
         let Some(ll) = &v.limits else { continue };
-        println!(
-            "\nlive limits — {} ({})",
-            v.label,
-            ll.tier.as_deref().unwrap_or("?")
-        );
+        match ll.tier.as_deref() {
+            Some(tier) => println!("\nlive limits — {} ({tier})", v.label),
+            None => println!("\nlive limits — {}", v.label),
+        }
         for f in &ll.features {
             let reset = f
                 .reset_after
                 .as_deref()
-                .map(|s| format!("  · resets {}", &s[..s.len().min(10)]))
+                .map(|s| format!("  · resets {}", list_reset(s)))
                 .unwrap_or_default();
             println!("  {:20} {:>5}{}", f.feature, f.remaining, reset);
         }
@@ -279,6 +279,12 @@ fn dur(secs: i64) -> String {
     }
 }
 
+fn list_reset(iso: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .map(|t| t.to_utc().format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|_| iso.to_string())
+}
+
 fn list_remaining(web: bool, live: bool, remaining: Option<i64>) -> String {
     if web && !live {
         return "-".into();
@@ -288,13 +294,26 @@ fn list_remaining(web: bool, live: bool, remaining: Option<i64>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn list_research(web: bool, live: bool, dr: Option<(i64, i64)>) -> String {
+fn list_research(
+    web: bool,
+    live: bool,
+    dr: Option<(i64, i64)>,
+    reset: crate::config::Reset,
+) -> String {
     if web && !live {
         return "-".into();
     }
     match dr {
-        Some((rem, quota)) => format!("{rem}/{quota}/day"),
+        Some((rem, quota)) => format!("{rem}/{quota}/{}", reset_unit(reset)),
         None => "-".into(),
+    }
+}
+
+fn reset_unit(reset: crate::config::Reset) -> &'static str {
+    match reset {
+        crate::config::Reset::Daily => "day",
+        crate::config::Reset::Monthly => "month",
+        crate::config::Reset::Once => "one-time",
     }
 }
 
@@ -352,12 +371,7 @@ async fn research_cell(store: &Store, a: &Account, ready: bool) -> String {
         &period,
     );
     let dr = store.remaining(&label, eff, &period).await.unwrap_or(eff);
-    let unit = match reset {
-        crate::config::Reset::Daily => "day",
-        crate::config::Reset::Monthly => "month",
-        crate::config::Reset::Once => "one-time",
-    };
-    format!("{dr}/{eff}/{unit}")
+    format!("{dr}/{eff}/{}", reset_unit(reset))
 }
 
 pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -2646,11 +2660,29 @@ mod tests {
     #[test]
     fn list_hides_soft_web_quota_when_live_poll_misses() {
         assert_eq!(list_remaining(true, false, Some(100)), "-");
-        assert_eq!(list_research(true, false, Some((3, 3))), "-");
+        assert_eq!(list_research(true, false, Some((3, 3)), Reset::Daily), "-");
         assert_eq!(list_remaining(true, true, Some(12)), "12");
-        assert_eq!(list_research(true, true, Some((3, 3))), "3/3/day");
+        assert_eq!(
+            list_research(true, true, Some((3, 3)), Reset::Daily),
+            "3/3/day"
+        );
         assert_eq!(list_remaining(false, false, Some(2500)), "2500");
-        assert_eq!(list_research(false, false, Some((5, 5))), "5/5/day");
+        assert_eq!(
+            list_research(false, false, Some((5, 5)), Reset::Daily),
+            "5/5/day"
+        );
+        assert_eq!(
+            list_research(true, true, Some((20, 25)), Reset::Monthly),
+            "20/25/month"
+        );
+    }
+
+    #[test]
+    fn list_reset_keeps_the_hour() {
+        assert_eq!(
+            list_reset("2026-10-09T10:27:57+00:00"),
+            "2026-10-09 10:27 UTC"
+        );
     }
 
     #[test]
