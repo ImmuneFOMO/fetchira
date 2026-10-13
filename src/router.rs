@@ -106,6 +106,7 @@ pub struct Router {
 
 const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(30);
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+const REJECTED_KEY_COOLDOWN: Duration = Duration::from_secs(300);
 const LIVE_REFRESH: Duration = Duration::from_secs(60);
 // Outlasts the concurrent bounded balance reads plus their writes; also caps a waiter's wait.
 const LIVE_READ: Duration = Duration::from_secs(20);
@@ -359,6 +360,22 @@ impl Router {
                 }
                 let (blabel, bquota, pinned, breset) = budget(b, cap);
                 let period = period_key(breset);
+                if let Some(wait) = self
+                    .store
+                    .cooldown_remaining(&format!("{}#rejected", b.label))
+                    .await?
+                {
+                    last_err = Some(Error::Provider {
+                        provider: kind.as_str(),
+                        status: 401,
+                        body: format!(
+                            "account '{}' has a rejected api key; benched for {}",
+                            b.label,
+                            human_wait(wait)
+                        ),
+                    });
+                    continue;
+                }
                 if let Some(wait) = self.store.cooldown_remaining(&blabel).await? {
                     last_err = Some(Error::rate_limit_after(
                         format!(
@@ -664,10 +681,25 @@ impl Router {
                                 });
                                 last_err = Some(Error::QuotaExceeded(enrich_limit(msg, hint)));
                             }
-                            Error::Provider { .. }
-                            | Error::Transport(_)
-                            | Error::Timeout(_)
-                            | Error::BadResponse(_) => {
+                            Error::Provider { status, .. } => {
+                                // A rejected key won't heal; `remove` clears the bench.
+                                if status == 401 && !kind.is_web() {
+                                    let _ = self
+                                        .store
+                                        .set_cooldown(&blabel, REJECTED_KEY_COOLDOWN)
+                                        .await;
+                                    let _ = self
+                                        .store
+                                        .set_cooldown(
+                                            &format!("{}#rejected", b.label),
+                                            REJECTED_KEY_COOLDOWN,
+                                        )
+                                        .await;
+                                }
+                                prev_fail = Some((acct.to_string(), status as i64));
+                                last_err = Some(e);
+                            }
+                            Error::Transport(_) | Error::Timeout(_) | Error::BadResponse(_) => {
                                 prev_fail = Some((acct.to_string(), 0));
                                 last_err = Some(e);
                             }

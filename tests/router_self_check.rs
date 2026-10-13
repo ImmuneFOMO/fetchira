@@ -235,6 +235,124 @@ async fn rate_limit_cools_down_refunds_and_fails_over() {
 }
 
 #[tokio::test]
+async fn rejected_key_is_benched_not_retried() {
+    let exa = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid api key"))
+        .expect(1)
+        .mount(&exa)
+        .await;
+    let tav = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(tavily_body()))
+        .expect(2)
+        .mount(&tav)
+        .await;
+
+    let store = fresh_store("auth").await;
+    let probe = store.clone();
+    let router = Router::from_parts(
+        vec![
+            bucket(ProviderKind::Exa, &exa.uri(), "exa-1"),
+            bucket(ProviderKind::Tavily, &tav.uri(), "tavily-1"),
+        ],
+        store,
+    );
+    for q in ["hi", "again"] {
+        let out = router
+            .call(Capability::Search, &query(q), None)
+            .await
+            .unwrap();
+        assert!(out.text.contains("TAVILY_HIT"), "got: {}", out.text);
+    }
+    assert!(probe.cooldown_remaining("exa-1").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn benched_key_still_reports_the_rejection() {
+    let exa = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid api key"))
+        .expect(1)
+        .mount(&exa)
+        .await;
+
+    let store = fresh_store("auth-test").await;
+    let probe = store.clone();
+    let router = Router::from_parts(vec![bucket(ProviderKind::Exa, &exa.uri(), "exa-1")], store);
+    let tested = router
+        .call_account(Capability::Search, &query("hi"), ProviderKind::Exa, "exa-1")
+        .await;
+    assert!(matches!(
+        tested,
+        Err(fetchira::Error::Provider { status: 401, .. })
+    ));
+    for res in [
+        router
+            .call_account(Capability::Search, &query("hi"), ProviderKind::Exa, "exa-1")
+            .await,
+        router
+            .call(Capability::Search, &query("hi"), Some(ProviderKind::Exa))
+            .await,
+    ] {
+        assert!(matches!(
+            res,
+            Err(fetchira::Error::Provider { status: 401, ref body, .. }) if body.contains("rejected api key")
+        ));
+    }
+
+    probe.delete_account("exa-1").await.unwrap();
+    probe
+        .set_cooldown("exa-1", std::time::Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(matches!(
+        router
+            .call(Capability::Search, &query("hi"), Some(ProviderKind::Exa))
+            .await,
+        Err(fetchira::Error::RateLimit { .. })
+    ));
+}
+
+#[tokio::test]
+async fn rejected_key_benches_every_budget_of_the_account() {
+    let tf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid api key"))
+        .expect(1)
+        .mount(&tf)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [] })))
+        .expect(0)
+        .mount(&tf)
+        .await;
+    let router = Router::from_parts(
+        vec![bucket(ProviderKind::Tinyfish, &tf.uri(), "tf-1")],
+        fresh_store("rejected_budgets").await,
+    );
+    let forced = Some(ProviderKind::Tinyfish);
+    let read = Input {
+        url: Some("https://example.com".into()),
+        ..Default::default()
+    };
+    for (cap, input) in [
+        (Capability::Search, query("q")),
+        (Capability::Read, read),
+        (Capability::DeepResearch, query("q")),
+    ] {
+        assert!(matches!(
+            router.call(cap, &input, forced).await,
+            Err(fetchira::Error::Provider { status: 401, .. })
+        ));
+    }
+}
+
+#[tokio::test]
 async fn legacy_firecrawl_429_recovers_once_from_live_balance() {
     let firecrawl = MockServer::start().await;
     Mock::given(method("GET"))
