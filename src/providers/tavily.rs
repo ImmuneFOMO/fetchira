@@ -66,25 +66,27 @@ async fn research(
     Ok(Outcome::new(answer, 2))
 }
 
-// Shared /search body. Maps the niche knobs to Tavily's native params: topic=news, `days`
-// window, and include/exclude domains. Only set when the corresponding field is present.
+// Tavily has no academic topic, so that hint rides in the query.
 fn body(input: &Input, depth: &str, include_answer: bool) -> Result<Value> {
     let mut b = serde_json::Map::new();
-    b.insert("query".into(), json!(input.need_query()?));
+    let mut q = input.need_query()?.to_string();
+    if input.topic.as_deref() == Some("news") {
+        b.insert("topic".into(), json!("news"));
+    } else {
+        q.push_str(super::niche::topic_hint(input));
+    }
+    b.insert("query".into(), json!(q));
     b.insert("max_results".into(), json!(input.results()));
     b.insert("search_depth".into(), json!(depth));
     if include_answer {
         b.insert("include_answer".into(), json!(true));
     }
-    if input.topic.as_deref() == Some("news") {
-        b.insert("topic".into(), json!("news"));
-    }
-    if let Some(days) = input
+    if let Some(date) = input
         .recency
         .as_deref()
-        .and_then(super::niche::recency_days)
+        .and_then(super::niche::recency_date)
     {
-        b.insert("days".into(), json!(days));
+        b.insert("start_date".into(), json!(date));
     }
     if let Some(domains) = &input.domains {
         let (inc, exc) = super::niche::split_domains(domains);
@@ -164,10 +166,49 @@ mod tests {
         };
         let b = body(&input, "advanced", true).unwrap();
         assert_eq!(b["topic"], "news");
-        assert_eq!(b["days"], 7);
+        assert_eq!(
+            b["start_date"].as_str(),
+            super::super::niche::recency_date("week").as_deref()
+        );
         assert_eq!(b["include_domains"], json!(["nature.com"]));
         assert_eq!(b["exclude_domains"], json!(["reddit.com"]));
         assert_eq!(b["include_answer"], true);
+    }
+
+    #[test]
+    fn recency_filters_every_topic() {
+        let input = Input {
+            query: Some("rust release notes".into()),
+            recency: Some("2025-06-01".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            body(&input, "basic", false).unwrap()["start_date"],
+            "2025-06-01"
+        );
+        let academic = Input {
+            topic: Some("academic".into()),
+            recency: Some("week".into()),
+            ..input
+        };
+        assert!(body(&academic, "advanced", true).unwrap()["start_date"].is_string());
+    }
+
+    #[test]
+    fn academic_folds_into_the_query() {
+        let input = Input {
+            query: Some("crispr".into()),
+            topic: Some("academic".into()),
+            ..Default::default()
+        };
+        let b = body(&input, "advanced", true).unwrap();
+        assert_eq!(b["query"], "crispr (peer-reviewed OR research paper)");
+        assert!(b.get("topic").is_none());
+        let news = Input {
+            topic: Some("news".into()),
+            ..input
+        };
+        assert_eq!(body(&news, "basic", false).unwrap()["query"], "crispr");
     }
 
     #[test]
@@ -179,7 +220,7 @@ mod tests {
         let b = body(&input, "basic", false).unwrap();
         assert_eq!(b["search_depth"], "basic");
         assert!(b.get("topic").is_none());
-        assert!(b.get("days").is_none());
+        assert!(b.get("start_date").is_none());
         assert!(b.get("include_domains").is_none());
         assert!(b.get("include_answer").is_none());
     }
