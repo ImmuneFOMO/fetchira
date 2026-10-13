@@ -32,7 +32,11 @@ async fn search(
             .json(&body(input, depth, false)?),
     )
     .await?;
-    let v: Value = check("tavily", resp).await?.json().await?;
+    let v: Value = check("tavily", resp)
+        .await
+        .map_err(plan_limit)?
+        .json()
+        .await?;
     let hits = v["results"]
         .as_array()
         .map(|a| {
@@ -61,9 +65,25 @@ async fn research(
             .json(&body(input, "advanced", true)?),
     )
     .await?;
-    let v: Value = check("tavily", resp).await?.json().await?;
+    let v: Value = check("tavily", resp)
+        .await
+        .map_err(plan_limit)?
+        .json()
+        .await?;
     let answer = v["answer"].as_str().unwrap_or_default().to_string();
     Ok(Outcome::new(answer, 2))
+}
+
+// Tavily reports a spent plan (432) or pay-as-you-go cap (433) instead of a 402.
+fn plan_limit(e: Error) -> Error {
+    match e {
+        Error::Provider {
+            status: 432 | 433,
+            body,
+            ..
+        } => Error::QuotaExceeded(format!("tavily: {body}")),
+        e => e,
+    }
 }
 
 // Tavily has no academic topic, so that hint rides in the query.
@@ -113,7 +133,11 @@ async fn extract(
             .json(&json!({ "urls": [input.need_url()?] })),
     )
     .await?;
-    let v: Value = check("tavily", resp).await?.json().await?;
+    let v: Value = check("tavily", resp)
+        .await
+        .map_err(plan_limit)?
+        .json()
+        .await?;
     let text = v["results"]
         .as_array()
         .and_then(|a| a.first())
@@ -123,7 +147,7 @@ async fn extract(
     Ok(Outcome::new(text, 1))
 }
 
-/// `GET /usage` → account-wide monthly credits. Free read, reflects paid plans automatically.
+/// `GET /usage` is free and reports both account and per-key credits.
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
     let resp = client
         .get(format!("{base}/usage"))
@@ -133,8 +157,7 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
     parse_balance(&check("tavily", resp).await?.json().await?)
 }
 
-// plan_limit is the monthly ceiling, plan_usage what's spent (basic search 1, advanced 2). Paygo
-// overage can push usage past the plan, so remaining floors at 0.
+// Paygo overage can push usage past the plan, so remaining floors at 0.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let a = &v["account"];
     let total = a["plan_limit"]
@@ -143,8 +166,16 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let used = a["plan_usage"]
         .as_i64()
         .ok_or(Error::BadResponse("tavily"))?;
+    let k = &v["key"];
+    // A per-key cap 432s while the account still has credits.
+    let key_left = k["limit"]
+        .as_i64()
+        .map(|l| l.saturating_sub(k["usage"].as_i64().unwrap_or(0)));
     Ok(LiveBalance {
-        remaining: total.saturating_sub(used).max(0),
+        remaining: total
+            .saturating_sub(used)
+            .min(key_left.unwrap_or(i64::MAX))
+            .max(0),
         total,
         usd: None,
         reset_at: None,
@@ -154,6 +185,21 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_limits_are_spent_quota() {
+        let spent = |status| Error::Provider {
+            provider: "tavily",
+            status,
+            body: "limit".into(),
+        };
+        assert!(matches!(plan_limit(spent(432)), Error::QuotaExceeded(_)));
+        assert!(matches!(plan_limit(spent(433)), Error::QuotaExceeded(_)));
+        assert!(matches!(
+            plan_limit(spent(500)),
+            Error::Provider { status: 500, .. }
+        ));
+    }
 
     #[test]
     fn niche_maps_native_params() {
@@ -234,6 +280,12 @@ mod tests {
         .unwrap();
         assert_eq!(b.remaining, 980);
         assert_eq!(b.total, 1000);
+        let capped = parse_balance(&json!({
+            "key": {"usage": 90, "limit": 100},
+            "account": {"plan_usage": 20, "plan_limit": 1000},
+        }))
+        .unwrap();
+        assert_eq!((capped.remaining, capped.total), (10, 1000));
         assert!(parse_balance(&json!({"account": {"plan_limit": 1000}})).is_err());
     }
 }
