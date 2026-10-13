@@ -1,6 +1,4 @@
-//! Cross-provider research niche knobs (topic/recency/domains). Each provider maps the generic
-//! `Input` fields to its native filter where it can; where it can't, the query is rewritten with
-//! Google-style operators so the niche still applies (best-effort, `native`=false in the reply).
+//! Research niche knobs (topic/recency/domains), mapped to native filters or folded into the query.
 
 use chrono::{Duration, Utc};
 
@@ -39,7 +37,7 @@ pub fn recency_tbs(recency: &str) -> Option<String> {
     }
 }
 
-/// `recency` → a rolling day count (Tavily `days`).
+/// `recency` → a rolling day count.
 pub fn recency_days(recency: &str) -> Option<u32> {
     match recency {
         "day" => Some(1),
@@ -99,7 +97,7 @@ pub fn topic_hint(input: &Input) -> &'static str {
     }
 }
 
-/// Does this request carry any niche knob? (Cheap gate so the common case skips all of the above.)
+/// Does this request carry any niche knob?
 pub fn any(input: &Input) -> bool {
     input.topic.is_some() || input.recency.is_some() || input.domains.is_some()
 }

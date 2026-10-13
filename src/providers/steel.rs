@@ -107,8 +107,7 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
 // (~1 MB of a page at ~$10/GB ≈ $0.0098) — we send `useProxy:true` so pages actually render — puts a
 // typical proxied read near $0.015. So cents ÷ 1.5 (= cents·2/3) reads; it's an estimate (page-weight
 // dependent), shown with "≈".
-// ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
-// draining bar, add it if the flat gauge proves confusing.
+// No grant total in the reply, so the bar stays full while funded.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let balances = v["creditBalanceSummary"]["balances"]
         .as_array()

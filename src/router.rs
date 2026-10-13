@@ -16,8 +16,7 @@ use crate::proxy;
 use crate::usage::{period_key, DebugLog, LiveRow, RouteLog, Store};
 use crate::web;
 
-/// An account's transport: an API client (reqwest) or a cookie-authed impersonating client (wreq).
-/// Web carries the raw cookies too, for providers that must drive a real browser (chatgpt_web).
+/// An account's transport; Web keeps the raw cookies for providers that drive a real browser.
 pub enum Conn {
     Api(reqwest::Client),
     Web(wreq::Client, Vec<web::Cookie>),
@@ -36,8 +35,7 @@ pub struct Bucket {
     pub pinned: bool,
     pub dr_pinned: bool,
     pub proxy: Option<String>,
-    /// Cookie client for reading the dashboard balance of a `balance_session` provider (exa/parallel),
-    /// separate from the api-key `conn` that does the actual calls. `None` until `fetchira login`.
+    /// Dashboard cookie client for a `balance_session` provider's balance; `None` until login.
     pub balance_conn: Option<wreq::Client>,
 }
 
@@ -67,8 +65,7 @@ pub struct UsageView {
     /// Real dollar balance for top-up $ providers (exa/parallel/steel); None for credit providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usd: Option<f64>,
-    /// Cached snapshot only: the live figure isn't fetched yet, so the dashboard shows a loader
-    /// instead of the soft placeholder. Never set in a fetching snapshot.
+    /// Cached snapshot only: the live figure isn't fetched yet, so the dashboard shows a loader.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub pending: bool,
     /// Unix ms when the provider renews the live figure, when it says.
@@ -87,20 +84,17 @@ pub struct Router {
     store: Store,
     // User's per-capability provider order (fetchira priority); empty = built-in order.
     priority: Priority,
-    // Short-lived cache of provider-reported quota, keyed by "{label}|{deep}", so polling the
-    // dashboard or `usage` doesn't hit grok's rate-limit endpoint on every call.
+    // Short-lived provider quota keyed by "{label}|{deep}", so polling doesn't hammer grok.
     live: Mutex<HashMap<String, (Instant, LiveQuota)>>,
-    // Same idea for the richer per-tier limits (chatgpt_web), keyed by label. Browser misses are
-    // cached; HTTP-only misses are not, so a later browser-enabled snapshot can retry.
+    // Per-tier limits by label; HTTP-only misses stay out so a browser snapshot can retry.
     live_limits: Mutex<HashMap<String, (Instant, Option<LiveLimits>)>>,
     // Last balance fetch per label, hit or miss: snapshots re-poll at most every 20s.
     balance: Mutex<HashMap<String, Instant>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
     debug: Option<i64>,
-    // ponytail: serialize hosted Chromium work; overlapping browser processes reset CDP on small VPSes.
+    // Overlapping browser processes reset CDP on small VPSes.
     browser_gate: Arc<tokio::sync::Mutex<()>>,
-    // Legacy 429 marks are reconciled once per process at a time so concurrent callers do not
-    // stampede the provider's balance endpoint during an upgrade.
+    // One legacy 429 reconciliation at a time, so callers don't stampede the balance endpoint.
     legacy_recovery_gate: tokio::sync::Mutex<()>,
 }
 
@@ -151,8 +145,7 @@ impl Router {
         }
     }
 
-    /// Replace the user priority after construction (`build` reads it from config; this is for
-    /// callers assembling a router from parts, e.g. tests).
+    /// Replace the user priority on a router assembled from parts.
     pub fn with_priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
         self
@@ -164,8 +157,7 @@ impl Router {
             .enabled
             .then_some(cfg.debug_log.retention_hours);
         let priority = cfg.priority.clone();
-        // Only fetch the proxy list if a "pool" account still lacks a (cached) assignment —
-        // otherwise every server launch would re-download it and block the MCP handshake.
+        // The proxy list download blocks the MCP handshake, so only when an assignment is missing.
         let mut needs_pool = false;
         for acc in &cfg.accounts {
             if acc.proxy.as_deref() == Some("pool") && store.proxy_for(&acc.label).await?.is_none()
@@ -191,8 +183,7 @@ impl Router {
         } else {
             Vec::new()
         };
-        // 300s like the web client — above any legit call (exa research is one long POST), so
-        // only a truly stalled endpoint trips it.
+        // Above any legit call (exa research is one long POST); only a stalled endpoint trips it.
         let direct = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -237,8 +228,6 @@ impl Router {
                 };
                 (Conn::Api(client), key)
             };
-            // exa/parallel keep their api-key for calls but read the live $ balance through a
-            // captured dashboard cookie session (best-effort; absent until `fetchira login`).
             let balance_conn = match acc.provider.balance_session() {
                 true => match store.load_session(&acc.label).await? {
                     Some(raw) => {
@@ -279,9 +268,7 @@ impl Router {
         })
     }
 
-    /// Pick the most-preferred provider with a non-exhausted account (most-remaining
-    /// account wins within a provider's pool); fail over on rate/quota/transport errors.
-    /// `forced` restricts candidates to one provider and errors rather than switching.
+    /// Route to the most-preferred provider with room and fail over; `forced` pins one provider.
     pub async fn call(
         &self,
         cap: Capability,
@@ -334,8 +321,7 @@ impl Router {
         // The most recent failed attempt in this call, so a later success records the failover hop.
         let mut prev_fail: Option<(String, i64)> = None;
 
-        // A forced provider is tried directly (it may serve the cap without being in the auto-route
-        // order, e.g. read via tavily/serper/steel); auto-choice walks the preference order.
+        // A forced provider may serve the cap outside the auto-route order (read via tavily).
         let order = match forced {
             Some(f) if !f.supports(cap) => return Err(Error::Unsupported(f.as_str())),
             Some(f) => vec![f],
@@ -397,9 +383,7 @@ impl Router {
                         probe_until = recovery.probe_until;
                         (quota, rem) = self.headroom(&blabel, bquota, pinned, &period).await?;
                     } else if self.store.cooldown_remaining(&blabel).await?.is_none() {
-                        // A sibling may have cleared the mark from a positive live balance while
-                        // this caller waited on recovery. Re-read only when it left no probe lease;
-                        // an active lease still owns the sole no-balance request.
+                        // A sibling may have cleared the mark; a live probe lease owns the call.
                         (quota, rem) = self.headroom(&blabel, bquota, pinned, &period).await?;
                     }
                     if rem == 0 && probe_until.is_some() {
@@ -411,10 +395,7 @@ impl Router {
                         continue;
                     }
                 }
-                // For tool-gated capabilities, trust the provider's live allowance over the soft
-                // counter: skip a bucket the provider says is exhausted (proactive failover). Only
-                // when auto-choosing — a *forced* provider is attempted regardless (limits may be
-                // stale), so an explicit request can still go through or surface a real rate-limit.
+                // Tool-gated caps follow the live allowance; a forced call tries anyway.
                 if rem > 0 && forced.is_none() {
                     if let Some(feature) = live_feature(cap) {
                         if let Some(live) = self
@@ -464,10 +445,7 @@ impl Router {
 
             for (i, _rem, blabel, quota, period, probe_until) in cands {
                 let b = &self.buckets[i];
-                // Reserve the slot *before* the network call so concurrent tasks can't all clear the
-                // same `remaining > 0` gate and stampede one account past its quota. Claim a nominal
-                // 1 (the per-call minimum), settle the real cost on success, refund on any failure.
-                // A `false` means a sibling took the last slot meanwhile — move to the next account.
+                // Reserve 1 before the call so concurrent callers can't overrun the quota.
                 if !self
                     .store
                     .reserve(kind.as_str(), &blabel, quota, &period, 1, probe_until)
@@ -493,25 +471,18 @@ impl Router {
                                 s.starts_with("dr|poll|") || s.starts_with("img|poll|")
                             }) =>
                     {
-                        // Image + deep-research polls stay in the browser: the HTTP chatgpt_web
-                        // path mints a fresh bearer per call and chokes on the rolling NextAuth
-                        // rotation that an already-authenticated Chromium tolerates.
+                        // The HTTP path's per-call bearer breaks on NextAuth rotation mid-poll.
                         let _browser_gate = self.browser_gate.lock().await;
                         providers::chatgpt_browser::run(cookies, cap, input).await
                     }
-                    // ChatGPT drives a real browser for chat / deep-research / image. The pure-HTTP
-                    // turn (chatgpt_web) is blocked by OpenAI's "unusual activity" anti-bot gate
-                    // (429/403) that the cookie client can't pass even with a freshly-minted sentinel
-                    // token, so the turn always goes through the browser. chatgpt_web is still used
-                    // for cookie-only reads (limits / tier / identity), which aren't anti-bot gated.
+                    // OpenAI's anti-bot gate blocks the HTTP turn, so turns drive a real browser.
                     Conn::Web(_, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
                         let _browser_gate = self.browser_gate.lock().await;
                         providers::chatgpt_browser::run(cookies, cap, input).await
                     }
                     Conn::Web(c, _) => b.provider.call_web(c, cap, input, &b.label).await,
                 };
-                // Persist rotated session cookies a web turn captured on a bearer cache-miss, so the
-                // next process starts from the freshest token (keeps the session alive across procs).
+                // Keep rotated cookies so the next process starts from the freshest token.
                 if let Ok(out) = &res {
                     if !out.cookie_updates.is_empty() {
                         self.refresh_session(b, &out.cookie_updates).await;
@@ -539,7 +510,6 @@ impl Router {
                         )
                         .await;
                 }
-                // Firehose: every attempt (success or failure, incl. a 403 body) lands here.
                 let mut debug_id = None;
                 if let Some(retention) = self.debug {
                     let err = res.as_ref().err().map(|e| e.to_string());
@@ -568,8 +538,7 @@ impl Router {
                 }
                 match res {
                     Ok(o) => {
-                        // An empty read isn't a real answer — refund and fall through so failover
-                        // (and the browser escalation below) get a shot instead of returning blank.
+                        // An empty read isn't an answer: let failover or the browser try.
                         if cap == Capability::Read && o.text.trim().is_empty() && o.image.is_none()
                         {
                             let _ = self.store.refund(&blabel, &period, 1).await;
@@ -590,7 +559,6 @@ impl Router {
                         if let Some(live) = o.live {
                             let _ = self.store.save_reply_live(&blabel, &period, &live).await;
                         }
-                        // Best-effort route log (never fail the call over telemetry).
                         let niche = match providers::niche_native(kind, cap, input) {
                             Some(true) => "native",
                             Some(false) => "rewrite",
@@ -642,7 +610,6 @@ impl Router {
                         });
                     }
                     Err(e) => {
-                        // The reserved unit never became real usage — give it back.
                         let _ = self.store.refund(&blabel, &period, 1).await;
                         match e {
                             Error::RateLimit {
@@ -668,9 +635,7 @@ impl Router {
                                     .mark_exhausted(kind.as_str(), &blabel, &period)
                                     .await;
                                 let _ = self.store.drain_live(&blabel, &period).await;
-                                // A provider-side 402 is authoritative for now, but a top-up must
-                                // eventually revive even a `Reset::Once` account. One process gets
-                                // a fresh balance check/probe after this persisted interval.
+                                // The recheck lets a top-up revive even a `Reset::Once` account.
                                 let _ = self
                                     .store
                                     .set_cooldown(&blabel, DEFAULT_RATE_LIMIT_COOLDOWN)
@@ -705,8 +670,7 @@ impl Router {
                             }
                             _ => return Err(e),
                         }
-                        // Image may already have submitted the prompt. Fail over only when
-                        // this account never accepted the turn (login / composer).
+                        // An image prompt may already be submitted; fail over only if not.
                         if matches!(cap, Capability::Image)
                             && last_err
                                 .as_ref()
@@ -728,8 +692,7 @@ impl Router {
             }
         }
 
-        // A real error from an attempt beats the generic "no account" message — surface it,
-        // forced or not, so the caller sees why (e.g. an expired web session or a 403).
+        // A real attempt error beats the generic "no account" one.
         if let Some(e) = last_err {
             return Err(e);
         }
@@ -739,8 +702,7 @@ impl Router {
         Err(Error::NoCandidate(cap.as_str()))
     }
 
-    /// Recover legacy 429 marks and periodically recheck confirmed provider quota denials. The
-    /// persisted probe claim prevents separate CLI/MCP/hosted processes from retrying together.
+    /// Recheck legacy 429 marks and quota denials, one probe across processes.
     async fn recover_exhaustion(
         &self,
         b: &Bucket,
@@ -762,8 +724,7 @@ impl Router {
             return Ok(None);
         };
 
-        // Web quota signals are feature-specific. Prefer a fresh live allowance when available;
-        // otherwise allow the claimed request to probe once after the cooldown.
+        // Web accounts follow a live feature allowance, else probe once.
         if b.provider.kind.is_web() {
             if let Some(feature) = live_feature(cap) {
                 match self
@@ -788,8 +749,7 @@ impl Router {
             }));
         }
 
-        // API providers with a balance endpoint recover only from a fresh positive balance. When
-        // no balance can be read, clear the marker for this claimed one-shot provider probe.
+        // Only a fresh positive balance recovers; without one the claimed probe decides.
         if let Some(balance) = self.fetch_live_balance(b, label).await {
             if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
                 return Ok(None);
@@ -827,8 +787,7 @@ impl Router {
         else {
             return Ok(None);
         };
-        // Legacy versions did not distinguish 429 from quota. A web account or an API provider
-        // without readable balance gets one bounded request; a new denial recreates a typed mark.
+        // Legacy marks mixed 429s with quota; without a readable balance, probe once.
         if b.provider.kind.is_web() {
             let cleared = self.store.clear_legacy_exhausted(label, period).await?;
             return Ok(cleared.then_some(ExhaustionRecovery {
@@ -844,9 +803,7 @@ impl Router {
         if balance.remaining <= 0 && !balance.usd.is_some_and(|usd| usd > 0.0) {
             return Ok(None);
         }
-        // Clear the marker and release the lease in one commit. A sibling checks the marker before
-        // entering `legacy_recovery_gate`; separate writes would let it skip the gate while the
-        // lease is still visible and incorrectly report a 60-second cooldown.
+        // One commit: a sibling checks the marker before the gate and mustn't see the lease alone.
         let cleared = self
             .store
             .clear_legacy_exhausted_and_release_cooldown(label, period, probe_until)
@@ -859,15 +816,12 @@ impl Router {
         self.snapshot(true, true).await
     }
 
-    /// Cached-only snapshot: never blocks on a provider, so the dashboard paints instantly and the
-    /// background `warm` loop fills each account's limits/balance in as its fetch lands.
+    /// Cached-only snapshot that never blocks on a provider; `warm` fills it in.
     pub async fn usage_snapshot_cached(&self) -> Result<Vec<UsageView>> {
         self.snapshot(false, false).await
     }
 
     async fn snapshot(&self, fetch: bool, browser_fallback: bool) -> Result<Vec<UsageView>> {
-        // Fan the buckets out concurrently: a fetching snapshot waits for the slowest single
-        // provider (not the sum), a cached one returns immediately.
         let per = self
             .buckets
             .iter()
@@ -879,10 +833,7 @@ impl Router {
         Ok(out)
     }
 
-    /// Refresh every live cache (called on a timer by the dashboard) so cached snapshots stay fresh
-    /// without any request blocking on a cold provider fan-out. Includes ChatGPT's CDP fallback:
-    /// HTTP-only misses are not cached, so a hosted VPS that 403s `conversation/init` would
-    /// otherwise leave Accounts on `pending` forever.
+    /// Refresh every live cache; the browser fallback keeps a 403ing ChatGPT from staying pending.
     pub async fn warm(&self) {
         let _ = self.snapshot(true, true).await;
     }
@@ -940,8 +891,7 @@ impl Router {
                 .features
                 .push(view_feature("search", &sv));
         }
-        // Cached snapshot: flag accounts whose live figure isn't cached yet so the UI shows a loader
-        // instead of a soft placeholder. Web → limits cache; API-key → balance cache.
+        // Flag accounts whose live figure isn't cached yet so the UI shows a loader.
         if !fetch {
             mv.pending = if b.provider.kind.is_web() {
                 !self
@@ -972,9 +922,7 @@ impl Router {
                 .await?;
             self.overlay_live(b, &mut dv, b.dr_quota, b.dr_pinned).await;
             self.patch_live(b, true, &mut dv, fetch).await;
-            // Prefer the provider's live deep-research allowance over the soft counter. A live
-            // `total` (grok, tier-aware) overrides the ceiling too, so a locked tier reads 0/0
-            // instead of the nominal daily budget.
+            // A live `total` overrides the ceiling too, so a locked tier reads 0/0.
             if let Some(f) = ll.as_ref().and_then(|l| l.feature("deep_research")) {
                 dv.remaining = f.remaining.max(0);
                 if let Some(t) = f.total {
@@ -1015,8 +963,7 @@ impl Router {
         Ok(out)
     }
 
-    /// Replace the soft local counter with the provider's live figure when it reports one (grok),
-    /// caching it briefly. Best-effort: a failed fetch leaves the soft view untouched.
+    /// Overlay a web provider's live quota (grok), cached briefly; a miss keeps the soft view.
     async fn patch_live(&self, b: &Bucket, deep: bool, v: &mut UsageView, fetch: bool) {
         let Conn::Web(c, _) = &b.conn else { return };
         let key = format!("{}|{}", b.label, deep);
@@ -1215,8 +1162,7 @@ impl Router {
             Some("#dr") => true,
             _ => return None,
         };
-        // exa/parallel read their $ balance through the dashboard cookie session; the rest through
-        // the api-key. Dashboard reads may rotate cookies, so persist those updates.
+        // Dashboard reads may rotate session cookies, so persist the updates.
         let main = bounded(async {
             match &b.balance_conn {
                 // Stored cookies carry the rotations `refresh_session` saved, like the client's jar.
@@ -1271,9 +1217,7 @@ impl Router {
         }
     }
 
-    /// Re-save a `balance_session` account's stored cookies with the rolling token the dashboard
-    /// just re-issued (any `Set-Cookie` whose value changed), so polling the balance keeps the
-    /// NextAuth session from expiring.
+    /// Re-save rotated session cookies so polling keeps the NextAuth session alive.
     async fn refresh_session(&self, b: &Bucket, updates: &[(String, String)]) {
         if updates.is_empty() {
             return;
@@ -1302,8 +1246,7 @@ impl Router {
         }
     }
 
-    /// Live per-tier limits for a web bucket, cached briefly. Browser misses are cached so an
-    /// unsupported provider isn't re-polled, but HTTP-only misses stay uncached for fallback.
+    /// Live per-tier limits for a web bucket, cached briefly.
     async fn live_limits_for(
         &self,
         b: &Bucket,
@@ -1345,8 +1288,7 @@ impl Router {
                     .live_limits(c, &b.label, cookies, browser_fallback),
             )
             .await;
-        // Persist any rotated session cookies captured on a bearer cache-miss, so the next process
-        // starts from the freshest token instead of rotating from a stale one.
+        // Keep rotated cookies so the next process starts from the freshest token.
         if let Some(ll) = &mut fetched {
             if !ll.cookie_updates.is_empty() {
                 self.refresh_session(b, &ll.cookie_updates).await;
@@ -1354,8 +1296,7 @@ impl Router {
             if let Some(id) = ll.identity.as_deref().filter(|s| !s.is_empty()) {
                 let _ = self.store.set_identity(&b.label, id).await;
             }
-            // Persist a successful live read for later sessions; never overlay stored plan/quotas
-            // onto a miss — the dashboard must not show last-seen numbers as current.
+            // Stored for later sessions; a miss never shows them as current.
             if let Some(tier) = ll.tier.as_deref().filter(|t| !t.is_empty()) {
                 let _ = self.store.set_plan(&b.label, tier).await;
             }
@@ -1365,8 +1306,7 @@ impl Router {
                 }
             }
         }
-        // An HTTP-only miss must not hide the browser fallback from a later full snapshot or
-        // reset hint. Successful HTTP reads remain reusable; browser attempts may cache misses.
+        // An HTTP-only miss stays uncached so a later browser attempt still runs.
         if fetched.is_some() || browser_fallback {
             if let Ok(mut m) = self.live_limits.lock() {
                 m.insert(b.label.clone(), (Instant::now(), fetched.clone()));
@@ -1375,8 +1315,7 @@ impl Router {
         fetched
     }
 
-    /// When a gated call is rate-limited, a "resets …" note from the provider's live limit for that
-    /// feature (an absolute reset for chatgpt, a rolling window for grok). `None` if unavailable.
+    /// A "resets …" note from the provider's live limit for a rate-limited feature.
     async fn reset_hint(&self, b: &Bucket, cap: Capability) -> Option<String> {
         let feature = live_feature(cap)?;
         let ll = self.live_limits_for(b, true, true).await?;
@@ -1461,8 +1400,7 @@ fn strip_budget(label: &str) -> &str {
         .unwrap_or(label)
 }
 
-/// HTTP-ish status for the debug log: the provider's real code when it has one, else 429/402 for
-/// the rate/quota cases and 0 for transport/shape errors.
+/// Status for the debug log: the provider's code, 429/402 for rate/quota, else 0.
 fn err_code(e: &Error) -> i64 {
     match e {
         Error::Provider { status, .. } => *status as i64,
@@ -1486,10 +1424,7 @@ fn describe_input(cap: Capability, input: &Input) -> String {
     .to_string()
 }
 
-/// (db label, quota, reset) for a bucket+capability. Web deep research and image generation use
-/// separate feature budgets so exhausting one does not disable ordinary chat/search.
-/// The provider feature whose live allowance gates a capability (for proactive failover). `None`
-/// means use only the soft counter (chat/search caps are effectively unlimited on paid tiers).
+/// The feature whose live allowance gates a capability; `None` uses only the soft counter.
 fn live_feature(cap: Capability) -> Option<&'static str> {
     match cap {
         Capability::DeepResearch => Some("deep_research"),
@@ -1498,10 +1433,7 @@ fn live_feature(cap: Capability) -> Option<&'static str> {
     }
 }
 
-/// A compact, LLM-friendly rendering of the usage snapshot for the MCP `usage` tool: web sessions
-/// with their live model/mode catalog + limits (exactly what to pass to search/deep_research), then
-/// one terse API-key line. Far fewer tokens than the full JSON, and doubles as a selection cheatsheet
-/// — the dashboard / `fetchira list` keep the detailed view.
+/// Compact usage for the MCP `usage` tool: web sessions with live models + limits, then api keys.
 pub fn compact_usage(views: &[UsageView]) -> String {
     let dr: HashMap<&str, &UsageView> = views
         .iter()
@@ -1560,8 +1492,7 @@ pub fn compact_usage(views: &[UsageView]) -> String {
     )
 }
 
-/// One-line teaser of the escape-hatch modes, pointing at `usage(provider=…)` for the full sheet.
-/// Non-web providers only (web modes ride along in the model catalog above).
+/// One-line teaser of the non-web escape-hatch modes, pointing at `usage(provider=…)`.
 fn extras_index() -> String {
     let mut idx: Vec<String> = ProviderKind::all()
         .iter()
@@ -1579,9 +1510,7 @@ fn extras_index() -> String {
     idx.join(" · ")
 }
 
-/// The full capability sheet for one provider: its live limit/balance line(s) from the snapshot,
-/// merged with the static `extras` table (niches, escape-hatch modes, example calls). This is what
-/// `usage(provider=…)` returns — everything an agent needs to drive that backend by hand.
+/// The sheet `usage(provider=…)` returns: live limit lines plus the static extras.
 pub fn provider_sheet(kind: ProviderKind, views: &[UsageView]) -> String {
     use std::fmt::Write;
     let ex = providers::extras(kind);
@@ -1667,8 +1596,7 @@ fn fmt_model(m: &ModelInfo) -> String {
     format!("{}{levels}{val}{win}", m.name)
 }
 
-/// Append the reset window + a pick-another hint to a rate/quota message (the "try something else,
-/// here's when it's back" behaviour agents get on a live limit).
+/// Append the reset hint and a pick-another nudge to a rate/quota message.
 fn enrich_limit(msg: String, hint: Option<String>) -> String {
     match hint {
         Some(h) => format!("{msg} — {h}; try another provider or mode"),
@@ -1715,8 +1643,7 @@ fn budget(b: &Bucket, cap: Capability) -> (String, i64, bool, Reset) {
                     b.dr_reset,
                 )
             }
-            // Image limits are feature-specific and normally daily. Never let one exhausted image
-            // allowance disable ordinary search/chat on the same web account.
+            // A spent image allowance must not disable chat/search on the same web account.
             Capability::Image => {
                 return (
                     format!("{}#image", b.label),
@@ -1832,17 +1759,14 @@ mod tests {
 
     #[test]
     fn fmt_model_renders_each_shape() {
-        // rolling-window live count
         assert_eq!(
             fmt_model(&mi("Fast", &[], Some(7), Some(7), Some(86400), false)),
             "Fast 7/7·24h"
         );
-        // locked mode -> LOCKED, no numbers
         assert_eq!(
             fmt_model(&mi("Heavy", &[], Some(0), Some(0), None, true)),
             "Heavy LOCKED"
         );
-        // catalog-only with thinking levels (chatgpt)
         assert_eq!(
             fmt_model(&mi(
                 "GPT-5.5",
@@ -1854,7 +1778,6 @@ mod tests {
             )),
             "GPT-5.5[instant/medium/high]"
         );
-        // no live count (gemini)
         assert_eq!(
             fmt_model(&mi(
                 "Pro",
@@ -1870,13 +1793,11 @@ mod tests {
 
     #[test]
     fn provider_sheet_renders_extras_and_live_line() {
-        // No matching views: still renders the static sheet (modes + examples).
         let sheet = provider_sheet(ProviderKind::Serper, &[]);
         assert!(sheet.contains("serper"));
         assert!(sheet.contains("patents"));
         assert!(sheet.contains("examples:"));
 
-        // A matching view contributes a live "left" line.
         let v = UsageView {
             provider: "serper",
             label: "serper".into(),
@@ -2046,8 +1967,6 @@ mod tests {
             .await
             .expect("open store");
         let bucket = Bucket {
-            // Tavily has no web-limit implementation, making this an immediate HTTP-only miss
-            // while exercising the same cache branch as ChatGPT's failed HTTP probe.
             provider: Provider::new(ProviderKind::Tavily),
             conn: Conn::Web(wreq::Client::new(), Vec::new()),
             key: String::new(),

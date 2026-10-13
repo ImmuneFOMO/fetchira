@@ -90,8 +90,7 @@ async fn scrape_markdown(
     Ok(Outcome::new(text, cost))
 }
 
-// Single-page JSON extraction is synchronous. The legacy /extract endpoint returns an async
-// job ID, which cannot satisfy this read operation without a separate polling interface.
+// v2 scrape extracts synchronously; the legacy /extract only hands back an async job id.
 async fn extract(
     base: &str,
     key: &str,
@@ -151,11 +150,10 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
     parse_balance(&check("firecrawl", resp).await?.json().await?)
 }
 
-// remainingCredits is the real spendable balance (includes coupons/packs/auto-recharge);
-// planCredits is only the monthly base, so it seeds the gauge ceiling but can't cap remaining.
+// remainingCredits includes top-ups; planCredits is only the monthly base, so it can't cap it.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let d = &v["data"];
-    // Snake-case compatibility covers the retired v1 payload in an upgraded local cache/test.
+    // Snake case is the retired v1 payload.
     let remaining = d["remainingCredits"]
         .as_i64()
         .or_else(|| d["remaining_credits"].as_i64())
@@ -265,7 +263,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(b.remaining, 1357);
-        assert_eq!(b.total, 1357); // top-ups exceed the plan base
+        assert_eq!(b.total, 1357);
         assert_eq!(b.reset_at, None);
         assert!(parse_balance(&json!({"success": true, "data": {}})).is_err());
     }

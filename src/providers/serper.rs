@@ -3,10 +3,7 @@ use serde_json::{json, Value};
 use super::{check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
 
-// Maps the niche knobs onto serper's native shape: topic → endpoint (/news, /scholar), recency →
-// `tbs`, and domains → `site:`/`-site:` on `q` (serper has no domains param). `mode` is an escape
-// hatch to serper's other verticals; when absent the topic mapping stands. Returns the path, body
-// and the result-array key (news lands under `news`, search/scholar/patents under `organic`).
+// Returns the endpoint path, the body and the result-array key.
 fn build_req(input: &Input) -> Result<(&'static str, Value, &'static str)> {
     let q = input.need_query()?.to_string() + &niche::sites(input);
     let (path, arr) = match input.mode.as_deref() {
@@ -82,8 +79,7 @@ pub async fn call(
     Ok(Outcome::new(fmt_hits(&hits), 1))
 }
 
-// Serper's scraper lives on its own host (scrape.serper.dev, POST /), not under the SERP api;
-// the swap keeps a mocked test base pointing at the mock. Returns markdown when available.
+// The scraper lives on its own host (scrape.serper.dev), not under the SERP api.
 async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
     let resp = crate::httptrace::send_traced(
         client
@@ -101,8 +97,7 @@ async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
     Ok(Outcome::new(text, v["credits"].as_i64().unwrap_or(1)))
 }
 
-/// `GET /account` → `{balance, rateLimit}`. Free, read-only, authoritative (the dashboard's own
-/// endpoint). `balance` = remaining credits, 1 per query.
+/// `GET /account` is free; `balance` is the remaining credits, 1 per query.
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
     let resp = client
         .get(format!("{base}/account"))
@@ -112,8 +107,6 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
     parse_balance(&check("serper", resp).await?.json().await?)
 }
 
-// The endpoint reports remaining credits but no original ceiling, so keep the live gauge honest by
-// using the current balance for both values.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let remaining = v["balance"].as_i64().ok_or(Error::BadResponse("serper"))?;
     Ok(LiveBalance {

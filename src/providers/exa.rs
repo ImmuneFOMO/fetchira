@@ -168,8 +168,7 @@ pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String,
 }
 
 // No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
-// ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
-// draining bar, add it if the flat gauge proves confusing.
+// No grant total in the reply, so the bar stays full while funded.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let cents = v["orbCreditsInCents"]
         .as_f64()

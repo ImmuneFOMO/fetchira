@@ -100,7 +100,6 @@ fn source_policy(input: &Input) -> Option<Value> {
     Some(sp)
 }
 
-// `deep` depth buys the pricier/deeper `core` processor; anything else keeps the default `base`.
 fn processor(input: &Input) -> &'static str {
     match input.depth.as_deref() {
         Some("deep") => "core",
@@ -168,9 +167,7 @@ async fn result(base: &str, key: &str, client: &reqwest::Client, id: &str) -> Re
     Ok(Outcome::new(text, 1))
 }
 
-/// Live $ balance via the dashboard's cookie session (the api-key can't read it — api.parallel.ai's
-/// balance is OAuth-only). `billing_overview` → `{balance: <cents>}`; a search is $0.005, so cents·2
-/// = searches.
+/// Live $ balance in cents via the dashboard cookie session; the api-key can't read it.
 pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String, String)>)> {
     let resp = client
         .post("https://platform.parallel.ai/api/acc_svc/billing_overview")
@@ -196,9 +193,6 @@ pub async fn balance(client: &wreq::Client) -> Result<(LiveBalance, Vec<(String,
     Ok((parse_balance(&v)?, updates))
 }
 
-// No fixed ceiling exists for a top-up balance, so the gauge tracks the live figure itself.
-// ponytail: total = remaining (bar full while funded); a stored high-water-mark would give a
-// draining bar, add it if the flat gauge proves confusing.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     if !v["balanceError"].is_null() {
         return Err(Error::BadResponse("parallel"));
@@ -215,8 +209,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
     })
 }
 
-/// Account email via the dashboard's cookie session (same origin as `balance`, api-key can't read
-/// it). `{kind:"ok", data:{userEmail,...}}`.
+/// Account email via the dashboard cookie session, like `balance`.
 pub async fn identity(client: &wreq::Client) -> Result<Option<String>> {
     let resp = client
         .post("https://platform.parallel.ai/api/rpc/auth/get-my-api-key-and-session-details")
@@ -331,7 +324,7 @@ mod tests {
     #[test]
     fn cents_to_searches() {
         let b = parse_balance(&json!({"balance": 1690, "balanceError": null})).unwrap();
-        assert_eq!(b.remaining, 3380); // $16.90 / $0.005
+        assert_eq!(b.remaining, 3380);
         assert_eq!(b.total, 3380);
         assert!(parse_balance(&json!({"balanceError": null})).is_err());
         assert!(parse_balance(&json!({"balance": 1690, "balanceError": "stale"})).is_err());

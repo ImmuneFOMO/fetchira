@@ -627,8 +627,7 @@ fn collect_strings(v: &Value, out: &mut Vec<String>) {
 }
 
 /// Map a friendly model name to Gemini's opaque model id (or pass a raw id through).
-/// ponytail: ids rotate with model launches; update this map or pass the raw id. Unknown
-/// names fall back to the account default (no header).
+/// Ids rotate with model launches; unknown names fall back to the account default.
 fn model_id(m: Option<&str>) -> Option<String> {
     let m = m?;
     let k: String = m
@@ -851,8 +850,7 @@ fn usage_limited(it: &[Value]) -> bool {
 
 // Each payload is one compact-JSON array per physical line (Gemini escapes any newline
 // inside strings), so split on lines and skip the `)]}'` prelude + bare length markers.
-// ponytail: line-based instead of the documented UTF-16 length prefix, whose count desyncs
-// the stream here; revisit only if a payload ever spans physical lines.
+// Line-based: the documented UTF-16 length prefix desyncs the stream here.
 fn frames(s: &str) -> Vec<String> {
     s.lines()
         .map(str::trim)

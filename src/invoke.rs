@@ -34,9 +34,7 @@ pub(crate) fn route(
     Ok((Some(parse_provider(prefix)?), Some(rest.to_string())))
 }
 
-/// Validate the generic search knobs before either CLI or MCP builds the router.
-/// Providers map these values differently, so silently accepting a typo would produce
-/// plausible-looking results without the requested filter.
+/// Reject a bad search knob, which would otherwise return results without the filter.
 pub(crate) fn validate_search_input(input: &Input) -> anyhow::Result<()> {
     if let Some(topic) = input.topic.as_deref() {
         if !matches!(topic, "web" | "news" | "academic") {

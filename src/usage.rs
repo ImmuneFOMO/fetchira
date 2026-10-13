@@ -122,8 +122,7 @@ pub struct DebugLog<'a> {
     pub http_trace: Option<&'a str>,
 }
 
-/// Per-field char cap and row cap for the debug log. The product (~0.5 GB) is the hard ceiling
-/// regardless of `retention_hours`, so a burst can't fill the disk before the time sweep runs.
+/// Debug log caps per field and in rows: ~0.5 GB at most, whatever `retention_hours` says.
 const DEBUG_BODY_CAP: usize = 128 * 1024;
 const DEBUG_MAX_ROWS: i64 = 4000;
 /// Labels an account's rows live under: its own, feature budgets, the key bench, re-read markers.
@@ -140,13 +139,11 @@ const OWNED: [&str; 10] = [
     "#dr#unread",
 ];
 
-/// Bump ONLY on a breaking schema change (additive `IF NOT EXISTS`/`ADD COLUMN` stays free).
-/// Must match the repo-root `schema-version` file, which ships as a release asset so the
-/// updater can refuse a breaking swap while old-version MCP servers are still running.
+/// Bump only on a breaking schema change; must match the repo-root `schema-version` asset.
+/// The updater reads it to refuse a breaking swap while old-version MCP servers still run.
 pub const SCHEMA: i64 = 2;
 
-/// Additive `CREATE TABLE IF NOT EXISTS` is safe under older binaries. Only stamp `user_version`
-/// when no other fetchira process is using the file (or this is a brand-new db).
+/// Stamp `user_version` only on a new db or when no other fetchira process has it open.
 fn should_bump_user_version(current: i64, peer_count: usize) -> bool {
     current < SCHEMA && (current == 0 || peer_count == 0)
 }
@@ -167,8 +164,7 @@ impl Store {
     }
 
     pub async fn open(path: &str) -> Result<Self> {
-        // Changing journal mode or upgrading a legacy schema can return SQLITE_BUSY immediately
-        // despite busy_timeout. Another CLI/MCP process may be opening the same database.
+        // Journal mode changes and legacy upgrades can hit SQLITE_BUSY despite busy_timeout.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match Self::open_once(path).await {
@@ -223,15 +219,13 @@ impl Store {
         )
         .execute(&pool)
         .await?;
-        // Old versions marked both temporary 429s and real 402s as exhausted. New durable marks
-        // carry `quota`; a NULL legacy mark may be cleared only after a fresh positive balance.
+        // A NULL kind is a legacy mark that mixed 429s with 402s.
         if !usage_has_exhausted_kind(&pool).await? {
             if let Err(err) = sqlx::query("ALTER TABLE usage ADD COLUMN exhausted_kind TEXT")
                 .execute(&pool)
                 .await
             {
-                // Two fresh CLI/MCP processes can both observe the legacy schema. The loser of
-                // the ALTER race is healthy only when the winner really added the column.
+                // Racing processes may both ALTER; the loser is fine once the column exists.
                 if !usage_has_exhausted_kind(&pool).await? {
                     return Err(err.into());
                 }
@@ -268,8 +262,7 @@ impl Store {
         )
         .execute(&pool)
         .await?;
-        // Existing DBs predate `identity` (account email, for the dashboard + dup detection);
-        // add it idempotently (ignore "duplicate column name").
+        // Older DBs lack these columns; the ALTERs fail harmlessly once they exist.
         sqlx::query("ALTER TABLE web_session ADD COLUMN identity TEXT")
             .execute(&pool)
             .await
@@ -299,12 +292,10 @@ impl Store {
         )
         .execute(&pool)
         .await?;
-        // Existing DBs predate `niche`; add it idempotently (ignore "duplicate column name").
         sqlx::query("ALTER TABLE route_log ADD COLUMN niche TEXT NOT NULL DEFAULT ''")
             .execute(&pool)
             .await
             .ok();
-        // Same for `debug_id` — links each route to its debug_log capture for drill-down.
         sqlx::query("ALTER TABLE route_log ADD COLUMN debug_id INTEGER")
             .execute(&pool)
             .await
@@ -326,7 +317,6 @@ impl Store {
         )
         .execute(&pool)
         .await?;
-        // Existing DBs predate `http_trace`; add it idempotently (ignore "duplicate column name").
         sqlx::query("ALTER TABLE debug_log ADD COLUMN http_trace TEXT")
             .execute(&pool)
             .await
@@ -582,8 +572,7 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically reserve a user request before provider work starts. This closes the race where
-    /// concurrent requests could all pass a read-only quota check.
+    /// Atomically reserve a user request before provider work, so concurrent ones can't all pass.
     pub async fn reserve_request(
         &self,
         id: &str,
@@ -908,8 +897,7 @@ impl Store {
         Ok(row.and_then(|r| r.get::<Option<String>, _>("identity")))
     }
 
-    /// Another account of the same provider already logged into this identity → its label. Lets the
-    /// add flow reject re-adding an account you already have.
+    /// The label of another same-provider account already logged into this identity.
     pub async fn identity_conflict(
         &self,
         provider: &str,
@@ -981,8 +969,7 @@ impl Store {
         Ok(())
     }
 
-    /// Drop an account's sticky pool assignment so its next call re-resolves — used after its proxy
-    /// setting changes, so a fresh proxy takes effect instead of the old pinned one.
+    /// Drop an account's sticky pool assignment so a changed proxy setting takes effect.
     pub async fn clear_proxy(&self, label: &str) -> Result<()> {
         sqlx::query("DELETE FROM proxy_assignment WHERE label = ?")
             .bind(label)
@@ -1079,8 +1066,7 @@ impl Store {
             != 0)
     }
 
-    /// Clear only a pre-upgrade exhaustion mark. The condition prevents a concurrent real 402
-    /// from being undone after the balance request started.
+    /// Clear only a pre-upgrade mark, so a concurrent real 402 isn't undone.
     pub async fn clear_legacy_exhausted(&self, label: &str, period: &str) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE usage SET exhausted = 0
@@ -1093,8 +1079,7 @@ impl Store {
         Ok(result.rows_affected() == 1)
     }
 
-    /// Clear a pre-upgrade exhaustion mark and its one-shot recovery lease in one commit. Keeping
-    /// these writes atomic prevents another process from observing only half of the recovery.
+    /// Clear a pre-upgrade mark and its probe lease in one commit, so no process sees half of it.
     pub async fn clear_legacy_exhausted_and_release_cooldown(
         &self,
         label: &str,
@@ -1165,8 +1150,7 @@ impl Store {
         Ok(None)
     }
 
-    /// Claim the next probe window after a persisted cooldown. Keeping expired rows makes this
-    /// atomic across independent CLI, MCP, and hosted processes sharing the database.
+    /// Claim the next probe window after a cooldown; expired rows stay so the claim is atomic.
     pub async fn claim_cooldown(&self, label: &str, delay: Duration) -> Result<Option<i64>> {
         let now = Utc::now().timestamp_millis();
         let millis = delay.as_millis().max(1).min(i64::MAX as u128) as i64;
@@ -1194,9 +1178,7 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically claim `cost` units, or return `false` if granting it would exceed `quota` (or the
-    /// account is exhausted) — closes the read-then-write race where concurrent callers all clear
-    /// the same `remaining > 0` gate. Caller must `refund` if the reserved attempt then fails.
+    /// Atomically claim `cost` units within `quota`, else `false`; `refund` if the attempt fails.
     pub async fn reserve(
         &self,
         provider: &str,
@@ -1508,8 +1490,7 @@ impl Store {
         Ok(id)
     }
 
-    /// Newest-first page for the Debug tab's initial load. Bodies are returned in full; the
-    /// handler trims them to previews and serves the full row from `debug_get`.
+    /// Newest-first page for the Debug tab's initial load, bodies in full.
     pub async fn recent_debug(&self, limit: i64) -> Result<Vec<DebugRow>> {
         let rows = sqlx::query(
             "SELECT id, ts, capability, provider, label, status, latency_ms, request, response, error, http_trace
@@ -1868,7 +1849,6 @@ mod tests {
     fn clip_truncates_on_char_boundary() {
         let short = "é".repeat(10);
         assert_eq!(clip(&short), short);
-        // A 4-byte char repeated past the cap: clipping must not split it mid-codepoint.
         let big = "𝓍".repeat(DEBUG_BODY_CAP); // 4 bytes each
         let out = clip(&big);
         assert!(out.contains("truncated"));
@@ -1881,7 +1861,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = Store::open(path.to_str().unwrap()).await.unwrap();
 
-        // Quota 3: the first three reservations win, the fourth is denied.
         for _ in 0..3 {
             assert!(store
                 .reserve("grok_web", "grok-1#dr", 3, "d", 1, None)
@@ -1894,14 +1873,12 @@ mod tests {
             .unwrap());
         assert_eq!(store.remaining("grok-1#dr", 3, "d").await.unwrap(), 0);
 
-        // A refund frees exactly one slot back.
         store.refund("grok-1#dr", "d", 1).await.unwrap();
         assert!(store
             .reserve("grok_web", "grok-1#dr", 3, "d", 1, None)
             .await
             .unwrap());
 
-        // Once exhausted, no reservation succeeds even with budget refunded.
         store.refund("grok-1#dr", "d", 1).await.unwrap();
         store
             .mark_exhausted("grok_web", "grok-1#dr", "d")
