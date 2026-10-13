@@ -1148,7 +1148,7 @@ async fn api_update_impl(st: Arc<AppState>, headers: HeaderMap, force: bool) -> 
 
 /// A capability-appropriate probe call for a provider (real request → counts against quota,
 /// and shows up in the route log).
-fn test_call(kind: ProviderKind) -> (Capability, Input) {
+pub(crate) fn test_call(kind: ProviderKind) -> (Capability, Input) {
     match kind {
         ProviderKind::Firecrawl
         | ProviderKind::Jina
@@ -2094,7 +2094,7 @@ fn mask_proxy(proxy: &str) -> String {
     }
 }
 
-fn group_of(provider: &str) -> (&'static str, &'static str) {
+pub(crate) fn group_of(provider: &str) -> (&'static str, &'static str) {
     match provider {
         "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" | "gdelt"
         | "tinyfish" | "linkup" | "you" | "octen" | "nimble" | "serpapi" | "langsearch" => {
@@ -2123,7 +2123,7 @@ fn approx_quota(provider: &str) -> bool {
     )
 }
 
-fn desc_of(provider: &str) -> &'static str {
+pub(crate) fn desc_of(provider: &str) -> &'static str {
     match provider {
         "serper" => "Web search API",
         "tavily" => "Search + extract API",

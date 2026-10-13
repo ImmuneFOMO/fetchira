@@ -327,8 +327,8 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
                 continue;
             }
             let name = account.provider.as_str();
-            let gid = provider_group(name);
-            let empty = json!({"name":name,"desc":provider_desc(name),"used":0,"quota":0,"accounts":1,"resetWindow":null,"pending":false,"key":false,"webSession":true,"loggedIn":false,"limits":[],"catalog":[]});
+            let (gid, glabel) = crate::ui::group_of(name);
+            let empty = json!({"name":name,"desc":crate::ui::desc_of(name),"used":0,"quota":0,"accounts":1,"resetWindow":null,"pending":false,"key":false,"webSession":true,"loggedIn":false,"limits":[],"catalog":[]});
             if let Some(group) = groups.iter_mut().find(|g| g["id"] == gid) {
                 if let Some(providers) = group["providers"].as_array_mut() {
                     if let Some(existing) = providers.iter_mut().find(|p| p["name"] == name) {
@@ -339,17 +339,11 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
                     }
                 }
             } else {
-                let glabel = match gid {
-                    "search" => "Search",
-                    "read" => "Read / scrape",
-                    "browser" => "Browser",
-                    _ => "Web sessions",
-                };
                 groups.push(json!({"id":gid,"label":glabel,"providers":[empty]}));
             }
         }
     }
-    let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"keyless":!p.is_web() && !p.needs_key(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"free":p.free_tier(),"group":provider_group(p.as_str())})).collect();
+    let catalog: Vec<_> = crate::providers::ProviderKind::all().iter().map(|p| json!({"id":p.as_str(),"web":p.is_web(),"keyless":!p.is_web() && !p.needs_key(),"blurb":p.blurb(),"signup":p.signup(),"caps":[],"free":p.free_tier(),"group":crate::ui::group_of(p.as_str()).0})).collect();
     let routes = st.store.recent_routes(1000).await.unwrap_or_default();
     let log: Vec<_> = routes
         .iter()
@@ -443,49 +437,11 @@ fn hosted_ago(ts: &str) -> String {
     }
 }
 fn hosted_group_color(provider: &str) -> &'static str {
-    match provider_group(provider) {
+    match crate::ui::group_of(provider).0 {
         "search" => "var(--lime-500)",
         "read" => "var(--cyan-500)",
         "browser" => "var(--amber-500)",
         _ => "#C792EA",
-    }
-}
-fn provider_group(name: &str) -> &'static str {
-    match name {
-        "serper" | "tavily" | "exa" | "parallel" | "keenable" | "openalex" | "gdelt"
-        | "tinyfish" | "linkup" | "you" | "octen" | "nimble" | "serpapi" | "langsearch" => "search",
-        "firecrawl" | "jina" | "scrapingant" | "zenrows" => "read",
-        "steel" | "hyperbrowser" | "browserless" => "browser",
-        _ => "web",
-    }
-}
-fn provider_desc(name: &str) -> &'static str {
-    match name {
-        "serper" => "Web search API",
-        "tavily" => "Search + extract API",
-        "exa" => "Neural search API",
-        "parallel" => "Search API",
-        "firecrawl" => "Crawl + scrape API",
-        "steel" => "Headless browser sessions",
-        "keenable" => "Search + fetch API · keyless",
-        "jina" => "Reader API · keyless",
-        "openalex" => "Scholarly search API · keyless",
-        "gdelt" => "News search API · keyless",
-        "tinyfish" => "Search + fetch + research API",
-        "linkup" => "Search + fetch + research API",
-        "you" => "Search + contents + research API",
-        "octen" => "Web + news search API",
-        "nimble" => "Web + academic search API",
-        "serpapi" => "Google SERP API",
-        "langsearch" => "Web search API",
-        "scrapingant" => "Scrape API · headless Chrome",
-        "zenrows" => "Scrape API · anti-bot",
-        "hyperbrowser" => "Cloud browser fetch API",
-        "browserless" => "Headless browser API",
-        "gemini_web" => "Browser session · search + deep research",
-        "grok_web" => "Browser session · search + deep research",
-        "chatgpt_web" => "Browser session · search + deep research",
-        _ => "",
     }
 }
 fn limits_json(l: &crate::providers::LiveLimits) -> serde_json::Value {
@@ -997,34 +953,7 @@ async fn admin_account_test(
     else {
         return (StatusCode::BAD_REQUEST, "unknown account").into_response();
     };
-    let (cap, input) = match kind {
-        crate::providers::ProviderKind::Firecrawl
-        | crate::providers::ProviderKind::Jina
-        | crate::providers::ProviderKind::Scrapingant
-        | crate::providers::ProviderKind::Zenrows => (
-            crate::providers::Capability::Read,
-            crate::providers::Input {
-                url: Some("https://example.com".into()),
-                ..Default::default()
-            },
-        ),
-        crate::providers::ProviderKind::Steel
-        | crate::providers::ProviderKind::Hyperbrowser
-        | crate::providers::ProviderKind::Browserless => (
-            crate::providers::Capability::Browser,
-            crate::providers::Input {
-                url: Some("https://example.com".into()),
-                ..Default::default()
-            },
-        ),
-        _ => (
-            crate::providers::Capability::Search,
-            crate::providers::Input {
-                query: Some("fetchira connectivity test".into()),
-                ..Default::default()
-            },
-        ),
-    };
+    let (cap, input) = crate::ui::test_call(kind);
     let t0 = Instant::now();
     let router = current_router(&st).await;
     let result = crate::usage::HOSTED_REQUEST_ID
