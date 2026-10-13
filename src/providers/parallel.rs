@@ -6,7 +6,7 @@ use super::{check, fmt_hits, s, value_to_text, Capability, Hit, Input, LiveBalan
 use crate::error::{Error, Result};
 
 const POLL: Duration = Duration::from_secs(3);
-const MAX_POLLS: u32 = 40;
+const MAX_POLLS: u32 = 120;
 
 pub async fn call(
     base: &str,
@@ -55,35 +55,49 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
     Ok(Outcome::new(fmt_hits(&hits), 1))
 }
 
-// domains map to the native `source_policy`; topic/recency have no clean param, so they fold into
-// the objective via `rewrite_query`. Common (no-niche) case builds the exact body as before.
 fn search_body(input: &Input) -> Result<Value> {
-    let q = input.need_query()?;
-    if !super::niche::any(input) {
-        return Ok(json!({
-            "objective": q,
-            "search_queries": [q],
-            "max_results": input.results(),
-        }));
-    }
-    let folded = super::niche::rewrite_query(input);
+    let q = input.need_query()?.to_string() + super::niche::topic_hint(input);
     let mut body = json!({
-        "objective": folded,
-        "search_queries": [folded],
+        "objective": q,
+        "search_queries": [q],
         "max_results": input.results(),
     });
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = super::niche::split_domains(domains);
-        let mut sp = json!({});
-        if !inc.is_empty() {
-            sp["include_domains"] = json!(inc);
-        }
-        if !exc.is_empty() {
-            sp["exclude_domains"] = json!(exc);
-        }
+    if let Some(sp) = source_policy(input) {
+        body["source_policy"] = sp;
+    }
+    if let Some(d) = input
+        .recency
+        .as_deref()
+        .and_then(super::niche::recency_date)
+    {
+        body["source_policy"]["after_date"] = json!(d);
+    }
+    Ok(body)
+}
+
+// `after_date` only filters search, so task runs fold recency into the input.
+fn research_body(input: &Input) -> Result<Value> {
+    input.need_query()?;
+    let mut body = json!({
+        "input": super::niche::rewrite_query(input),
+        "processor": processor(input),
+    });
+    if let Some(sp) = source_policy(input) {
         body["source_policy"] = sp;
     }
     Ok(body)
+}
+
+fn source_policy(input: &Input) -> Option<Value> {
+    let (inc, exc) = super::niche::split_domains(input.domains.as_deref()?);
+    let mut sp = json!({});
+    if !inc.is_empty() {
+        sp["include_domains"] = json!(inc);
+    }
+    if !exc.is_empty() {
+        sp["exclude_domains"] = json!(exc);
+    }
+    Some(sp)
 }
 
 // `deep` depth buys the pricier/deeper `core` processor; anything else keeps the default `base`.
@@ -104,7 +118,7 @@ async fn research(
         client
             .post(format!("{base}/v1/tasks/runs"))
             .header("x-api-key", key)
-            .json(&json!({ "input": input.need_query()?, "processor": processor(input) })),
+            .json(&research_body(input)?),
     )
     .await?;
     let v: Value = check("parallel", start).await?.json().await?;
@@ -113,15 +127,22 @@ async fn research(
         .ok_or(Error::BadResponse("parallel"))?
         .to_string();
 
-    for _ in 0..MAX_POLLS {
+    let deadline = tokio::time::Instant::now() + POLL * MAX_POLLS;
+    while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(POLL).await;
-        let resp = crate::httptrace::send_traced(
-            client
-                .get(format!("{base}/v1/tasks/runs/{id}"))
-                .header("x-api-key", key),
-        )
-        .await?;
-        let v: Value = check("parallel", resp).await?.json().await?;
+        let poll = async {
+            let resp = crate::httptrace::send_traced(
+                client
+                    .get(format!("{base}/v1/tasks/runs/{id}"))
+                    .header("x-api-key", key),
+            )
+            .await?;
+            Ok::<Value, Error>(check("parallel", resp).await?.json().await?)
+        };
+        let v = match poll.await {
+            Err(e) if e.is_transient() => continue,
+            r => r?,
+        };
         match v["status"].as_str().unwrap_or_default() {
             "completed" => return result(base, key, client, &id).await,
             "failed" | "cancelled" | "canceled" => return Err(Error::BadResponse("parallel")),
@@ -241,7 +262,11 @@ mod tests {
             body["source_policy"]["exclude_domains"],
             json!(["reddit.com"])
         );
-        assert!(body["objective"].as_str().unwrap().contains("after:"));
+        assert_eq!(
+            body["source_policy"]["after_date"].as_str(),
+            super::super::niche::recency_date("week").as_deref()
+        );
+        assert_eq!(body["objective"], "crispr");
     }
 
     #[test]
@@ -253,6 +278,35 @@ mod tests {
         let body = search_body(&input).unwrap();
         assert_eq!(body["objective"], "crispr");
         assert!(body.get("source_policy").is_none());
+    }
+
+    #[test]
+    fn research_body_carries_the_niche() {
+        let input = Input {
+            query: Some("crispr".into()),
+            domains: Some(vec!["nature.com".into()]),
+            ..Default::default()
+        };
+        let body = research_body(&input).unwrap();
+        assert_eq!(
+            body["source_policy"]["include_domains"],
+            json!(["nature.com"])
+        );
+        assert_eq!(body["input"], "crispr");
+        assert_eq!(body["processor"], "base");
+        let plain = research_body(&Input {
+            query: Some("crispr".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(plain, json!({ "input": "crispr", "processor": "base" }));
+        let recent = research_body(&Input {
+            query: Some("crispr".into()),
+            recency: Some("2024-03-01".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(recent["input"], "crispr after:2024-03-01");
     }
 
     #[test]

@@ -599,8 +599,8 @@ pub fn niche_native(kind: ProviderKind, cap: Capability, input: &Input) -> Optio
         Serper => !domains,
         // only recency native (tbs); topic + domains rewrite
         Firecrawl => !(topic || domains),
-        // only domains native (source_policy); topic + recency rewrite
-        Parallel => !(topic || recency),
+        // domains native (source_policy), recency too on search; topic rewrites
+        Parallel => !(topic || (recency && cap == Capability::DeepResearch)),
         Keenable => !topic && (input.domains.is_none() || keenable::site(input).is_some()),
         Openalex => !domains,
         Gdelt => !academic,

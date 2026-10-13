@@ -61,19 +61,10 @@ pub fn split_domains(domains: &[String]) -> (Vec<&str>, Vec<&str>) {
     (inc, exc)
 }
 
-/// Bake `domains` + a topic hint + `recency` into the query as Google-style operators / prose, for
-/// backends with no native filter (serper's `site:`, and web sessions which take everything as text).
+/// Bake a topic hint + `recency` into the query, for backends with no native filter for them.
 pub fn rewrite_query(input: &Input) -> String {
     let mut q = input.query.clone().unwrap_or_default();
     q.push_str(topic_hint(input));
-    if let Some(domains) = &input.domains {
-        for d in domains {
-            match d.strip_prefix('-') {
-                Some(x) => q.push_str(&format!(" -site:{x}")),
-                None => q.push_str(&format!(" site:{d}")),
-            }
-        }
-    }
     if let Some(r) = input.recency.as_deref().and_then(recency_date) {
         q.push_str(&format!(" after:{r}"));
     }
@@ -115,10 +106,10 @@ mod tests {
         assert_eq!(exc, ["reddit.com"]);
         let input = Input {
             query: Some("crispr".into()),
+            topic: Some("news".into()),
             domains: Some(vec!["nature.com".into(), "-reddit.com".into()]),
             ..Default::default()
         };
-        let q = rewrite_query(&input);
-        assert!(q.contains("site:nature.com") && q.contains("-site:reddit.com"));
+        assert_eq!(rewrite_query(&input), "crispr latest news");
     }
 }
