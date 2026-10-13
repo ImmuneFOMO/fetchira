@@ -126,6 +126,19 @@ pub struct DebugLog<'a> {
 /// regardless of `retention_hours`, so a burst can't fill the disk before the time sweep runs.
 const DEBUG_BODY_CAP: usize = 128 * 1024;
 const DEBUG_MAX_ROWS: i64 = 4000;
+/// Labels an account's rows live under: its own, feature budgets, the key bench, re-read markers.
+const OWNED: [&str; 10] = [
+    "",
+    "#dr",
+    "#image",
+    "#search",
+    "#read",
+    "#rejected",
+    "#live",
+    "#unread",
+    "#dr#live",
+    "#dr#unread",
+];
 
 /// Bump ONLY on a breaking schema change (additive `IF NOT EXISTS`/`ADD COLUMN` stays free).
 /// Must match the repo-root `schema-version` file, which ships as a release asset so the
@@ -962,35 +975,9 @@ impl Store {
 
     /// Remove all rows for an account (usage, cooldown, live limits, proxy assignment, web session).
     pub async fn delete_account(&self, label: &str) -> Result<()> {
-        for owned in [
-            label.to_string(),
-            format!("{label}#dr"),
-            format!("{label}#image"),
-            format!("{label}#search"),
-            format!("{label}#read"),
-            format!("{label}#rejected"),
-        ] {
-            sqlx::query("DELETE FROM usage WHERE label = ?")
-                .bind(&owned)
-                .execute(&self.pool)
-                .await?;
-            sqlx::query("DELETE FROM provider_cooldown WHERE label = ?")
-                .bind(&owned)
-                .execute(&self.pool)
-                .await?;
-            sqlx::query("DELETE FROM live_quota WHERE label = ?")
-                .bind(&owned)
-                .execute(&self.pool)
-                .await?;
-        }
-        sqlx::query("DELETE FROM proxy_assignment WHERE label = ?")
-            .bind(label)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("DELETE FROM web_session WHERE label = ?")
-            .bind(label)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        delete_rows(&mut tx, label).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1006,40 +993,38 @@ impl Store {
 
     /// Move an account's rows to a new label, its identity key across tables.
     pub async fn rename_account(&self, old: &str, new: &str) -> Result<()> {
-        for (from, to) in [
-            (old.to_string(), new.to_string()),
-            (format!("{old}#dr"), format!("{new}#dr")),
-            (format!("{old}#image"), format!("{new}#image")),
-            (format!("{old}#search"), format!("{new}#search")),
-            (format!("{old}#read"), format!("{new}#read")),
-            (format!("{old}#rejected"), format!("{new}#rejected")),
-        ] {
+        let mut tx = self.pool.begin().await?;
+        // Rows an older binary left under the new label would collide with the moved ones.
+        delete_rows(&mut tx, new).await?;
+        for suffix in OWNED {
+            let (from, to) = (format!("{old}{suffix}"), format!("{new}{suffix}"));
             sqlx::query("UPDATE usage SET label = ? WHERE label = ?")
                 .bind(&to)
                 .bind(&from)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("UPDATE provider_cooldown SET label = ? WHERE label = ?")
                 .bind(&to)
                 .bind(&from)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("UPDATE live_quota SET label = ? WHERE label = ?")
                 .bind(&to)
                 .bind(&from)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         sqlx::query("UPDATE proxy_assignment SET label = ? WHERE label = ?")
             .bind(new)
             .bind(old)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE web_session SET label = ? WHERE label = ?")
             .bind(new)
             .bind(old)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1568,6 +1553,33 @@ impl Store {
     }
 }
 
+async fn delete_rows(conn: &mut sqlx::SqliteConnection, label: &str) -> Result<()> {
+    for suffix in OWNED {
+        let owned = format!("{label}{suffix}");
+        sqlx::query("DELETE FROM usage WHERE label = ?")
+            .bind(&owned)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("DELETE FROM provider_cooldown WHERE label = ?")
+            .bind(&owned)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("DELETE FROM live_quota WHERE label = ?")
+            .bind(&owned)
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query("DELETE FROM proxy_assignment WHERE label = ?")
+        .bind(label)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM web_session WHERE label = ?")
+        .bind(label)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// Truncate at a char boundary so a giant scrape can't bloat one row, marking what was dropped.
 fn clip(s: &str) -> String {
     if s.len() <= DEBUG_BODY_CAP {
@@ -1936,6 +1948,49 @@ mod tests {
         };
         store.save_live("serpapi-1", "m", &expired).await.unwrap();
         assert!(store.load_live("serpapi-1").await.unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn rename_and_delete_carry_reread_markers_over_leftover_rows() {
+        let path = std::env::temp_dir().join(format!("fetchira_rename_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        let bal = LiveBalance {
+            remaining: 40,
+            total: 250,
+            usd: None,
+            reset_at: None,
+        };
+        store.save_live("old", "m", &bal).await.unwrap();
+        store
+            .save_live(
+                "new",
+                "m",
+                &LiveBalance {
+                    remaining: 1,
+                    ..bal
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .set_cooldown("old#dr#unread", Duration::from_secs(60))
+            .await
+            .unwrap();
+        store.rename_account("old", "new").await.unwrap();
+        assert_eq!(store.load_live("new").await.unwrap().unwrap().remaining, 40);
+        assert!(store
+            .cooldown_remaining("new#dr#unread")
+            .await
+            .unwrap()
+            .is_some());
+        store.delete_account("new").await.unwrap();
+        assert!(store
+            .cooldown_remaining("new#dr#unread")
+            .await
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_file(&path);
     }
 
