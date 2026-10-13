@@ -31,20 +31,9 @@ pub async fn call(
     Ok(Outcome::new(fmt_hits(&hits(&v, arr, input)), 1))
 }
 
-// Returns the query params and the result-array key. Google takes no domain filter, so domains
-// fold into `q`; several include sites must be OR-joined or Google ANDs them into nothing.
+// Returns the query params and the result-array key.
 fn params(input: &Input) -> Result<(Vec<(&'static str, String)>, &'static str)> {
-    let mut q = input.need_query()?.to_string();
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        if !inc.is_empty() {
-            let sites: Vec<String> = inc.iter().map(|d| format!("site:{d}")).collect();
-            q.push_str(&format!(" {}", sites.join(" OR ")));
-        }
-        for d in exc {
-            q.push_str(&format!(" -site:{d}"));
-        }
-    }
+    let q = input.need_query()?.to_string() + &niche::sites(input);
     let recency = input.recency.as_deref();
     if input.topic.as_deref() == Some("academic") {
         let mut p = vec![
@@ -59,7 +48,7 @@ fn params(input: &Input) -> Result<(Vec<(&'static str, String)>, &'static str)> 
         return Ok((p, "organic_results"));
     }
     let mut p = vec![("engine", "google".into()), ("q", q)];
-    if let Some(tbs) = recency.and_then(tbs) {
+    if let Some(tbs) = recency.and_then(niche::recency_tbs) {
         p.push(("tbs", tbs));
     }
     // google_news has no snippets and ignores `tbs`; the news tab of plain google has both.
@@ -68,14 +57,6 @@ fn params(input: &Input) -> Result<(Vec<(&'static str, String)>, &'static str)> 
         return Ok((p, "news_results"));
     }
     Ok((p, "organic_results"))
-}
-
-fn tbs(recency: &str) -> Option<String> {
-    niche::recency_tbs(recency).map(String::from).or_else(|| {
-        chrono::NaiveDate::parse_from_str(recency, "%Y-%m-%d")
-            .ok()
-            .map(|d| d.format("cdr:1,cd_min:%-m/%-d/%Y").to_string())
-    })
 }
 
 // google ignores `num` and `-site:` is only a hint, so trim and filter; citations have no link.

@@ -44,10 +44,13 @@ pub(crate) fn validate_search_input(input: &Input) -> anyhow::Result<()> {
         }
     }
     if let Some(recency) = input.recency.as_deref() {
-        let valid = matches!(recency, "day" | "week" | "month" | "year")
-            || chrono::NaiveDate::parse_from_str(recency, "%Y-%m-%d").is_ok();
+        let date = chrono::NaiveDate::parse_from_str(recency, "%Y-%m-%d");
+        let valid = matches!(recency, "day" | "week" | "month" | "year") || date.is_ok();
         if !valid {
             bail!("recency must be day, week, month, year, or an ISO date (YYYY-MM-DD)");
+        }
+        if date.is_ok_and(|d| d > chrono::Local::now().date_naive()) {
+            bail!("recency is a start date and can't be in the future");
         }
     }
     if let Some(depth) = input.depth.as_deref() {
@@ -578,6 +581,7 @@ mod tests {
             ("search", vec!["x", "--topic", "blogs"]),
             ("search", vec!["x", "--recency", "yesterday"]),
             ("search", vec!["x", "--recency", "2026-02-30"]),
+            ("search", vec!["x", "--recency", "2999-01-01"]),
             ("usage", vec!["serper", "tavily"]),
             ("search", vec!["--session", "chatgpt_web:YWNjdA:dr|poll|id"]),
             ("dr", vec!["--session", "gemini_web:YWNjdA:dr|poll|id"]),

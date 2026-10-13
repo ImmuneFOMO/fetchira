@@ -91,14 +91,8 @@ pub(super) fn site(input: &Input) -> Option<&str> {
 fn body(input: &Input) -> Result<Value> {
     let mut q = input.need_query()?.to_string() + niche::topic_hint(input);
     let site = site(input);
-    if let (None, Some(domains)) = (site, &input.domains) {
-        let (inc, exc) = niche::split_domains(domains);
-        for d in inc {
-            q.push_str(&format!(" site:{d}"));
-        }
-        for d in exc {
-            q.push_str(&format!(" -site:{d}"));
-        }
+    if site.is_none() {
+        q.push_str(&niche::sites(input));
     }
     let mut b = json!({ "query": q, "max_results": input.results(), "snippet_max_length": 500 });
     if let Some(d) = site {
@@ -192,6 +186,15 @@ mod tests {
         let b = body(&mixed).unwrap();
         assert!(b.get("site").is_none());
         assert_eq!(b["query"], "crispr site:nature.com -site:reddit.com");
+
+        let two = Input {
+            domains: Some(vec!["nature.com".into(), "cell.com".into()]),
+            ..mixed
+        };
+        assert_eq!(
+            body(&two).unwrap()["query"],
+            "crispr site:nature.com OR site:cell.com"
+        );
     }
 
     #[tokio::test]

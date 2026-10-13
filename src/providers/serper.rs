@@ -8,16 +8,7 @@ use crate::error::{Error, Result};
 // hatch to serper's other verticals; when absent the topic mapping stands. Returns the path, body
 // and the result-array key (news lands under `news`, search/scholar/patents under `organic`).
 fn build_req(input: &Input) -> Result<(&'static str, Value, &'static str)> {
-    let mut q = input.need_query()?.to_string();
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        for d in inc {
-            q.push_str(&format!(" site:{d}"));
-        }
-        for d in exc {
-            q.push_str(&format!(" -site:{d}"));
-        }
-    }
+    let q = input.need_query()?.to_string() + &niche::sites(input);
     let (path, arr) = match input.mode.as_deref() {
         Some(mode) => match mode {
             "patents" => ("patents", "organic"),
@@ -143,15 +134,31 @@ mod tests {
             query: Some("crispr".into()),
             topic: Some("news".into()),
             recency: Some("week".into()),
-            domains: Some(vec!["nature.com".into(), "-reddit.com".into()]),
+            domains: Some(vec![
+                "nature.com".into(),
+                "science.org".into(),
+                "-reddit.com".into(),
+            ]),
             ..Default::default()
         };
         let (path, body, arr) = build_req(&input).unwrap();
         assert_eq!(path, "news");
         assert_eq!(arr, "news");
         assert_eq!(body["tbs"], "qdr:w");
-        let q = body["q"].as_str().unwrap();
-        assert!(q.contains("site:nature.com") && q.contains("-site:reddit.com"));
+        assert_eq!(
+            body["q"],
+            "crispr site:nature.com OR site:science.org -site:reddit.com"
+        );
+    }
+
+    #[test]
+    fn iso_recency_becomes_a_date_range() {
+        let input = Input {
+            query: Some("solid-state battery".into()),
+            recency: Some("2025-01-01".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_req(&input).unwrap().1["tbs"], "cdr:1,cd_min:1/1/2025");
     }
 
     #[test]

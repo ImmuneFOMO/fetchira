@@ -6,18 +6,18 @@ use chrono::{Duration, Utc};
 
 use super::Input;
 
-/// `recency` → an ISO `YYYY-MM-DD` start date (exa `startPublishedDate`). Accepts the shorthands or
-/// passes an ISO date straight through.
+/// `recency` → a zero-padded `YYYY-MM-DD` start date, from a shorthand or an ISO date.
 pub fn recency_date(recency: &str) -> Option<String> {
     let days = match recency {
         "day" => 1,
         "week" => 7,
         "month" => 30,
         "year" => 365,
-        iso if iso.len() == 10 && iso.as_bytes().get(4) == Some(&b'-') => {
-            return Some(iso.to_string())
+        iso => {
+            return chrono::NaiveDate::parse_from_str(iso, "%Y-%m-%d")
+                .ok()
+                .map(|d| d.format("%Y-%m-%d").to_string())
         }
-        _ => return None,
     };
     Some(
         (Utc::now() - Duration::days(days))
@@ -26,14 +26,16 @@ pub fn recency_date(recency: &str) -> Option<String> {
     )
 }
 
-/// `recency` → Google `tbs` shorthand (serper / firecrawl: `qdr:d|w|m|y`).
-pub fn recency_tbs(recency: &str) -> Option<&'static str> {
+/// `recency` → Google `tbs`: `qdr:d|w|m|y`, or a `cdr` range from an ISO date.
+pub fn recency_tbs(recency: &str) -> Option<String> {
     match recency {
-        "day" => Some("qdr:d"),
-        "week" => Some("qdr:w"),
-        "month" => Some("qdr:m"),
-        "year" => Some("qdr:y"),
-        _ => None,
+        "day" => Some("qdr:d".into()),
+        "week" => Some("qdr:w".into()),
+        "month" => Some("qdr:m".into()),
+        "year" => Some("qdr:y".into()),
+        _ => chrono::NaiveDate::parse_from_str(recency, "%Y-%m-%d")
+            .ok()
+            .map(|d| d.format("cdr:1,cd_min:%-m/%-d/%Y").to_string()),
     }
 }
 
@@ -59,6 +61,23 @@ pub fn split_domains(domains: &[String]) -> (Vec<&str>, Vec<&str>) {
         }
     }
     (inc, exc)
+}
+
+/// `domains` as a `site:` query suffix; includes are OR-joined or Google ANDs them into nothing.
+pub fn sites(input: &Input) -> String {
+    let Some(domains) = &input.domains else {
+        return String::new();
+    };
+    let (inc, exc) = split_domains(domains);
+    let mut q = String::new();
+    if !inc.is_empty() {
+        let inc: Vec<String> = inc.iter().map(|d| format!("site:{d}")).collect();
+        q.push_str(&format!(" {}", inc.join(" OR ")));
+    }
+    for d in exc {
+        q.push_str(&format!(" -site:{d}"));
+    }
+    q
 }
 
 /// Bake a topic hint + `recency` into the query, for backends with no native filter for them.
@@ -91,9 +110,14 @@ mod tests {
 
     #[test]
     fn recency_shorthands_and_iso() {
-        assert_eq!(recency_tbs("week"), Some("qdr:w"));
+        assert_eq!(recency_tbs("week").as_deref(), Some("qdr:w"));
+        assert_eq!(
+            recency_tbs("2026-01-05").as_deref(),
+            Some("cdr:1,cd_min:1/5/2026")
+        );
         assert_eq!(recency_days("month"), Some(30));
         assert_eq!(recency_date("2024-03-01").as_deref(), Some("2024-03-01"));
+        assert_eq!(recency_date("2025-1-5").as_deref(), Some("2025-01-05"));
         assert!(recency_date("week").is_some());
         assert_eq!(recency_tbs("bogus"), None);
     }

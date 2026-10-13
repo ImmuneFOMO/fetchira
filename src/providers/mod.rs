@@ -584,7 +584,7 @@ pub fn niche_native(kind: ProviderKind, cap: Capability, input: &Input) -> Optio
     if !niche::any(input) {
         return None;
     }
-    let topic = input.topic.is_some();
+    let topic = matches!(input.topic.as_deref(), Some("news" | "academic"));
     let academic = input.topic.as_deref() == Some("academic");
     let recency = input.recency.is_some();
     let domains = input.domains.is_some();
@@ -1452,6 +1452,11 @@ mod tests {
             niche_native(Tinyfish, Capability::DeepResearch, &recent),
             Some(false)
         );
+        let web = Input {
+            topic: Some("web".into()),
+            ..Default::default()
+        };
+        assert_eq!(niche_native(You, Capability::Search, &web), Some(true));
     }
 
     #[test]

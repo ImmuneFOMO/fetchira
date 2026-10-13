@@ -51,24 +51,7 @@ async fn search(base: &str, key: &str, client: &reqwest::Client, input: &Input) 
 
 // firecrawl search takes no domains param, so bake site:/-site: (and a topic hint) into the query.
 fn search_query(input: &Input) -> Result<String> {
-    let mut q = input.need_query()?.to_string();
-    if let Some(t) = input.topic.as_deref() {
-        match t {
-            "academic" => q.push_str(" (peer-reviewed OR research paper)"),
-            "news" => q.push_str(" latest news"),
-            _ => {}
-        }
-    }
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        for d in inc {
-            q.push_str(&format!(" site:{d}"));
-        }
-        for d in exc {
-            q.push_str(&format!(" -site:{d}"));
-        }
-    }
-    Ok(q)
+    Ok(input.need_query()?.to_string() + niche::topic_hint(input) + &niche::sites(input))
 }
 
 async fn scrape(base: &str, key: &str, client: &reqwest::Client, input: &Input) -> Result<Outcome> {
@@ -198,15 +181,20 @@ mod tests {
         let input = Input {
             query: Some("crispr".into()),
             recency: Some("week".into()),
-            domains: Some(vec!["nature.com".into(), "-reddit.com".into()]),
+            domains: Some(vec![
+                "nature.com".into(),
+                "science.org".into(),
+                "-reddit.com".into(),
+            ]),
             topic: Some("academic".into()),
             ..Default::default()
         };
-        let q = search_query(&input).unwrap();
-        assert!(q.contains("site:nature.com") && q.contains("-site:reddit.com"));
-        assert!(q.contains("peer-reviewed"));
         assert_eq!(
-            niche::recency_tbs(input.recency.as_deref().unwrap()),
+            search_query(&input).unwrap(),
+            "crispr (peer-reviewed OR research paper) site:nature.com OR site:science.org -site:reddit.com"
+        );
+        assert_eq!(
+            niche::recency_tbs(input.recency.as_deref().unwrap()).as_deref(),
             Some("qdr:w")
         );
     }
