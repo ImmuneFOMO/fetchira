@@ -157,26 +157,24 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
     parse_balance(&check("tavily", resp).await?.json().await?)
 }
 
-// Paygo overage can push usage past the plan, so remaining floors at 0.
 fn parse_balance(v: &Value) -> Result<LiveBalance> {
     let a = &v["account"];
-    let total = a["plan_limit"]
-        .as_i64()
-        .ok_or(Error::BadResponse("tavily"))?;
-    let used = a["plan_usage"]
-        .as_i64()
-        .ok_or(Error::BadResponse("tavily"))?;
+    let n = |field: &str| a[field].as_i64();
+    let plan = n("plan_limit").ok_or(Error::BadResponse("tavily"))?;
+    let used = n("plan_usage").ok_or(Error::BadResponse("tavily"))?;
+    // Paygo credits keep serving once the plan is spent; 432 comes only after both run out.
+    let paygo = n("paygo_limit").unwrap_or(0);
+    let paygo_left = paygo.saturating_sub(n("paygo_usage").unwrap_or(0)).max(0);
     let k = &v["key"];
     // A per-key cap 432s while the account still has credits.
     let key_left = k["limit"]
         .as_i64()
         .map(|l| l.saturating_sub(k["usage"].as_i64().unwrap_or(0)));
     Ok(LiveBalance {
-        remaining: total
-            .saturating_sub(used)
+        remaining: (plan.saturating_sub(used).max(0) + paygo_left)
             .min(key_left.unwrap_or(i64::MAX))
             .max(0),
-        total,
+        total: plan + paygo,
         usd: None,
         reset_at: None,
     })
@@ -286,6 +284,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((capped.remaining, capped.total), (10, 1000));
+        let paygo = parse_balance(&json!({
+            "key": {"usage": 1020},
+            "account": {"plan_usage": 1000, "plan_limit": 1000, "paygo_usage": 25, "paygo_limit": 100},
+        }))
+        .unwrap();
+        assert_eq!((paygo.remaining, paygo.total), (75, 1100));
         assert!(parse_balance(&json!({"account": {"plan_limit": 1000}})).is_err());
     }
 }
