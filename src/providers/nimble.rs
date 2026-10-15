@@ -116,7 +116,7 @@ fn parse_balance(v: &Value) -> Result<LiveBalance> {
         .as_i64()
         .ok_or(Error::BadResponse("nimble"))?;
     // An ended trial keeps its unused quota, but every search 402s.
-    let ended = trial["status"].as_str().is_some_and(|s| s != "active")
+    let ended = trial["status"].as_str().is_some_and(|st| st != "active")
         || trial["trial_period_end"]
             .as_str()
             .and_then(iso_ms)

@@ -1495,9 +1495,10 @@ pub fn compact_usage(views: &[UsageView]) -> String {
             ));
         }
     }
-    let web = match web.is_empty() {
-        true => String::new(),
-        false => format!("web sessions — live models + limits (pass a model/mode back to search/deep_research):\n{web}\n"),
+    let web = if web.is_empty() {
+        String::new()
+    } else {
+        format!("web sessions — live models + limits (pass a model/mode back to search/deep_research):\n{web}\n")
     };
     format!(
         "{web}api keys: {}\n\nextras: {}\n\ntip: an unknown model/mode makes the tool return the live options; the router also auto-fails-over on its own.",

@@ -62,6 +62,7 @@ pub async fn balance(key: &str, client: &reqwest::Client) -> Result<LiveBalance>
     if key.is_empty() {
         return Err(Error::MissingArg("api_key"));
     }
+    // The key rides in the query string, so transport errors must not carry the url.
     let resp = client
         .get("https://embeddings-dashboard-api.jina.ai/api/v1/api_key/user")
         .query(&[("api_key", key)])

@@ -323,7 +323,7 @@ async fn account_ready(store: &Store, a: &Account) -> bool {
     if a.provider.is_web() {
         matches!(store.load_session(&a.label).await, Ok(Some(_)))
     } else {
-        keyed(a) || a.api_key.is_none() && !a.provider.needs_key()
+        keyed(a) || (a.api_key.is_none() && !a.provider.needs_key())
     }
 }
 
