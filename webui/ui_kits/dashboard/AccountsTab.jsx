@@ -360,7 +360,7 @@ function AccountRow({ r }) {
           {r.proxy === 'pool' ? <Badge tone="cyan" variant="outline">pool</Badge> : r.proxy}
         </td>
         <td style={td}>
-          {r.key ? <Badge tone="ok" variant="outline">•••• key set</Badge> : r.web ? <Badge tone={r.loggedIn ? 'cyan' : 'off'} variant="outline">{r.loggedIn ? 'session ✓' : 'no session'}</Badge> : null}
+          {r.key ? <Badge tone="ok" variant="outline">•••• key set</Badge> : r.web ? <Badge tone={r.loggedIn ? 'cyan' : 'off'} variant="outline">{r.loggedIn ? 'session ✓' : 'no session'}</Badge> : <Badge tone="neutral" variant="outline">keyless</Badge>}
         </td>
         <td style={td}>{statusBadge(r.status)}</td>
         <td style={td}><RowActions r={r} /></td>
