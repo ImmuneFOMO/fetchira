@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use super::{check, fmt_hits, niche, s, Capability, Hit, Input, Outcome};
@@ -13,13 +15,32 @@ pub async fn call(
     if cap != Capability::Search {
         return Err(Error::Unsupported("langsearch"));
     }
-    let resp = crate::httptrace::send_traced(
-        client
-            .post(format!("{base}/v1/web-search"))
-            .bearer_auth(key)
-            .json(&body(input)?),
-    )
-    .await?;
+    let payload = body(input)?;
+    let send = || {
+        crate::httptrace::send_traced(
+            client
+                .post(format!("{base}/v1/web-search"))
+                .bearer_auth(key)
+                .json(&payload),
+        )
+    };
+    let mut resp = send().await?;
+    // One 429 covers rps, tpm and the daily token allowance, so even a repeat only backs off.
+    if resp.status() == 429 && !resp.headers().contains_key(reqwest::header::RETRY_AFTER) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        resp = send().await?;
+        if resp.status() == 429 {
+            let after = crate::error::parse_retry_after(
+                resp.headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok()),
+            );
+            return Err(Error::rate_limit_after(
+                format!("langsearch: {}", resp.text().await.unwrap_or_default()),
+                Some(after.unwrap_or_default().max(Duration::from_secs(60))),
+            ));
+        }
+    }
     let v: Value = check("langsearch", resp).await?.json().await?;
     // An HTTP 200 can still carry a failure `code` in the body.
     if let Some(code) = v["code"]
@@ -159,6 +180,48 @@ mod tests {
         assert!(matches!(
             err,
             Error::Provider { status: 403, ref body, .. } if body == "Access denied"
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_429_backs_off_a_minute() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let spent = json!({"code": "429", "message": "Rate limit or daily allowance exceeded"});
+        let burst = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/web-search"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(&spent))
+            .up_to_n_times(1)
+            .mount(&burst)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/web-search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 200})))
+            .mount(&burst)
+            .await;
+        let day = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/web-search"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(&spent))
+            .expect(2)
+            .mount(&day)
+            .await;
+        let input = Input {
+            query: Some("q".into()),
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        let (burst_uri, day_uri) = (burst.uri(), day.uri());
+        let (burst, day) = tokio::join!(
+            call(&burst_uri, "k", &client, Capability::Search, &input),
+            call(&day_uri, "k", &client, Capability::Search, &input)
+        );
+        assert!(burst.is_ok());
+        assert!(matches!(
+            day,
+            Err(Error::RateLimit { retry_after: Some(d), .. }) if d == Duration::from_secs(60)
         ));
     }
 }

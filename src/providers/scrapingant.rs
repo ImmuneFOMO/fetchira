@@ -44,9 +44,6 @@ fn browser(input: &Input) -> Result<&'static str> {
 fn classify(e: Error) -> Error {
     match e {
         Error::Provider {
-            status: 403, body, ..
-        } if body.contains("credit") => Error::QuotaExceeded(format!("scrapingant: {body}")),
-        Error::Provider {
             provider,
             status: 403,
             body,
@@ -55,6 +52,9 @@ fn classify(e: Error) -> Error {
             status: 401,
             body,
         },
+        Error::Provider {
+            status: 403, body, ..
+        } => Error::QuotaExceeded(format!("scrapingant: {body}")),
         Error::Provider {
             status: 409, body, ..
         } => Error::rate_limit(format!("scrapingant: {body}")),
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn only_spent_credits_are_quota() {
+    fn any_403_but_a_bad_token_is_quota() {
         let err = |status, body: &str| Error::Provider {
             provider: "scrapingant",
             status,
@@ -109,6 +109,10 @@ mod tests {
         };
         assert!(matches!(
             classify(err(403, r#"{"detail":"API credits limit exceeded"}"#)),
+            Error::QuotaExceeded(_)
+        ));
+        assert!(matches!(
+            classify(err(403, r#"{"detail":"Plan limit reached"}"#)),
             Error::QuotaExceeded(_)
         ));
         assert!(matches!(
