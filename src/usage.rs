@@ -126,7 +126,7 @@ pub struct DebugLog<'a> {
 const DEBUG_BODY_CAP: usize = 128 * 1024;
 const DEBUG_MAX_ROWS: i64 = 4000;
 /// Labels an account's rows live under: its own, feature budgets, the key bench, re-read markers.
-const OWNED: [&str; 10] = [
+const OWNED: [&str; 12] = [
     "",
     "#dr",
     "#image",
@@ -137,6 +137,8 @@ const OWNED: [&str; 10] = [
     "#unread",
     "#dr#live",
     "#dr#unread",
+    "#search#live",
+    "#search#unread",
 ];
 
 /// Bump only on a breaking schema change; must match the repo-root `schema-version` asset.

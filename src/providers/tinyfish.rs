@@ -11,6 +11,8 @@ use crate::error::{Error, Result};
 
 const POLL: Duration = Duration::from_secs(10);
 const MAX_POLLS: u32 = 150;
+/// Free searches per UTC day, apart from the read allowance.
+pub const SEARCH_POOL: i64 = 12_000;
 
 pub async fn call(
     base: &str,
@@ -213,9 +215,33 @@ fn daily_cap(e: Error) -> Error {
 
 /// Reads completed since 00:00 UTC, from the free `GET /usage`.
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
+    day_usage(
+        &base.replace("api.search", "api.fetch"),
+        key,
+        client,
+        ProviderKind::Tinyfish.default_quota(),
+    )
+    .await
+}
+
+/// Searches since 00:00 UTC; the search host serves the same `GET /usage`.
+pub async fn search_balance(
+    base: &str,
+    key: &str,
+    client: &reqwest::Client,
+) -> Result<LiveBalance> {
+    day_usage(base, key, client, SEARCH_POOL).await
+}
+
+async fn day_usage(
+    base: &str,
+    key: &str,
+    client: &reqwest::Client,
+    cap: i64,
+) -> Result<LiveBalance> {
     let day = Utc::now().date_naive().and_time(NaiveTime::MIN).and_utc();
     let resp = client
-        .get(format!("{}/usage", base.replace("api.search", "api.fetch")))
+        .get(format!("{base}/usage"))
         .header("X-API-Key", key)
         .query(&[
             ("status", "completed"),
@@ -228,11 +254,7 @@ pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<
         .send()
         .await?;
     let v: Value = check("tinyfish", resp).await?.json().await?;
-    left(
-        v["total"].as_i64(),
-        ProviderKind::Tinyfish.default_quota(),
-        day + TimeDelta::days(1),
-    )
+    left(v["total"].as_i64(), cap, day + TimeDelta::days(1))
 }
 
 /// Research runs since Pacific midnight; `status` filters one value per call.
@@ -503,6 +525,8 @@ mod tests {
             .and_utc()
             .timestamp_millis();
         assert_eq!(reads.reset_at, Some(next_utc_midnight));
+        let search = search_balance(&server.uri(), "k", &client).await.unwrap();
+        assert_eq!((search.remaining, search.total), (11996, 12000));
         let dr = dr_balance(&server.uri(), "k", &client).await.unwrap();
         assert_eq!((dr.remaining, dr.total), (2, 5));
         assert_eq!(

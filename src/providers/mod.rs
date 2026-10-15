@@ -371,7 +371,7 @@ impl ProviderKind {
 
     /// Search draws on its own `#search` pool, apart from the account quota and its pin.
     pub fn search_pool(self) -> Option<i64> {
-        (self == ProviderKind::Tinyfish).then_some(12_000)
+        (self == ProviderKind::Tinyfish).then_some(tinyfish::SEARCH_POOL)
     }
 
     /// Deep research draws on its own `#dr` budget instead of the account quota.
@@ -1166,14 +1166,20 @@ impl Provider {
         }
     }
 
-    /// Live `#dr` allowance for a `dr_budget` API-key provider, read alongside `live_balance`.
-    pub async fn live_dr_balance(
+    /// Live allowance of an API-key provider's separate `#dr`/`#search` budget, read with `live_balance`.
+    pub async fn live_budget_balance(
         &self,
+        budget: &str,
         key: &str,
         client: &reqwest::Client,
     ) -> Option<LiveBalance> {
-        match self.kind {
-            ProviderKind::Tinyfish => tinyfish::dr_balance(&self.base, key, client).await.ok(),
+        match (self.kind, budget) {
+            (ProviderKind::Tinyfish, "#dr") => {
+                tinyfish::dr_balance(&self.base, key, client).await.ok()
+            }
+            (ProviderKind::Tinyfish, "#search") => {
+                tinyfish::search_balance(&self.base, key, client).await.ok()
+            }
             _ => None,
         }
     }

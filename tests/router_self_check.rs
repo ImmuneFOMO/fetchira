@@ -1387,7 +1387,7 @@ async fn slow_research_reread_still_holds_waiters_at_zero() {
     let slow = |body| {
         ResponseTemplate::new(200)
             .set_body_json(body)
-            .set_delay(std::time::Duration::from_secs(9))
+            .set_delay(std::time::Duration::from_secs(5))
     };
     Mock::given(method("GET"))
         .and(path("/usage"))
@@ -1528,7 +1528,12 @@ async fn tinyfish_reads_and_research_come_live() {
     assert_eq!(left, [("tinyfish-1", 996, 1000), ("tinyfish-1#dr", 2, 5)]);
     let dr = probe.load_live("tinyfish-1#dr").await.unwrap().unwrap();
     assert!(dr.reset_at.is_some());
-    assert!(compact_usage(&views).contains("tinyfish 996 (search 12000/12000, deep_research 2/5)"));
+    assert!(probe
+        .load_live("tinyfish-1#search")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(compact_usage(&views).contains("tinyfish 996 (search 11996/12000, deep_research 2/5)"));
     assert!(provider_sheet(ProviderKind::Tinyfish, &views).contains("deep_research 2/5"));
 }
 
@@ -1654,7 +1659,7 @@ async fn tinyfish_search_recovery_ignores_reads_and_research_readings() {
     Mock::given(method("GET"))
         .and(path("/usage"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"total": 1000})))
-        .expect(0)
+        .expect(1)
         .mount(&tf)
         .await;
     Mock::given(method("GET"))

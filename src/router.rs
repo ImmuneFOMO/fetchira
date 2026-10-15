@@ -882,9 +882,10 @@ impl Router {
         // Tinyfish search draws on its own pool, apart from the reads this view counts.
         if b.provider.kind == ProviderKind::Tinyfish {
             let (label, quota, _, reset) = budget(b, Capability::Search);
-            let sv = self
+            let mut sv = self
                 .view(b.provider.kind.as_str(), &label, quota, reset, &proxy)
                 .await?;
+            self.overlay_live(b, &mut sv, quota, false).await;
             split_open = sv.remaining > 0;
             mv.limits
                 .get_or_insert_with(Default::default)
@@ -1138,7 +1139,10 @@ impl Router {
         pinned: bool,
         period: &str,
     ) -> Result<bool> {
-        let own = label == b.label || label.strip_suffix("#dr") == Some(b.label.as_str());
+        let own = matches!(
+            label.strip_prefix(b.label.as_str()),
+            Some("" | "#dr" | "#search")
+        );
         if !own || !reads_balance(b) {
             return Ok(false);
         }
@@ -1157,11 +1161,19 @@ impl Router {
     /// Fetch `label`'s balance past the cache, so a stale reading can't clear a mark.
     async fn fetch_live_balance(&self, b: &Bucket, label: &str) -> Option<LiveBalance> {
         let Conn::Api(c) = &b.conn else { return None };
-        let research = match label.strip_prefix(b.label.as_str()) {
-            Some("") => false,
-            Some("#dr") => true,
+        let suffix = match label.strip_prefix(b.label.as_str()) {
+            Some(suffix @ ("" | "#dr" | "#search")) => suffix,
             _ => return None,
         };
+        let period = |suffix: &str| period_key(if suffix == "#dr" { b.dr_reset } else { b.reset });
+        // A budget re-read fetches only its own allowance; the account read refreshes all of them.
+        if !suffix.is_empty() {
+            let read = bounded(b.provider.live_budget_balance(suffix, &b.key, c)).await;
+            if let Some(read) = &read {
+                let _ = self.store.save_live(label, &period(suffix), read).await;
+            }
+            return read;
+        }
         // Dashboard reads may rotate session cookies, so persist the updates.
         let main = bounded(async {
             match &b.balance_conn {
@@ -1180,7 +1192,11 @@ impl Router {
                 None => b.provider.live_balance(&b.key, c).await,
             }
         });
-        let (bal, dr) = tokio::join!(main, bounded(b.provider.live_dr_balance(&b.key, c)));
+        let (bal, dr, search) = tokio::join!(
+            main,
+            bounded(b.provider.live_budget_balance("#dr", &b.key, c)),
+            bounded(b.provider.live_budget_balance("#search", &b.key, c))
+        );
         if let Ok(mut m) = self.balance.lock() {
             m.insert(b.label.clone(), Instant::now());
         }
@@ -1197,17 +1213,15 @@ impl Router {
             }
             None => {}
         }
-        if let Some(dr) = &dr {
-            let _ = self
-                .store
-                .save_live(&format!("{}#dr", b.label), &period_key(b.dr_reset), dr)
-                .await;
+        for (suffix, read) in [("#dr", dr), ("#search", search)] {
+            if let Some(read) = read {
+                let _ = self
+                    .store
+                    .save_live(&format!("{}{suffix}", b.label), &period(suffix), &read)
+                    .await;
+            }
         }
-        if research {
-            dr
-        } else {
-            bal
-        }
+        bal
     }
 
     async fn session_cookies(&self, label: &str) -> Vec<web::Cookie> {
