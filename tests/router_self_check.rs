@@ -1271,9 +1271,11 @@ async fn unreadable_spent_reading_keeps_a_pinned_account_under_its_cap() {
         .mount(&tav)
         .await;
     let q = query("q");
+    let start = std::time::Instant::now();
     let calls = (0..3).map(|_| router.call(Capability::Search, &q, Some(ProviderKind::Tavily)));
     let res = futures_util::future::join_all(calls).await;
     assert_eq!(res.iter().filter(|r| r.is_ok()).count(), 1);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
 }
 
 #[tokio::test]
@@ -1357,12 +1359,24 @@ async fn a_cancelled_reread_frees_the_account() {
         .mount(&tav)
         .await;
     let q = query("q");
-    let first = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        router.call(Capability::Search, &q, Some(ProviderKind::Tavily)),
-    )
-    .await;
-    assert!(first.is_err());
+    let mut first = Box::pin(router.call(Capability::Search, &q, Some(ProviderKind::Tavily)));
+    for _ in 0..150 {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut first)
+                .await
+                .is_err()
+        );
+        if tav
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path() == "/usage")
+        {
+            break;
+        }
+    }
+    drop(first);
     Mock::given(method("GET"))
         .and(path("/usage"))
         .respond_with(
