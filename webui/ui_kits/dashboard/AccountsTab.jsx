@@ -236,7 +236,7 @@ function RowActions({ r }) {
         {busy === 'login' ? 'finish in browser…' : busy === 'test' ? 'testing…' : test ? (test.ok ? '✓ ' + test.latencyMs + 'ms' : '✕ failed') : '·'}
       </span>
       <Button size="sm" variant="ghost" onClick={doTest} disabled={!!busy}>{busy === 'test' ? <React.Fragment>{spinner} Testing</React.Fragment> : 'Test'}</Button>
-      {r.web || (r.balanceSession && !r.loggedIn && !window.fxHosted)
+      {r.web || (r.balanceSession && !r.loggedIn)
         ? <Button size="sm" variant={needsLogin ? 'primary' : 'secondary'} onClick={() => doLogin('chrome')} disabled={!!busy}>{busy === 'login' ? <React.Fragment>{spinner} Waiting…</React.Fragment> : needsLogin || !r.web ? 'Login' : 'Re-login'}</Button>
         : <span style={{ width: 62 }} />}
       <RowMenu r={r} onLogin={doLogin} onError={(e) => setTest({ ok: false, error: e })} disabled={!!busy} />
@@ -352,7 +352,7 @@ function AccountRow({ r }) {
             <React.Fragment>
               <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>
-              {r.balanceSession && !r.loggedIn && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>≈ estimate{!window.fxHosted && ' · log in for live balance'}</div>}
+              {r.balanceSession && !r.loggedIn && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>≈ estimate · log in for live balance</div>}
             </React.Fragment>
           )}
         </td>

@@ -716,7 +716,7 @@ function RowActions({
     variant: "ghost",
     onClick: doTest,
     disabled: !!busy
-  }, busy === 'test' ? /*#__PURE__*/React.createElement(React.Fragment, null, spinner, " Testing") : 'Test'), r.web || r.balanceSession && !r.loggedIn && !window.fxHosted ? /*#__PURE__*/React.createElement(Button, {
+  }, busy === 'test' ? /*#__PURE__*/React.createElement(React.Fragment, null, spinner, " Testing") : 'Test'), r.web || r.balanceSession && !r.loggedIn ? /*#__PURE__*/React.createElement(Button, {
     size: "sm",
     variant: needsLogin ? 'primary' : 'secondary',
     onClick: () => doLogin('chrome'),
@@ -956,7 +956,7 @@ function AccountRow({
       fontSize: 10,
       color: 'var(--text-faint)'
     }
-  }, "\u2248 estimate", !window.fxHosted && ' · log in for live balance'))), /*#__PURE__*/React.createElement("td", {
+  }, "\u2248 estimate \xB7 log in for live balance"))), /*#__PURE__*/React.createElement("td", {
     style: td
   }, /*#__PURE__*/React.createElement(Badge, {
     tone: "neutral",

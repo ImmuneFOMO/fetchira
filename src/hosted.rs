@@ -796,11 +796,29 @@ async fn admin_provider_session(
     let Some(provider) = provider else {
         return (StatusCode::BAD_REQUEST, "provider is required").into_response();
     };
+    if !provider.holds_session(true) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "provider account must support browser sessions",
+        )
+            .into_response();
+    }
+    if !provider.is_web() && existing.is_none_or(|a| a.api_key.is_none()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "add the account with its api key first",
+        )
+            .into_response();
+    }
     if req.label.len() > 80 || req.session.len() > 1024 * 1024 {
         return (StatusCode::BAD_REQUEST, "invalid label or session size").into_response();
     }
-    if crate::web::parse_session(&req.session).cookies.is_empty() {
-        return (StatusCode::BAD_REQUEST, "session contains no cookies").into_response();
+    if !crate::web::has_login(provider, &crate::web::parse_session(&req.session)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "session is missing this provider's login",
+        )
+            .into_response();
     }
     let label = if let Some(account) = existing {
         if account.provider != provider {
@@ -816,17 +834,6 @@ async fn admin_provider_session(
     };
     if label.is_empty() {
         return (StatusCode::BAD_REQUEST, "invalid label").into_response();
-    }
-    if let Ok(cfg) = config::load_hosted(&st.home.join("fetchira.toml")) {
-        if let Some(account) = cfg.accounts.iter().find(|a| a.label == label) {
-            if !account.provider.is_web() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "provider account must support browser sessions",
-                )
-                    .into_response();
-            }
-        }
     }
     match st
         .store
@@ -1081,7 +1088,7 @@ async fn admin_create_challenge(
     let Some(provider) = provider else {
         return (StatusCode::BAD_REQUEST, "provider is required").into_response();
     };
-    if !provider.is_web() {
+    if !provider.holds_session(true) {
         return (
             StatusCode::BAD_REQUEST,
             "provider account must support browser sessions",
@@ -1090,6 +1097,13 @@ async fn admin_create_challenge(
     }
     if existing.is_some_and(|account| account.provider != provider) {
         return (StatusCode::BAD_REQUEST, "provider does not match account").into_response();
+    }
+    if !provider.is_web() && existing.is_none_or(|account| account.api_key.is_none()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "add the account with its api key first",
+        )
+            .into_response();
     }
     let (label, created) = if let Some(account) = existing {
         (account.label.clone(), false)
@@ -1239,7 +1253,9 @@ async fn challenge_upload(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let account_matches = cfg.accounts.iter().any(|account| {
-        account.label == label && account.provider.is_web() && account.provider.as_str() == provider
+        account.label == label
+            && account.provider.holds_session(account.api_key.is_some())
+            && account.provider.as_str() == provider
     });
     if !account_matches {
         return (
@@ -1248,8 +1264,14 @@ async fn challenge_upload(
         )
             .into_response();
     }
-    if crate::web::parse_session(&req.session).cookies.is_empty() {
-        return (StatusCode::BAD_REQUEST, "session contains no cookies").into_response();
+    if !provider_kind(&provider)
+        .is_some_and(|kind| crate::web::has_login(kind, &crate::web::parse_session(&req.session)))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "session is missing this provider's login",
+        )
+            .into_response();
     }
     match st
         .store
@@ -2787,6 +2809,152 @@ mod tests {
         );
 
         server.abort();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn balance_session_accounts_log_in_through_challenges() {
+        let _guard = crate::secrets::env_lock();
+        std::env::set_var("FETCHIRA_MASTER_KEY", "challenge-test-master");
+        let home = unique_home("balance_challenge");
+        std::fs::write(
+            home.join("fetchira.toml"),
+            r#"
+[[account]]
+provider = "octen"
+label = "octen-1"
+api_key = "k"
+proxy = "http://127.0.0.1:9"
+
+[[account]]
+provider = "keenable"
+label = "keenable-1"
+proxy = "http://127.0.0.1:9"
+
+[[account]]
+provider = "langsearch"
+label = "ls-1"
+api_key = "k"
+proxy = "http://127.0.0.1:9"
+
+[[account]]
+provider = "gemini_web"
+label = "gem-1"
+proxy = "http://127.0.0.1:9"
+"#,
+        )
+        .expect("config");
+        let store = fresh_store("balance_challenge").await;
+        let key = auth::generate_key("ops", [auth::Scope::AccountsManage]).expect("key");
+        store
+            .save_api_key_with_limits(&key, "ops", 10, 0, 0, 1, None)
+            .await
+            .expect("save key");
+        let st = HostedState {
+            home: home.clone(),
+            ..test_state(store)
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", key.plaintext).parse().expect("header"),
+        );
+        let accounts = || {
+            config::load_hosted(&home.join("fetchira.toml"))
+                .expect("config")
+                .accounts
+                .len()
+        };
+        let challenge = |provider, label: &str| {
+            admin_create_challenge(
+                State(st.clone()),
+                headers.clone(),
+                Json(ChallengeRequest {
+                    provider,
+                    label: label.into(),
+                }),
+            )
+        };
+        let challenge_id = |label: &'static str| {
+            let created = challenge(None, label);
+            async move {
+                let created = created.await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let body: serde_json::Value = serde_json::from_slice(
+                    &axum::body::to_bytes(created.into_body(), usize::MAX)
+                        .await
+                        .expect("body"),
+                )
+                .expect("json");
+                body["challenge"].as_str().expect("challenge").to_string()
+            }
+        };
+        let upload = |id: &str, session: &str| {
+            challenge_upload(
+                State(st.clone()),
+                headers.clone(),
+                axum::extract::Path(id.into()),
+                Json(ChallengeUpload {
+                    session: session.into(),
+                    identity: None,
+                    plan: None,
+                    limits: None,
+                }),
+            )
+        };
+        let paste = |provider, label: &str, session: &str| {
+            admin_provider_session(
+                State(st.clone()),
+                headers.clone(),
+                Json(ProviderSessionRequest {
+                    provider,
+                    label: label.into(),
+                    session: session.into(),
+                    proxy: None,
+                }),
+            )
+        };
+        let storage = r#"{"cookies":[],"storage":{"access_token":"x"}}"#;
+        let cookies = r#"{"cookies":[{"name":"sid","value":"x","domain":".langsearch.com"}]}"#;
+        let keenable = Some(crate::providers::ProviderKind::Keenable);
+        let before = accounts();
+
+        assert_eq!(challenge(None, "octen-1").await.status(), StatusCode::OK);
+        assert_eq!(
+            challenge(None, "keenable-1").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            challenge(keenable, "").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            paste(keenable, "keenable-2", storage).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(accounts(), before);
+
+        let gem = challenge_id("gem-1").await;
+        assert_eq!(
+            upload(&gem, storage).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let ls = challenge_id("ls-1").await;
+        assert_eq!(upload(&ls, "{}").await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(upload(&ls, cookies).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(upload(&ls, storage).await.status(), StatusCode::OK);
+        let raw = st
+            .store
+            .load_session("ls-1")
+            .await
+            .expect("load")
+            .expect("session");
+        assert_eq!(crate::web::parse_session(&raw).storage["access_token"], "x");
+        assert_eq!(paste(None, "ls-1", storage).await.status(), StatusCode::OK);
+
+        std::env::remove_var("FETCHIRA_MASTER_KEY");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

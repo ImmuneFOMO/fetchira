@@ -441,7 +441,7 @@ function AddAccountModal({
     mono: true,
     onChange: e => setLabel(e.target.value),
     hint: "Leave blank to auto-name"
-  }), !isWeb ? /*#__PURE__*/React.createElement(Input, {
+  }), !isWeb && !loginOnly ? /*#__PURE__*/React.createElement(Input, {
     label: "API key",
     placeholder: provider.keyless ? 'optional · works without a key' : 'paste secret key',
     value: apiKey,
@@ -452,7 +452,7 @@ function AddAccountModal({
     hint: touched && keyMissing ? 'Enter a valid API key' : 'Stored locally · never displayed again'
   }) : /*#__PURE__*/React.createElement(Field, {
     label: "Authentication"
-  }, /*#__PURE__*/React.createElement("div", {
+  }, isWeb && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 6
@@ -523,7 +523,7 @@ function AddAccountModal({
     value: sessionJson,
     onChange: e => setSessionJson(e.target.value),
     spellCheck: false,
-    placeholder: '[{"name":"sso","value":"…","domain":".grok.com"}]',
+    placeholder: isWeb ? '[{"name":"sso","value":"…","domain":".grok.com"}]' : '{"cookies":[…],"storage":{…}}',
     style: {
       width: '100%',
       minHeight: 76,
@@ -551,7 +551,7 @@ function AddAccountModal({
       fontSize: 12,
       color: 'var(--text-lo)'
     }
-  }, hosted ? 'Fallback: paste an exported session if the local browser is unavailable.' : 'Export cookies from any logged-in browser (e.g. a “Cookie Editor” extension → JSON). Works on headless servers.')), /*#__PURE__*/React.createElement(Input, {
+  }, hosted ? 'Fallback: paste an exported session if the local browser is unavailable.' : 'Export cookies from any logged-in browser (e.g. a “Cookie Editor” extension → JSON). Works on headless servers.')), !loginOnly && /*#__PURE__*/React.createElement(Input, {
     label: "Proxy \xB7 optional",
     placeholder: "pool, direct, ip:port:user:pass or http://user:pass@host:port",
     value: proxy,

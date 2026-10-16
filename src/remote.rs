@@ -560,8 +560,8 @@ pub async fn login(
         }
     };
     let parsed = crate::web::parse_session(&session);
-    if parsed.cookies.is_empty() {
-        bail!("session contains no cookies");
+    if !crate::web::has_login(target.provider, &parsed) {
+        bail!("session is missing this provider's login");
     }
     let (identity, plan, limits) =
         if let Ok(http) = crate::web::build_client(&parsed.cookies, &parsed.headers, None) {

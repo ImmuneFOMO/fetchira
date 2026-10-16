@@ -189,14 +189,14 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
             onChange={(e) => setLabel(e.target.value)} hint="Leave blank to auto-name" />
           }
 
-          {!isWeb ? (
+          {!isWeb && !loginOnly ? (
             <Input label="API key" placeholder={provider.keyless ? 'optional · works without a key' : 'paste secret key'} value={apiKey} mono
               type="password" onChange={(e) => setApiKey(e.target.value)}
               invalid={touched && keyMissing}
               hint={touched && keyMissing ? 'Enter a valid API key' : 'Stored locally · never displayed again'} />
           ) : (
             <Field label="Authentication">
-              <div style={{ display: 'flex', gap: 6 }}>
+              {isWeb && <div style={{ display: 'flex', gap: 6 }}>
                 {['chrome', 'firefox'].map((b) => (
                   <button key={b} type="button" onClick={() => setBrowser(b)} style={{
                     flex: 1, padding: '7px 0', cursor: 'pointer', textTransform: 'capitalize',
@@ -207,7 +207,7 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
                     borderRadius: 'var(--r-sm)',
                   }}>{b}</button>
                 ))}
-              </div>
+              </div>}
               <Button variant="secondary" onClick={startLogin} style={{ width: '100%', justifyContent: 'center' }}
                 iconLeft={<span style={{ fontSize: 13 }}>◧</span>}>Log in with browser</Button>
               <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{hosted ? 'Copy the command shown next and run it on your computer. Your local Fetchira opens the browser and uploads the encrypted session here.' : 'Opens the chosen browser so you can sign in. The session is captured locally — no password is stored.'}</span>
@@ -217,15 +217,15 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
                 <div style={{ flex: 1, height: 1, background: 'var(--border-hairline)' }} />
               </div>
               <textarea value={sessionJson} onChange={(e) => setSessionJson(e.target.value)} spellCheck={false}
-                placeholder={'[{"name":"sso","value":"…","domain":".grok.com"}]'}
+                placeholder={isWeb ? '[{"name":"sso","value":"…","domain":".grok.com"}]' : '{"cookies":[…],"storage":{…}}'}
                 style={{ width: '100%', minHeight: 76, resize: 'vertical', boxSizing: 'border-box', padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', background: 'var(--surface-sunken, rgba(255,255,255,0.03))', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)' }} />
               <Button variant="ghost" onClick={submitSession} disabled={busy || !sessionJson.trim()} style={{ width: '100%', justifyContent: 'center' }}>{busy ? 'Saving…' : 'Use pasted session'}</Button>
               <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{hosted ? 'Fallback: paste an exported session if the local browser is unavailable.' : 'Export cookies from any logged-in browser (e.g. a “Cookie Editor” extension → JSON). Works on headless servers.'}</span>
             </Field>
           )}
 
-          <Input label="Proxy · optional" placeholder="pool, direct, ip:port:user:pass or http://user:pass@host:port" value={proxy} mono
-            onChange={(e) => setProxy(e.target.value)} hint="Leave blank for a direct connection" />
+          {!loginOnly && <Input label="Proxy · optional" placeholder="pool, direct, ip:port:user:pass or http://user:pass@host:port" value={proxy} mono
+            onChange={(e) => setProxy(e.target.value)} hint="Leave blank for a direct connection" />}
 
           {error && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.3)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>{error}</div>}
         </div>
