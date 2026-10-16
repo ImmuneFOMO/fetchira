@@ -306,6 +306,18 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
                  catch(e){return false}})()",
             ),
         ),
+        // The token carries no expiry, so prove it against the usage endpoint the balance reads.
+        ProviderKind::Langsearch => (
+            "https://langsearch.com/login",
+            "langsearch.com",
+            "",
+            Some(
+                "(async()=>{try{const t=localStorage.getItem('access_token');if(!t)return false;\
+                 const r=await fetch('https://langsearch.com/api/v1/plan/usage',\
+                 {headers:{Authorization:'Bearer '+t},signal:AbortSignal.timeout(5000)});\
+                 return r.ok}catch(e){return false}})()",
+            ),
+        ),
         other => return Err(Error::Unsupported(other.as_str())),
     })
 }
@@ -324,6 +336,7 @@ fn companion_domains(kind: ProviderKind) -> &'static [&'static str] {
 fn storage_keys(kind: ProviderKind) -> &'static [&'static str] {
     match kind {
         ProviderKind::Keenable => &[crate::providers::keenable::STORAGE_KEY],
+        ProviderKind::Langsearch => &[crate::providers::langsearch::STORAGE_KEY],
         _ => &[],
     }
 }
@@ -741,7 +754,7 @@ async fn wait_logged_in(src: &mut Cdp, check: &str) -> Result<()> {
             &mut src.ws,
             src.id,
             "Runtime.evaluate",
-            json!({ "expression": check, "returnByValue": true }),
+            json!({ "expression": check, "returnByValue": true, "awaitPromise": true }),
         )
         .await
         {
@@ -1189,7 +1202,7 @@ mod tests {
 
     #[test]
     fn storage_logins_check_the_key_they_capture() {
-        use crate::providers::keenable;
+        use crate::providers::{keenable, langsearch};
         let guard = |kind, key: &str| {
             let (_, _, auth, check) = login_target(kind).unwrap();
             assert!(auth.is_empty());
@@ -1197,6 +1210,7 @@ mod tests {
             assert_eq!(storage_keys(kind), &[key]);
         };
         guard(ProviderKind::Keenable, keenable::STORAGE_KEY);
+        guard(ProviderKind::Langsearch, langsearch::STORAGE_KEY);
     }
 
     #[test]

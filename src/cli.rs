@@ -2303,7 +2303,7 @@ pub fn help() {
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
            fetchira priority [cap]      show or set the provider order per capability (search/read/deep_research/image)\n  \
-           fetchira login <provider|label>  (re)capture a browser session (web providers; exa/parallel/octen/keenable balance)\n  \
+           fetchira login <provider|label>  (re)capture a browser session (web providers; api-key dashboard balance)\n  \
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
            fetchira remote set URL      connect stdio to hosted Fetchira [--key fk_live_*]\n  \
            fetchira remote check        verify endpoint, API key, and version compatibility\n  \

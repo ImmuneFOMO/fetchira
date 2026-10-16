@@ -18,7 +18,7 @@ mod grok_web;
 mod hyperbrowser;
 mod jina;
 pub(crate) mod keenable;
-mod langsearch;
+pub(crate) mod langsearch;
 mod linkup;
 pub(crate) mod niche;
 mod nimble;
@@ -278,7 +278,10 @@ impl ProviderKind {
     /// Api-key providers whose live balance needs a `fetchira login` dashboard session.
     pub fn balance_session(self, keyed: bool) -> bool {
         match self {
-            ProviderKind::Parallel | ProviderKind::Exa | ProviderKind::Octen => true,
+            ProviderKind::Parallel
+            | ProviderKind::Exa
+            | ProviderKind::Octen
+            | ProviderKind::Langsearch => true,
             ProviderKind::Keenable => keyed,
             _ => false,
         }
@@ -339,7 +342,7 @@ impl ProviderKind {
             ProviderKind::Octen => 5000,
             ProviderKind::Nimble => 5000,
             ProviderKind::Serpapi => 250,
-            ProviderKind::Langsearch => 1000,
+            ProviderKind::Langsearch => 10_000,
             ProviderKind::Scrapingant => 10_000,
             ProviderKind::Zenrows => 5000,
             ProviderKind::Hyperbrowser => 5000,
@@ -516,7 +519,7 @@ impl ProviderKind {
             ProviderKind::Octen => "$5 credit · one-time",
             ProviderKind::Nimble => "5,000 free requests · one-time trial",
             ProviderKind::Serpapi => "250 free searches / month",
-            ProviderKind::Langsearch => "free · daily token allowance, resets 00:00 UTC",
+            ProviderKind::Langsearch => "10M tokens / day (≈10,000 searches) · resets 00:00 UTC",
             ProviderKind::Scrapingant => "10,000 credits / month · JS render 10 per read",
             ProviderKind::Zenrows => "5,000 credits / month · JS render 5 per read",
             ProviderKind::Hyperbrowser => "5,000 credits · one-time",
@@ -1204,6 +1207,9 @@ impl Provider {
             ProviderKind::Octen => octen::balance(&self.base, client, &session.cookies).await,
             ProviderKind::Keenable => {
                 keenable::balance(&self.base, keenable::AUTH_BASE, client, &session.storage).await
+            }
+            ProviderKind::Langsearch => {
+                langsearch::balance(langsearch::DASHBOARD_BASE, client, &session.storage).await
             }
             other => Err(Error::Unsupported(other.as_str())),
         }

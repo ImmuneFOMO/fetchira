@@ -1,9 +1,14 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, niche, s, Capability, Hit, Input, Outcome};
+use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
 use crate::error::{Error, Result};
+
+const TOKENS_PER_SEARCH: i64 = 1000;
+pub(super) const DASHBOARD_BASE: &str = "https://langsearch.com";
+pub(crate) const STORAGE_KEY: &str = "access_token";
 
 pub async fn call(
     base: &str,
@@ -108,6 +113,47 @@ fn freshness(recency: &str) -> Option<String> {
         iso => niche::recency_date(iso)
             .map(|d| format!("{d}..{}", chrono::Utc::now().format("%Y-%m-%d"))),
     }
+}
+
+/// Dashboard-session usage of the daily token allowance; the token never rotates.
+pub async fn balance(
+    dashboard: &str,
+    client: &wreq::Client,
+    storage: &BTreeMap<String, String>,
+) -> Result<(LiveBalance, Vec<(String, String)>)> {
+    let token = storage
+        .get(STORAGE_KEY)
+        .ok_or(Error::BadResponse("langsearch"))?;
+    let resp = client
+        .get(format!("{dashboard}/api/v1/plan/usage"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "langsearch",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    let v: Value = serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("langsearch"))?;
+    Ok((parse_balance(&v["data"])?, Vec::new()))
+}
+
+fn parse_balance(d: &Value) -> Result<LiveBalance> {
+    let n = |k: &str| {
+        d[k].as_i64()
+            .or_else(|| d[k].as_str()?.parse().ok())
+            .ok_or(Error::BadResponse("langsearch"))
+    };
+    let limit = n("dailyTokenLimit")?;
+    Ok(LiveBalance {
+        remaining: limit.saturating_sub(n("usedTokens")?).max(0) / TOKENS_PER_SEARCH,
+        total: limit / TOKENS_PER_SEARCH,
+        usd: None,
+        reset_at: d["resetAt"].as_str().and_then(iso_ms),
+    })
 }
 
 #[cfg(test)]
@@ -222,6 +268,53 @@ mod tests {
         assert!(matches!(
             day,
             Err(Error::RateLimit { retry_after: Some(d), .. }) if d == Duration::from_secs(60)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dashboard_usage_counts_searches_from_tokens() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/plan/usage"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true, "code": "200", "msg": "success",
+                "data": {
+                    "product": "web_search", "plan": "free", "unit": "tokens", "qpsLimit": "5",
+                    "referralBonusRps": "0", "referralBonusDailyTokens": "0",
+                    "referralRewardedCount": 0, "usedPercent": 0.00518, "usedTokens": "518",
+                    "dailyTokenLimit": "10000000", "minuteUsedPercent": 0.0518,
+                    "minuteUsedTokens": "518", "minuteTokenLimit": "1000000",
+                    "minuteNextReleaseAt": "2026-10-16T12:13:16.443Z",
+                    "resetAt": "2026-10-17T00:00:00Z", "serverTime": "2026-10-16T12:12:24.453Z",
+                    "resetTimezone": "UTC"
+                },
+                "timestamp": 1792152694611i64
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/plan/usage"))
+            .and(header("authorization", "Bearer stale"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let session = |t: &str| BTreeMap::from([(STORAGE_KEY.to_string(), t.to_string())]);
+        let client = wreq::Client::new();
+        let (b, updates) = balance(&server.uri(), &client, &session("tok"))
+            .await
+            .unwrap();
+        assert_eq!(
+            (b.remaining, b.total, b.usd, b.reset_at),
+            (9999, 10_000, None, Some(1_792_195_200_000))
+        );
+        assert!(updates.is_empty());
+        assert!(matches!(
+            balance(&server.uri(), &client, &session("stale")).await,
+            Err(Error::Provider { status: 401, .. })
         ));
     }
 }
