@@ -297,7 +297,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             "remaining": v.remaining, "resetWindow": window_or_period(v.window_secs, &v.period),
             "proxy": mask_proxy(proxy),
             "status": if v.exhausted { "exhausted" } else if web && !ready { "needs-login" } else { "healthy" },
-            "key": account.is_some_and(|a| a.api_key.is_some()), "web": web, "loggedIn": ready, "balanceSession": kind.is_some_and(|p| p.balance_session()), "pending": v.pending, "unmetered": v.unmetered,
+            "key": account.map_or(!web, |a| a.api_key.is_some()), "web": web, "loggedIn": ready, "balanceSession": kind.is_some_and(|p| p.balance_session()), "pending": v.pending, "unmetered": v.unmetered,
             "email": idents.get(v.label.as_str()),
             "limits": v.limits.as_ref().map(limits_json), "usd": v.usd
         })

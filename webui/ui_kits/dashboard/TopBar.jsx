@@ -19,6 +19,7 @@ function Wordmark() {
 
 function TopBar({ onAdd }) {
   const total = window.FX.totalRemaining;
+  const inf = !total && (window.FX.accounts || []).some((a) => a.unmetered && a.status === 'healthy');
   const s = window.FX.summary || { accounts: (window.FX.accounts || []).length, healthy: 0, needsLogin: 0, exhausted: 0 };
   return (
     <header style={{
@@ -42,7 +43,7 @@ function TopBar({ onAdd }) {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', paddingLeft: 14, borderLeft: '1px solid var(--border-hairline)' }}>
-          <span style={{ fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', fontSize: 16, fontWeight: 600, color: 'var(--lime-500)', lineHeight: 1 }}>{fmtCompact(total)}</span>
+          <span style={{ fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', fontSize: 16, fontWeight: 600, color: 'var(--lime-500)', lineHeight: 1 }}>{inf ? '∞' : fmtCompact(total)}</span>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>req remaining</span>
         </div>
 

@@ -48,6 +48,7 @@ function TopBar({
   onAdd
 }) {
   const total = window.FX.totalRemaining;
+  const inf = !total && (window.FX.accounts || []).some(a => a.unmetered && a.status === 'healthy');
   const s = window.FX.summary || {
     accounts: (window.FX.accounts || []).length,
     healthy: 0,
@@ -133,7 +134,7 @@ function TopBar({
       color: 'var(--lime-500)',
       lineHeight: 1
     }
-  }, fmtCompact(total)), /*#__PURE__*/React.createElement("span", {
+  }, inf ? '∞' : fmtCompact(total)), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 10,

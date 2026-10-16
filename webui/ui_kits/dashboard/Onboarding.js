@@ -152,7 +152,7 @@ function KeyProviderCard({
       style: {
         color: 'var(--text-hi)'
       }
-    }, Math.max(0, (acct.quota || 0) - (acct.used || 0)).toLocaleString()), " requests in the tank")));
+    }, acct.unmetered ? '∞' : Math.max(0, (acct.quota || 0) - (acct.used || 0)).toLocaleString()), " requests ", acct.unmetered ? '(rate-limited)' : 'in the tank')));
   }
   return /*#__PURE__*/React.createElement(Card, {
     pad: 16,

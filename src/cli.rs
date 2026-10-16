@@ -874,7 +874,15 @@ async fn do_login(
 struct PChoice(ProviderKind);
 impl std::fmt::Display for PChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tag = if self.0.is_web() { "login" } else { " key " };
+        let tag = if self.0.is_web() {
+            "login"
+        } else if self.0.needs_key() {
+            " key "
+        } else if self.0.takes_key() {
+            " opt "
+        } else {
+            "nokey"
+        };
         write!(f, "{:14} [{tag}]  {}", self.0.as_str(), self.0.blurb())
     }
 }

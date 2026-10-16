@@ -65,7 +65,7 @@ function KeyProviderCard({ p, onOpenModal }) {
         </div>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-mid)' }}>
           <span style={{ color: 'var(--lime-500)' }}>{label}</span> answered a live call in {ms}ms
-          {acct && <> · <b style={{ color: 'var(--text-hi)' }}>{Math.max(0, (acct.quota || 0) - (acct.used || 0)).toLocaleString()}</b> requests in the tank</>}
+          {acct && <> · <b style={{ color: 'var(--text-hi)' }}>{acct.unmetered ? '∞' : Math.max(0, (acct.quota || 0) - (acct.used || 0)).toLocaleString()}</b> requests {acct.unmetered ? '(rate-limited)' : 'in the tank'}</>}
         </span>
       </Card>
     );
