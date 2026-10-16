@@ -220,7 +220,8 @@ async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
     let cfg = cli::load_or_empty(home)?;
     let mut meta = HashMap::new();
     for a in &cfg.accounts {
-        let logged_in = a.provider.is_web() && store.load_session(&a.label).await?.is_some();
+        let logged_in = (a.provider.is_web() || a.provider.balance_session())
+            && store.load_session(&a.label).await?.is_some();
         meta.insert(
             a.label.clone(),
             AcctMeta {
@@ -1482,6 +1483,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "key": key,
                 "web": web,
                 "loggedIn": logged,
+                "balanceSession": m.is_some_and(|x| x.kind.balance_session()),
                 "email": idents.get(v.label.as_str()),
                 "pending": v.pending,
                 "unmetered": v.unmetered,
@@ -2392,6 +2394,35 @@ mod tests {
         let v = view("openalex", "openalex-1", 4, 100, None);
         let groups = overview_groups(&[&v], |_| true);
         assert_eq!(tile(&groups, "openalex")["limits"][0]["approx"], true);
+    }
+
+    #[tokio::test]
+    async fn keyed_balance_session_account_stays_healthy_without_login() {
+        let home = std::env::temp_dir().join(format!(
+            "fetchira-ui-balance-session-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("fetchira.toml"),
+            "[[account]]\nprovider = \"octen\"\nlabel = \"octen-1\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let store = Store::open(home.join("usage.db").to_str().unwrap())
+            .await
+            .unwrap();
+        let inner = build_inner(&home, &store).await.unwrap();
+        let state = build_state(&inner, &store).await.unwrap();
+        let a = &state["accounts"][0];
+        assert_eq!(
+            (&a["balanceSession"], &a["loggedIn"], &a["status"]),
+            (&json!(true), &json!(false), &json!("healthy"))
+        );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

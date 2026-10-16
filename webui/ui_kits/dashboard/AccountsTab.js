@@ -716,12 +716,12 @@ function RowActions({
     variant: "ghost",
     onClick: doTest,
     disabled: !!busy
-  }, busy === 'test' ? /*#__PURE__*/React.createElement(React.Fragment, null, spinner, " Testing") : 'Test'), r.web ? /*#__PURE__*/React.createElement(Button, {
+  }, busy === 'test' ? /*#__PURE__*/React.createElement(React.Fragment, null, spinner, " Testing") : 'Test'), r.web || r.balanceSession && !r.loggedIn && !window.fxHosted ? /*#__PURE__*/React.createElement(Button, {
     size: "sm",
     variant: needsLogin ? 'primary' : 'secondary',
     onClick: () => doLogin('chrome'),
     disabled: !!busy
-  }, busy === 'login' ? /*#__PURE__*/React.createElement(React.Fragment, null, spinner, " Waiting\u2026") : needsLogin ? 'Login' : 'Re-login') : /*#__PURE__*/React.createElement("span", {
+  }, busy === 'login' ? /*#__PURE__*/React.createElement(React.Fragment, null, spinner, " Waiting\u2026") : needsLogin || !r.web ? 'Login' : 'Re-login') : /*#__PURE__*/React.createElement("span", {
     style: {
       width: 62
     }
@@ -950,7 +950,13 @@ function AccountRow({
     style: {
       color: 'var(--text-faint)'
     }
-  }, "/ ", r.quota.toLocaleString())))), /*#__PURE__*/React.createElement("td", {
+  }, "/ ", r.quota.toLocaleString())), r.balanceSession && !r.loggedIn && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: 'var(--font-mono)',
+      fontSize: 10,
+      color: 'var(--text-faint)'
+    }
+  }, "\u2248 estimate \xB7 log in for live balance"))), /*#__PURE__*/React.createElement("td", {
     style: td
   }, /*#__PURE__*/React.createElement(Badge, {
     tone: "neutral",

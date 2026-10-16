@@ -170,7 +170,7 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
     // Render REMAINING/RESEARCH from the same live snapshot the dashboard uses, so a lapsed sub
     // reads 0/0 here too (a bucket the router couldn't build — no session/key — is absent = "-").
     let accounts = cfg.accounts.clone();
-    let router = crate::router::Router::build(cfg, store).await?;
+    let router = crate::router::Router::build(cfg, store.clone()).await?;
     let views = router.usage_snapshot().await?;
     let mut mains: HashMap<&str, &crate::router::UsageView> = HashMap::new();
     let mut drs: HashMap<&str, &crate::router::UsageView> = HashMap::new();
@@ -228,6 +228,15 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             research,
             a.proxy.as_deref().unwrap_or("direct"),
         );
+        if ready
+            && a.provider.balance_session()
+            && !matches!(store.load_session(&a.label).await, Ok(Some(_)))
+        {
+            println!(
+                "  ≈ estimate — run `fetchira login {}` for the live balance",
+                a.label
+            );
+        }
     }
 
     // Live per-tier tool limits + model catalog, fetched straight from the providers that report
@@ -732,7 +741,7 @@ pub async fn capture_login(
         .iter()
         .find(|a| a.label == label)
         .with_context(|| format!("no account labelled '{label}'"))?;
-    if !acc.provider.is_web() {
+    if !acc.provider.is_web() && !acc.provider.balance_session() {
         bail!("'{}' is not a web-session provider", acc.provider.as_str());
     }
     let kind = acc.provider;
