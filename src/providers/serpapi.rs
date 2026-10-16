@@ -31,7 +31,6 @@ pub async fn call(
     Ok(Outcome::new(fmt_hits(&hits(&v, arr, input)), 1))
 }
 
-// Returns the query params and the result-array key.
 fn params(input: &Input) -> Result<(Vec<(&'static str, String)>, &'static str)> {
     let q = input.need_query()?.to_string() + &niche::sites(input);
     let recency = input.recency.as_deref();

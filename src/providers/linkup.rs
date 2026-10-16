@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::{
-    check, fmt_hits, niche, s, with_sources, Capability, Hit, Input, LiveBalance, Outcome,
+    check, fmt_hits, niche, s, snippet, with_sources, Capability, Hit, Input, LiveBalance, Outcome,
     ProviderKind,
 };
 use crate::error::{Error, Result};
@@ -93,13 +93,7 @@ fn hits(v: &Value) -> Vec<Hit> {
         .map(|o| Hit {
             title: unescape(&s(o, "name")),
             url: s(o, "url"),
-            snippet: s(o, "content")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(SNIPPET_CHARS)
-                .collect(),
+            snippet: snippet(&s(o, "content"), SNIPPET_CHARS),
         })
         .collect()
 }

@@ -899,7 +899,7 @@ pub struct LiveQuota {
 pub struct LiveBalance {
     pub remaining: i64,
     pub total: i64,
-    /// Real dollar balance for top-up $ providers (exa/parallel/steel); None for credit providers.
+    /// Real dollar balance for top-up $ providers; None for credit providers.
     pub usd: Option<f64>,
     /// Unix ms when the provider renews this balance, when it says.
     pub reset_at: Option<i64>,
@@ -1248,6 +1248,15 @@ fn fmt_hits(hits: &[Hit]) -> String {
         .map(|(i, h)| format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, h.snippet))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn snippet(text: &str, max: usize) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max)
+        .collect()
 }
 
 /// Append a numbered source list to a synthesized answer (web providers don't return SERP rows).

@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 
-use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
+use super::{
+    check, fmt_hits, iso_ms, niche, s, snippet, Capability, Hit, Input, LiveBalance, Outcome,
+};
 use crate::error::{Error, Result};
 
 const SNIPPET_CHARS: usize = 500;
@@ -84,13 +86,7 @@ fn hits(v: &Value) -> Vec<Hit> {
         .map(|o| Hit {
             title: s(o, "title"),
             url: s(o, "url"),
-            snippet: s(o, "description")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(SNIPPET_CHARS)
-                .collect(),
+            snippet: snippet(&s(o, "description"), SNIPPET_CHARS),
         })
         .collect()
 }

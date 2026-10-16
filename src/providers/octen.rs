@@ -56,8 +56,8 @@ pub async fn call(
 
 // The default 512-token highlight runs to ~2 KB, so cap it to snippet size.
 fn build_req(input: &Input) -> Result<(&'static str, Value, i64)> {
+    let q = input.need_query()?;
     let mut b = json!({
-        "query": input.need_query()?,
         "count": input.results(),
         "highlight": { "enable": true, "max_tokens": 200 },
     });
@@ -81,11 +81,12 @@ fn build_req(input: &Input) -> Result<(&'static str, Value, i64)> {
         None => {}
     }
     if input.topic.as_deref() == Some("news") {
+        b["query"] = json!(q);
         // Subject clustering is on by default and bills an extra query.
         b["subjects"] = json!({ "enable": false });
         return Ok(("news-search", b, 3));
     }
-    b["query"] = json!(input.need_query()?.to_string() + niche::topic_hint(input));
+    b["query"] = json!(q.to_string() + niche::topic_hint(input));
     Ok(("search", b, 1))
 }
 
