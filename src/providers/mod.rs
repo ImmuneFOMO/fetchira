@@ -446,7 +446,7 @@ impl ProviderKind {
             ProviderKind::Linkup => "search + page fetch + async deep research on a $ balance",
             ProviderKind::You => "search + page contents + deep research on a $ credit",
             ProviderKind::Octen => "low-latency web + news search on a $ credit",
-            ProviderKind::Nimble => "web + academic search, SERP snippets or full-page depth",
+            ProviderKind::Nimble => "web + academic search, SERP or page-text snippets",
             ProviderKind::Serpapi => "Google web, news and Scholar results as JSON",
             ProviderKind::Langsearch => "free web search on a daily token allowance",
             ProviderKind::Scrapingant => "page reads as markdown, plain fetch or headless Chrome",
@@ -793,7 +793,7 @@ pub fn extras(kind: ProviderKind) -> ProviderExtras {
                 "recency → time_range / start_date",
                 "domains → include/exclude_domains",
             ],
-            modes: &[("standard", "full-page markdown per hit (default: lite SERP snippet)")],
+            modes: &[("standard", "page-text snippet per hit (default: lite SERP snippet)")],
             examples: &[
                 "search(query=\"crispr off-target\", provider=\"nimble\", topic=\"academic\")",
                 "search(query=\"tokio select\", provider=\"nimble\", mode=\"standard\")",

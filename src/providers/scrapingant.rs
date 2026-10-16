@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::Value;
 
 use super::{check, header_cost, iso_ms, s, Capability, Input, LiveBalance, Outcome};
@@ -14,6 +16,7 @@ pub async fn call(
         client
             .get(format!("{base}/v2/markdown"))
             .header("x-api-key", key)
+            .timeout(Duration::from_secs(90))
             .query(&[("url", input.need_url()?), ("browser", browser(input)?)]),
     )
     .await?;

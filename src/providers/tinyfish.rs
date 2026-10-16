@@ -97,6 +97,7 @@ async fn fetch(base: &str, key: &str, client: &reqwest::Client, input: &Input) -
         client
             .post(base.replace("api.search", "api.fetch"))
             .header("X-API-Key", key)
+            .timeout(Duration::from_secs(180))
             .json(&json!({ "urls": [input.need_url()?], "format": "markdown", "ttl": 0 })),
     )
     .await?;

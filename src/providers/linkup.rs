@@ -3,7 +3,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::{
-    check, fmt_hits, niche, s, Capability, Hit, Input, LiveBalance, Outcome, ProviderKind,
+    check, fmt_hits, niche, s, with_sources, Capability, Hit, Input, LiveBalance, Outcome,
+    ProviderKind,
 };
 use crate::error::{Error, Result};
 
@@ -200,18 +201,26 @@ async fn research(
             r => r?,
         };
         match v["status"].as_str().unwrap_or_default() {
-            "completed" => {
-                let text = s(&v["output"], "answer");
-                if text.is_empty() {
-                    return Err(Error::BadResponse("linkup"));
-                }
-                return Ok(Outcome::new(text, cost));
-            }
+            "completed" => return Ok(Outcome::new(report(&v["output"])?, cost)),
             "failed" => return Err(Error::BadResponse("linkup")),
             _ => continue,
         }
     }
     Err(Error::Timeout("linkup"))
+}
+
+fn report(out: &Value) -> Result<String> {
+    let text = s(out, "answer");
+    if text.is_empty() {
+        return Err(Error::BadResponse("linkup"));
+    }
+    let sources: Vec<String> = out["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|o| s(o, "url"))
+        .collect();
+    Ok(with_sources(text, &sources))
 }
 
 pub async fn balance(base: &str, key: &str, client: &reqwest::Client) -> Result<LiveBalance> {
@@ -353,10 +362,12 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/research/r1"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"status": "completed", "output": {"answer": "Report"}})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"status": "completed", "output": {
+                    "answer": "Report",
+                    "sources": [{"name": "Tokio", "url": "https://tokio.rs", "snippet": "async"}]
+                }}),
+            ))
             .mount(&server)
             .await;
         let input = Input {
@@ -372,7 +383,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((out.text.as_str(), out.cost), ("Report", 50));
+        assert_eq!(
+            (out.text.as_str(), out.cost),
+            ("Report\n\nSources:\n1. https://tokio.rs", 50)
+        );
     }
 
     #[tokio::test]

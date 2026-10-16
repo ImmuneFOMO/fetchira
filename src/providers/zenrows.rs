@@ -16,6 +16,7 @@ pub async fn call(
         client
             .get(format!("{base}/v1/"))
             .header("X-API-Key", key)
+            .timeout(Duration::from_secs(180))
             .query(&[("url", input.need_url()?), ("response_type", "markdown")])
             .query(&params(input)?),
     )
