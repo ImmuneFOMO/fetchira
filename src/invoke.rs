@@ -47,7 +47,8 @@ pub(crate) fn validate_search_input(input: &Input) -> anyhow::Result<()> {
         if !valid {
             bail!("recency must be day, week, month, year, or an ISO date (YYYY-MM-DD)");
         }
-        if date.is_ok_and(|d| d > chrono::Local::now().date_naive()) {
+        // A day of slack: east of UTC, the caller's today can be UTC's tomorrow.
+        if date.is_ok_and(|d| d > chrono::Utc::now().date_naive() + chrono::TimeDelta::days(1)) {
             bail!("recency is a start date and can't be in the future");
         }
     }

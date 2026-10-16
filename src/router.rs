@@ -648,7 +648,7 @@ impl Router {
                             }
                             Error::Provider { status, .. } => {
                                 // A rejected key won't heal; `remove` clears the bench.
-                                if status == 401 && !kind.is_web() {
+                                if status == 401 && !kind.is_web() && !b.key.is_empty() {
                                     let _ = self
                                         .store
                                         .set_cooldown(&blabel, REJECTED_KEY_COOLDOWN)

@@ -1284,6 +1284,7 @@ impl Store {
         bal: &LiveBalance,
         keep_lower: bool,
     ) -> Result<()> {
+        // reset_at from a relative header drifts per reply; a minute apart is one window.
         sqlx::query(
             "INSERT INTO live_quota
              (label, period, used_at_fetch, remaining, total, usd, reset_at, fetched_at)
@@ -1294,7 +1295,7 @@ impl Store {
                 total = excluded.total, usd = excluded.usd, reset_at = excluded.reset_at,
                 fetched_at = excluded.fetched_at
              WHERE NOT ? OR live_quota.period != excluded.period
-                OR live_quota.reset_at IS NOT excluded.reset_at
+                OR ABS(COALESCE(live_quota.reset_at, 0) - COALESCE(excluded.reset_at, 0)) > 60000
                 OR excluded.used_at_fetch + excluded.remaining
                    <= live_quota.used_at_fetch + live_quota.remaining",
         )
@@ -1927,6 +1928,36 @@ mod tests {
         };
         store.save_live("serpapi-1", "m", &expired).await.unwrap();
         assert!(store.load_live("serpapi-1").await.unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn late_reply_with_a_drifted_reset_keeps_the_lower_reading() {
+        let path = std::env::temp_dir().join(format!("fetchira_drift_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(path.to_str().unwrap()).await.unwrap();
+        let at = Utc::now().timestamp_millis() + 3_600_000;
+        let bal = LiveBalance {
+            remaining: 0,
+            total: 1000,
+            usd: None,
+            reset_at: Some(at),
+        };
+        store
+            .save_reply_live("openalex-1", "d", &bal)
+            .await
+            .unwrap();
+        let late = LiveBalance {
+            remaining: 1,
+            reset_at: Some(at + 300),
+            ..bal
+        };
+        store
+            .save_reply_live("openalex-1", "d", &late)
+            .await
+            .unwrap();
+        let snap = store.load_live("openalex-1").await.unwrap().unwrap();
+        assert_eq!(snap.remaining, 0);
         let _ = std::fs::remove_file(&path);
     }
 
