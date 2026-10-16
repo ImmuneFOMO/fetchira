@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.17](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.16...v0.1.17) - 2026-10-16
+
+### Added
+
+- *(hosted)* offer dashboard logins for api-key balances
+- *(langsearch)* read the daily allowance through a dashboard login
+- *(keenable)* read the live balance through a console login
+- *(ui)* offer login for live balance on api-key accounts
+- *(tinyfish)* read the search pool live
+- *(octen)* read balance through a dashboard login
+- *(keenable)* track the keyless hourly limit from headers
+- *(tinyfish)* read live daily usage
+- *(openalex)* read live budget from rate-limit headers
+- *(nimble)* read live quota from account details
+- *(providers)* add reset dates to live balances
+- *(router)* show rate-limited providers as unmetered
+- *(router)* cache live limits and route on them
+- *(providers)* rank default order by benchmarks
+- *(providers)* add browserless
+- *(providers)* add hyperbrowser
+- *(providers)* add zenrows
+- *(providers)* add scrapingant
+- *(providers)* add langsearch
+- *(providers)* add serpapi
+- *(providers)* add nimble
+- *(providers)* add octen
+- *(providers)* add you
+- *(providers)* add linkup
+- *(providers)* add tinyfish
+- *(providers)* add gdelt
+- *(providers)* add openalex
+- *(providers)* add jina
+- *(providers)* add keenable
+- *(providers)* support keyless api providers
+- update demo video
+
+### Fixed
+
+- *(update)* retry spawns that hit a busy text file
+- *(ui)* hosted shows the estimate hint without a login prompt
+- *(providers)* read timeouts, nimble depth text, linkup sources
+- *(ui)* keyless accounts in onboarding, top bar and setup picker
+- *(router)* keyless 401s and drifting live windows
+- *(hyperbrowser)* free credits are a one-time grant
+- *(ui)* badge keyless accounts
+- *(providers)* bench spent langsearch and scrapingant keys
+- *(tavily)* count paygo credits in the live balance
+- *(usage)* clean up all account rows on delete and rename
+- *(cli)* show reset hours and research periods
+- *(ui)* drop a pooled dollar figure when an account has none
+- *(providers)* tighten recency and domain niche mapping
+- *(tavily)* treat plan and key limits as spent quota
+- *(parallel)* send the niche natively and wait out task runs
+- *(tavily)* filter recency and topics on every search
+- *(hosted)* encrypt api keys before the first save
+- *(router)* bench accounts whose api key is rejected
+- *(ui)* test the selected account
+- *(hosted)* show key badges and free tiers accurately
+
+### Other
+
+- show the provider count and tool-list cost
+- *(providers)* share the domain filter builder
+- *(providers)* share the snippet helper
+- *(router)* harden re-read timing checks
+- tidy review nits
+- tidy comments
+- *(hosted)* reuse the dashboard provider tables
+
 ## [0.1.16](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.15...v0.1.16) - 2026-09-15
 
 ### Added
