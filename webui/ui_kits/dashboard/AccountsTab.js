@@ -956,7 +956,7 @@ function AccountRow({
       fontSize: 10,
       color: 'var(--text-faint)'
     }
-  }, "\u2248 estimate \xB7 log in for live balance"))), /*#__PURE__*/React.createElement("td", {
+  }, "\u2248 estimate", !window.fxHosted && ' · log in for live balance'))), /*#__PURE__*/React.createElement("td", {
     style: td
   }, /*#__PURE__*/React.createElement(Badge, {
     tone: "neutral",

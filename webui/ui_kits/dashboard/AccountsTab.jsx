@@ -352,7 +352,7 @@ function AccountRow({ r }) {
             <React.Fragment>
               <QuotaMeter used={r.used} quota={r.quota} variant="bar" size="sm" showValues={false} state={needsLogin ? 'off' : undefined} style={{ marginBottom: 4 }} />
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-lo)' }}>{needsLogin ? '—' : (r.quota - r.used).toLocaleString()} <span style={{ color: 'var(--text-faint)' }}>/ {r.quota.toLocaleString()}</span></span>
-              {r.balanceSession && !r.loggedIn && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>≈ estimate · log in for live balance</div>}
+              {r.balanceSession && !r.loggedIn && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>≈ estimate{!window.fxHosted && ' · log in for live balance'}</div>}
             </React.Fragment>
           )}
         </td>
