@@ -1,6 +1,7 @@
 //! Research niche knobs (topic/recency/domains), mapped to native filters or folded into the query.
 
 use chrono::{Duration, Utc};
+use serde_json::{json, Value};
 
 use super::Input;
 
@@ -76,6 +77,20 @@ pub fn sites(input: &Input) -> String {
         q.push_str(&format!(" -site:{d}"));
     }
     q
+}
+
+/// `domains` as include/exclude lists under a backend's own keys, each set only when non-empty.
+pub fn domain_filter(b: &mut Value, input: &Input, inc_key: &str, exc_key: &str) {
+    let Some(domains) = &input.domains else {
+        return;
+    };
+    let (inc, exc) = split_domains(domains);
+    if !inc.is_empty() {
+        b[inc_key] = json!(inc);
+    }
+    if !exc.is_empty() {
+        b[exc_key] = json!(exc);
+    }
 }
 
 /// Bake a topic hint + `recency` into the query, for backends with no native filter for them.

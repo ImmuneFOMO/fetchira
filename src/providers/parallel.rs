@@ -89,15 +89,9 @@ fn research_body(input: &Input) -> Result<Value> {
 }
 
 fn source_policy(input: &Input) -> Option<Value> {
-    let (inc, exc) = super::niche::split_domains(input.domains.as_deref()?);
     let mut sp = json!({});
-    if !inc.is_empty() {
-        sp["include_domains"] = json!(inc);
-    }
-    if !exc.is_empty() {
-        sp["exclude_domains"] = json!(exc);
-    }
-    Some(sp)
+    super::niche::domain_filter(&mut sp, input, "include_domains", "exclude_domains");
+    input.domains.is_some().then_some(sp)
 }
 
 fn processor(input: &Input) -> &'static str {

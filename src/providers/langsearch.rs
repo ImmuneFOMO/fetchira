@@ -91,15 +91,7 @@ fn body(input: &Input) -> Result<Value> {
     if let Some(f) = input.recency.as_deref().and_then(freshness) {
         b["freshness"] = json!(f);
     }
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        if !inc.is_empty() {
-            b["includeDomains"] = json!(inc);
-        }
-        if !exc.is_empty() {
-            b["excludeDomains"] = json!(exc);
-        }
-    }
+    niche::domain_filter(&mut b, input, "includeDomains", "excludeDomains");
     Ok(b)
 }
 

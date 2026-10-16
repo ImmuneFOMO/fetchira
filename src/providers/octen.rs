@@ -61,15 +61,7 @@ fn build_req(input: &Input) -> Result<(&'static str, Value, i64)> {
         "count": input.results(),
         "highlight": { "enable": true, "max_tokens": 200 },
     });
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        if !inc.is_empty() {
-            b["include_domains"] = json!(inc);
-        }
-        if !exc.is_empty() {
-            b["exclude_domains"] = json!(exc);
-        }
-    }
+    niche::domain_filter(&mut b, input, "include_domains", "exclude_domains");
     match input.recency.as_deref() {
         Some(r @ ("day" | "week" | "month" | "year")) => b["time_range"] = json!(r),
         // A date-only start_time is a 400.

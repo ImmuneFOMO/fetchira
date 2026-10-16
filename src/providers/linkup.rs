@@ -72,15 +72,7 @@ fn filters(b: &mut Value, input: &Input) {
     if let Some(d) = input.recency.as_deref().and_then(niche::recency_date) {
         b["fromDate"] = json!(d);
     }
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        if !inc.is_empty() {
-            b["includeDomains"] = json!(inc);
-        }
-        if !exc.is_empty() {
-            b["excludeDomains"] = json!(exc);
-        }
-    }
+    niche::domain_filter(b, input, "includeDomains", "excludeDomains");
 }
 
 // `content` is multi-line markdown up to several KB, and titles keep raw HTML entities.

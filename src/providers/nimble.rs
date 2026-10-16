@@ -65,15 +65,7 @@ fn body(input: &Input) -> Result<Value> {
         }
         None => {}
     }
-    if let Some(domains) = &input.domains {
-        let (inc, exc) = niche::split_domains(domains);
-        if !inc.is_empty() {
-            b["include_domains"] = json!(inc);
-        }
-        if !exc.is_empty() {
-            b["exclude_domains"] = json!(exc);
-        }
-    }
+    niche::domain_filter(&mut b, input, "include_domains", "exclude_domains");
     Ok(b)
 }
 
