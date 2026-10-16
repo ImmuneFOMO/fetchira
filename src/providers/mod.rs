@@ -355,6 +355,7 @@ impl ProviderKind {
             | ProviderKind::You
             | ProviderKind::Octen
             | ProviderKind::Nimble
+            | ProviderKind::Hyperbrowser
             | ProviderKind::Jina => Reset::Once,
             ProviderKind::Openalex
             | ProviderKind::Gdelt
@@ -512,7 +513,7 @@ impl ProviderKind {
             ProviderKind::Langsearch => "free · daily token allowance, resets 00:00 UTC",
             ProviderKind::Scrapingant => "10,000 credits / month · JS render 10 per read",
             ProviderKind::Zenrows => "5,000 credits / month · JS render 5 per read",
-            ProviderKind::Hyperbrowser => "5,000 credits / month",
+            ProviderKind::Hyperbrowser => "5,000 credits · one-time",
             ProviderKind::Browserless => "1,000 units / month · 2 concurrent",
             _ => "",
         }

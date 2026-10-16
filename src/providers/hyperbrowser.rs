@@ -69,12 +69,14 @@ fn parse_balance(v: &Value, me: &Value) -> Result<LiveBalance> {
     let remaining = v["remaining"]
         .as_i64()
         .ok_or(Error::BadResponse("hyperbrowser"))?;
+    let team = &me["user"]["personalTeam"];
     Ok(LiveBalance {
         remaining,
         total: v["limit"].as_i64().unwrap_or(remaining),
         usd: None,
-        reset_at: me["user"]["personalTeam"]["billingEnd"]
+        reset_at: team["billingEnd"]
             .as_str()
+            .filter(|_| team["priceID"].as_str().is_some_and(|p| p != "free"))
             .and_then(iso_ms),
     })
 }
@@ -112,7 +114,7 @@ mod tests {
 
     #[test]
     fn parses_credit_info() {
-        let me = json!({"user": {"personalTeam": {"billingEnd": "2026-11-07T00:00:00.000Z"}}});
+        let me = json!({"user": {"personalTeam": {"billingEnd": "2026-11-07T00:00:00.000Z", "priceID": "startup"}}});
         let b =
             parse_balance(&json!({"usage": 27, "limit": 5000, "remaining": 4973}), &me).unwrap();
         assert_eq!(
@@ -120,6 +122,14 @@ mod tests {
             (4973, 5000, Some(1_794_009_600_000))
         );
         assert!(parse_balance(&json!({"error": "NOT AUTHENTICATED"}), &me).is_err());
+    }
+
+    #[test]
+    fn free_credits_never_reset() {
+        let me = json!({"user": {"personalTeam": {"billingEnd": "2026-11-07T00:00:00.000Z", "priceID": "free"}}});
+        let b =
+            parse_balance(&json!({"usage": 27, "limit": 5000, "remaining": 4973}), &me).unwrap();
+        assert_eq!((b.remaining, b.total, b.reset_at), (4973, 5000, None));
     }
 
     #[tokio::test]
