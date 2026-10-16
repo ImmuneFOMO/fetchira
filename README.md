@@ -6,6 +6,15 @@ Web search, page reading, deep research and image generation through one router.
 CLI or connect your agent through MCP. Bring an API key or a supported web session;
 Fetchira routes requests across your configured accounts and providers.
 
+![One tool list for every provider](docs/providers.png)
+
+Fetchira covers 24 providers, 21 through APIs and 3 through browser sessions, behind six MCP
+tools. Connected one by one, the 17 providers that publish an official MCP server add about
+95k tokens of tool definitions to every request, a median of 3.7k per server; the whole
+Fetchira tool list is about 2.7k. One router picks the account with quota left, fails over on
+errors and keeps every provider's limit in one place. Provider names and logos belong to their
+respective owners.
+
 ## Start locally
 
 Install on macOS with Homebrew:
