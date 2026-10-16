@@ -176,10 +176,11 @@ async fn upgrade_with_brew() -> anyhow::Result<Outcome> {
 async fn run_brew_upgrade(brew: &Path, binary: &Path) -> anyhow::Result<Outcome> {
     let output = tokio::time::timeout(
         Duration::from_secs(600),
-        tokio::process::Command::new(brew)
-            .args(["upgrade", "ImmuneFOMO/tap/fetchira"])
-            .kill_on_drop(true)
-            .output(),
+        output_retrying(
+            tokio::process::Command::new(brew)
+                .args(["upgrade", "ImmuneFOMO/tap/fetchira"])
+                .kill_on_drop(true),
+        ),
     )
     .await
     .context("Homebrew update timed out after 10 minutes")?
@@ -191,10 +192,11 @@ async fn run_brew_upgrade(brew: &Path, binary: &Path) -> anyhow::Result<Outcome>
     );
     let checked = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new(binary)
-            .arg("--version")
-            .kill_on_drop(true)
-            .output(),
+        output_retrying(
+            tokio::process::Command::new(binary)
+                .arg("--version")
+                .kill_on_drop(true),
+        ),
     )
     .await
     .context("updated Homebrew binary did not respond")??;
@@ -610,12 +612,13 @@ async fn launch_check(
     std::fs::create_dir_all(home)?;
     let output = tokio::time::timeout(
         timeout,
-        tokio::process::Command::new(bin)
-            .arg("--version")
-            .env("FETCHIRA_HOME", home)
-            .current_dir(cwd)
-            .kill_on_drop(true)
-            .output(),
+        output_retrying(
+            tokio::process::Command::new(bin)
+                .arg("--version")
+                .env("FETCHIRA_HOME", home)
+                .current_dir(cwd)
+                .kill_on_drop(true),
+        ),
     )
     .await
     .with_context(|| format!("downloaded binary did not finish `--version` within {timeout:?}"))?
@@ -639,6 +642,21 @@ async fn launch_check(
             format!(": {detail}")
         }
     );
+}
+
+/// A child forked elsewhere inherits a just-written executable's write fd until it execs (ETXTBSY).
+async fn output_retrying(
+    cmd: &mut tokio::process::Command,
+) -> std::io::Result<std::process::Output> {
+    for _ in 0..4 {
+        match cmd.output().await {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            output => return output,
+        }
+    }
+    cmd.output().await
 }
 
 fn verify_sha256(bytes: &[u8], want_line: &str) -> anyhow::Result<()> {
