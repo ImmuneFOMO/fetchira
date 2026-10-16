@@ -49,9 +49,13 @@ fn slash() -> String {
 /// `x-statsig-id` is not a cookie — it's generated per request in `providers::grok_web`.)
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default)]
     pub cookies: Vec<Cookie>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// localStorage entries, for logins that keep their session there instead of in a cookie.
+    #[serde(default)]
+    pub storage: BTreeMap<String, String>,
 }
 
 /// Parse a stored session, accepting both the new `{cookies, headers}` object and the
@@ -61,7 +65,7 @@ pub fn parse_session(raw: &str) -> Session {
         .or_else(|_| {
             serde_json::from_str::<Vec<Cookie>>(raw).map(|cookies| Session {
                 cookies,
-                headers: BTreeMap::new(),
+                ..Default::default()
             })
         })
         .unwrap_or_default()
@@ -292,6 +296,16 @@ fn login_target(kind: ProviderKind) -> Result<LoginTarget> {
             "x_apt_session_code_v2", // httpOnly session cookie on .octen.ai, set at sign-in
             None,
         ),
+        // Supabase keeps the session in localStorage, so there is no auth cookie to wait for.
+        ProviderKind::Keenable => (
+            "https://app.keenable.ai/console",
+            "keenable.ai",
+            "",
+            Some(
+                "(()=>{try{return!!localStorage.getItem('sb-caqmfcgrdovyjdhfnwzw-auth-token')}\
+                 catch(e){return false}})()",
+            ),
+        ),
         other => return Err(Error::Unsupported(other.as_str())),
     })
 }
@@ -303,6 +317,22 @@ fn companion_domains(kind: ProviderKind) -> &'static [&'static str] {
     match kind {
         ProviderKind::GrokWeb => &["x.ai", "accounts.x.ai"],
         _ => &[],
+    }
+}
+
+/// localStorage keys that hold the login when it sets no auth cookie.
+fn storage_keys(kind: ProviderKind) -> &'static [&'static str] {
+    match kind {
+        ProviderKind::Keenable => &[crate::providers::keenable::STORAGE_KEY],
+        _ => &[],
+    }
+}
+
+/// Whether the session carries what `kind` logs in with: its localStorage keys, else cookies.
+pub fn has_login(kind: ProviderKind, sess: &Session) -> bool {
+    match storage_keys(kind) {
+        [] => !sess.cookies.is_empty(),
+        keys => keys.iter().all(|k| sess.storage.contains_key(*k)),
     }
 }
 
@@ -354,7 +384,7 @@ pub async fn login(
     browser: Option<String>,
     seed: Option<&[Cookie]>,
 ) -> Result<Session> {
-    let candidates = browser_candidates(browser.as_deref());
+    let mut candidates = browser_candidates(browser.as_deref());
     if candidates.is_empty() {
         return Err(Error::Config(
             "no Chrome/Chromium or Firefox found — install one, or attach a session manually \
@@ -364,12 +394,24 @@ pub async fn login(
     }
     let (url, domain, auth, check) = login_target(kind)?;
     let extra = companion_domains(kind);
+    let keys = storage_keys(kind);
+    if !keys.is_empty() {
+        candidates.retain(|b| matches!(b.kind, BrowserKind::Chromium));
+        if candidates.is_empty() {
+            return Err(Error::Config(format!(
+                "{} login needs Chrome/Chromium: its session lives in localStorage, which \
+                 Firefox capture can't read",
+                kind.as_str()
+            )));
+        }
+    }
     let mut last_err = None;
     for browser in candidates {
         // Empty profile unless we are seeding cookies (grok MFA re-login). Wiping would drop
-        // Chrome's iCloud Keychain passkey permission from the previous attempt.
+        // Chrome's iCloud Keychain passkey permission from the previous attempt. Storage logins
+        // always start empty: an old profile would refresh a token fetchira already rotated.
         let profile = profile_dir(home, browser.kind.tag(), label);
-        if seed.map(|c| c.is_empty()).unwrap_or(true) {
+        if !keys.is_empty() || seed.map(|c| c.is_empty()).unwrap_or(true) {
             let _ = std::fs::remove_dir_all(&profile);
         }
         let fut = async {
@@ -383,6 +425,7 @@ pub async fn login(
                         extra,
                         auth,
                         check,
+                        keys,
                         seed,
                     )
                     .await
@@ -420,6 +463,7 @@ async fn capture_chromium(
     extra: &[&str],
     auth: &str,
     login_check: Option<&str>,
+    keys: &[&str],
     seed: Option<&[Cookie]>,
 ) -> Result<Session> {
     // A free ephemeral port — 9222 collides with any other Chrome already exposing a debug port
@@ -465,7 +509,7 @@ async fn capture_chromium(
             "Unlock this Mac and complete Touch ID in the Fetchira Chrome window",
         );
     }
-    let session = capture_login(port, domain, extra, auth, login_check).await;
+    let session = capture_login(port, domain, extra, auth, login_check, keys).await;
     let _ = child.kill().await;
     session
 }
@@ -555,6 +599,7 @@ async fn capture_login(
     extra: &[&str],
     auth: &str,
     login_check: Option<&str>,
+    keys: &[&str],
 ) -> Result<Session> {
     loop {
         let ws_url = wait_for_page(port).await?;
@@ -591,7 +636,15 @@ async fn capture_login(
         // Capture first (on the stable signed-in page), then swap the page for our confirmation so
         // the user isn't left staring at the provider UI while the window closes.
         match capture(&mut src, domain, extra, auth).await {
-            Ok(session) => {
+            Ok(mut session) => {
+                if !keys.is_empty() {
+                    // The post-login redirect can drop the page context mid-read; reconnect.
+                    let Ok(storage) = src.storage(keys).await else {
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    };
+                    session.storage = storage;
+                }
                 show_done(&mut src).await;
                 // Let the success state register before Chrome closes; short enough to still feel
                 // immediate, long enough that the user sees the verification completed.
@@ -778,9 +831,10 @@ async fn capture<S: CookieSource>(
                 scoped.len()
             );
         }
-        if scoped
-            .iter()
-            .any(|c| is_auth(c, auth) || is_auth(c, &chunk))
+        if auth.is_empty()
+            || scoped
+                .iter()
+                .any(|c| is_auth(c, auth) || is_auth(c, &chunk))
         {
             break scoped;
         }
@@ -843,7 +897,7 @@ async fn capture<S: CookieSource>(
     }
     Ok(Session {
         cookies: best,
-        headers: BTreeMap::new(),
+        ..Default::default()
     })
 }
 
@@ -851,6 +905,32 @@ struct Cdp {
     ws: Ws,
     id: u64,
     port: u16,
+}
+
+impl Cdp {
+    /// The page's localStorage values for `keys`; a missing one means the login isn't there.
+    async fn storage(&mut self, keys: &[&str]) -> Result<BTreeMap<String, String>> {
+        self.id += 1;
+        let js = format!(
+            "Object.fromEntries({}.map(k=>[k,localStorage.getItem(k)]))",
+            json!(keys)
+        );
+        let res = send_cmd(
+            &mut self.ws,
+            self.id,
+            "Runtime.evaluate",
+            json!({ "expression": js, "returnByValue": true }),
+        )
+        .await?;
+        let vals: BTreeMap<String, Option<String>> =
+            serde_json::from_value(res["result"]["value"].clone())?;
+        vals.into_iter()
+            .map(|(k, v)| {
+                v.map(|v| (k, v))
+                    .ok_or(Error::BadResponse("login not found in localStorage"))
+            })
+            .collect()
+    }
 }
 
 impl CookieSource for Cdp {
@@ -1097,6 +1177,29 @@ mod tests {
     }
 
     #[test]
+    fn session_round_trips_local_storage() {
+        let sess =
+            parse_session(r#"{"cookies":[],"headers":{},"storage":{"k":"{\"expires_at\":1}"}}"#);
+        assert_eq!(sess.storage["k"], r#"{"expires_at":1}"#);
+        let raw = serde_json::to_string(&sess).unwrap();
+        assert_eq!(parse_session(&raw).storage, sess.storage);
+        assert!(parse_session("[]").storage.is_empty());
+        assert_eq!(parse_session(r#"{"storage":{"k":"v"}}"#).storage["k"], "v");
+    }
+
+    #[test]
+    fn storage_logins_check_the_key_they_capture() {
+        use crate::providers::keenable;
+        let guard = |kind, key: &str| {
+            let (_, _, auth, check) = login_target(kind).unwrap();
+            assert!(auth.is_empty());
+            assert!(check.unwrap_or_default().contains(key));
+            assert_eq!(storage_keys(kind), &[key]);
+        };
+        guard(ProviderKind::Keenable, keenable::STORAGE_KEY);
+    }
+
+    #[test]
     fn grok_mfa_script_retries_try_again() {
         assert!(CLICK_GROK_VERIFY.contains("Try again"));
         assert!(CLICK_GROK_VERIFY.contains("setInterval"));
@@ -1191,6 +1294,23 @@ mod tests {
             .cookies
             .iter()
             .any(|c| c.domain == ".x.ai" && c.value == tok));
+    }
+
+    #[tokio::test]
+    async fn capture_without_an_auth_cookie_returns_the_scoped_cookies() {
+        let mut src = Script {
+            grok: vec![ck("JSESSIONID", "x", "grok.com")],
+            xai: Vec::new(),
+        };
+        let sess = timeout(
+            Duration::from_secs(3),
+            capture(&mut src, "grok.com", &[], ""),
+        )
+        .await
+        .expect("no auth cookie to wait for")
+        .unwrap();
+        assert_eq!(sess.cookies.len(), 1);
+        assert_eq!(sess.cookies[0].name, "JSESSIONID");
     }
 
     #[test]

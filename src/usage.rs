@@ -881,6 +881,14 @@ impl Store {
         Ok(Some(stored))
     }
 
+    pub async fn delete_session(&self, label: &str) -> Result<()> {
+        sqlx::query("DELETE FROM web_session WHERE label = ?")
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Record the account identity (email) captured at login — for the dashboard + dup detection.
     pub async fn set_identity(&self, label: &str, identity: &str) -> Result<()> {
         sqlx::query("UPDATE web_session SET identity = ? WHERE label = ?")

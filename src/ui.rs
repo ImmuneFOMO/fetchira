@@ -3,7 +3,7 @@
 //! browser. Loopback-only, token + Host (+ Origin on writes) guarded. Never runs unless asked
 //! (explicit `ui`, or bare `fetchira` from a TTY) — the MCP stdio server is untouched.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,7 +39,6 @@ struct AcctMeta {
     kind: ProviderKind,
     has_key: bool,
     is_web: bool,
-    logged_in: bool,
     /// Configured proxy intent ("pool" | url | absent → direct), as opposed to the resolved sticky
     /// URL the router routes through — so the dashboard shows and edits the setting, not the pick.
     proxy: Option<String>,
@@ -220,15 +219,12 @@ async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
     let cfg = cli::load_or_empty(home)?;
     let mut meta = HashMap::new();
     for a in &cfg.accounts {
-        let logged_in = (a.provider.is_web() || a.provider.balance_session())
-            && store.load_session(&a.label).await?.is_some();
         meta.insert(
             a.label.clone(),
             AcctMeta {
                 kind: a.provider,
                 has_key: a.api_key.is_some(),
                 is_web: a.provider.is_web(),
-                logged_in,
                 proxy: a.proxy.clone(),
             },
         );
@@ -1458,6 +1454,14 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
 
     // Accounts table + status counts for the summary pills.
     let idents = store.all_identities().await.unwrap_or_default();
+    // Read per render: the router drops a dead dashboard session between rebuilds.
+    let mut logged_in = HashSet::new();
+    for (label, m) in &inner.meta {
+        if m.kind.holds_session(m.has_key) && matches!(store.load_session(label).await, Ok(Some(_)))
+        {
+            logged_in.insert(label.as_str());
+        }
+    }
     let (mut healthy, mut needs_login, mut exhausted) = (0i64, 0i64, 0i64);
     let accounts: Vec<Value> = mains
         .iter()
@@ -1465,7 +1469,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
             let m = inner.meta.get(&v.label);
             let web = m.map(|x| x.is_web).unwrap_or(false);
             let key = m.map(|x| x.has_key).unwrap_or(false);
-            let logged = m.map(|x| x.logged_in).unwrap_or(false);
+            let logged = logged_in.contains(v.label.as_str());
             let status = status_of(v.exhausted, web, logged);
             match status {
                 "exhausted" => exhausted += 1,
@@ -1483,7 +1487,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
                 "key": key,
                 "web": web,
                 "loggedIn": logged,
-                "balanceSession": m.is_some_and(|x| x.kind.balance_session()),
+                "balanceSession": m.is_some_and(|x| x.kind.balance_session(x.has_key)),
                 "email": idents.get(v.label.as_str()),
                 "pending": v.pending,
                 "unmetered": v.unmetered,
@@ -1502,9 +1506,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         })
         .collect();
 
-    let groups = overview_groups(&mains, |label| {
-        inner.meta.get(label).is_some_and(|m| m.logged_in)
-    });
+    let groups = overview_groups(&mains, |label| logged_in.contains(label));
 
     // Provider health: quota state + last-seen time from the route log.
     let health: Vec<Value> = mains
@@ -1512,7 +1514,7 @@ async fn build_state(inner: &Inner, store: &Store) -> crate::Result<Value> {
         .map(|v| {
             let m = inner.meta.get(&v.label);
             let web = m.map(|x| x.is_web).unwrap_or(false);
-            let logged = m.map(|x| x.logged_in).unwrap_or(false);
+            let logged = logged_in.contains(v.label.as_str());
             let state = status_of(v.exhausted, web, logged);
             let last_success = last_seen
                 .get(v.label.as_str())
@@ -2397,7 +2399,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn keyed_balance_session_account_stays_healthy_without_login() {
+        let _guard = crate::secrets::env_lock();
         let home = std::env::temp_dir().join(format!(
             "fetchira-ui-balance-session-{}-{}",
             std::process::id(),
@@ -2409,19 +2413,42 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         fs::write(
             home.join("fetchira.toml"),
-            "[[account]]\nprovider = \"octen\"\nlabel = \"octen-1\"\napi_key = \"k\"\n",
+            "[[account]]\nprovider = \"octen\"\nlabel = \"octen-1\"\napi_key = \"k\"\n\
+             [[account]]\nprovider = \"keenable\"\nlabel = \"keenable-1\"\n\
+             [[account]]\nprovider = \"keenable\"\nlabel = \"keenable-2\"\napi_key = \"k\"\n",
         )
         .unwrap();
         let store = Store::open(home.join("usage.db").to_str().unwrap())
             .await
             .unwrap();
         let inner = build_inner(&home, &store).await.unwrap();
+        let row = |state: &Value, label: &str| {
+            state["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["label"] == label)
+                .unwrap()
+                .clone()
+        };
         let state = build_state(&inner, &store).await.unwrap();
-        let a = &state["accounts"][0];
+        let a = row(&state, "octen-1");
         assert_eq!(
             (&a["balanceSession"], &a["loggedIn"], &a["status"]),
             (&json!(true), &json!(false), &json!("healthy"))
         );
+        let keyless = row(&state, "keenable-1");
+        assert_eq!(
+            (&keyless["balanceSession"], &keyless["unmetered"]),
+            (&json!(false), &json!(true))
+        );
+        assert_eq!(row(&state, "keenable-2")["balanceSession"], json!(true));
+        store.save_session("octen-1", "octen", "[]").await.unwrap();
+        let state = build_state(&inner, &store).await.unwrap();
+        assert_eq!(row(&state, "octen-1")["loggedIn"], json!(true));
+        store.delete_session("octen-1").await.unwrap();
+        let state = build_state(&inner, &store).await.unwrap();
+        assert_eq!(row(&state, "octen-1")["loggedIn"], json!(false));
         fs::remove_dir_all(home).unwrap();
     }
 

@@ -269,7 +269,7 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
     let mut logged = std::collections::HashSet::new();
     if let Some(cfg) = &cfg {
         for a in &cfg.accounts {
-            if !(a.provider.is_web() || a.provider.balance_session())
+            if !a.provider.holds_session(a.api_key.is_some())
                 || st
                     .store
                     .load_session(&a.label)
@@ -292,12 +292,13 @@ async fn admin_state(State(st): State<HostedState>, headers: axum::http::HeaderM
             .as_ref()
             .and_then(|c| c.accounts.iter().find(|a| a.label == v.label));
         let proxy = account.and_then(|a| a.proxy.as_deref()).unwrap_or("direct");
+        let key = account.map_or(!web, |a| a.api_key.is_some());
         json!({
             "provider": v.provider, "label": v.label, "used": v.used, "quota": v.quota,
             "remaining": v.remaining, "resetWindow": window_or_period(v.window_secs, &v.period),
             "proxy": mask_proxy(proxy),
             "status": if v.exhausted { "exhausted" } else if web && !ready { "needs-login" } else { "healthy" },
-            "key": account.map_or(!web, |a| a.api_key.is_some()), "web": web, "loggedIn": ready, "balanceSession": kind.is_some_and(|p| p.balance_session()), "pending": v.pending, "unmetered": v.unmetered,
+            "key": key, "web": web, "loggedIn": ready, "balanceSession": kind.is_some_and(|p| p.balance_session(key)), "pending": v.pending, "unmetered": v.unmetered,
             "email": idents.get(v.label.as_str()),
             "limits": v.limits.as_ref().map(limits_json), "usd": v.usd
         })

@@ -35,8 +35,6 @@ pub struct Bucket {
     pub pinned: bool,
     pub dr_pinned: bool,
     pub proxy: Option<String>,
-    /// Dashboard cookie client for a `balance_session` provider's balance; `None` until login.
-    pub balance_conn: Option<wreq::Client>,
 }
 
 /// A successful call's answer plus an optional resume token (`provider:<base64-label>:opaque`).
@@ -228,16 +226,6 @@ impl Router {
                 };
                 (Conn::Api(client), key)
             };
-            let balance_conn = match acc.provider.balance_session() {
-                true => match store.load_session(&acc.label).await? {
-                    Some(raw) => {
-                        let sess = web::parse_session(&raw);
-                        web::build_client(&sess.cookies, &sess.headers, proxy_url.as_deref()).ok()
-                    }
-                    None => None,
-                },
-                false => None,
-            };
             buckets.push(Bucket {
                 quota: acc
                     .quota
@@ -252,7 +240,6 @@ impl Router {
                 key,
                 label: acc.label,
                 proxy: proxy_url,
-                balance_conn,
             });
         }
         Ok(Self {
@@ -1143,7 +1130,7 @@ impl Router {
             label.strip_prefix(b.label.as_str()),
             Some("" | "#dr" | "#search")
         );
-        if !own || !reads_balance(b) {
+        if !own || !self.reads_balance(b).await {
             return Ok(false);
         }
         // No reading can lift a pinned cap the counter already reached.
@@ -1174,22 +1161,33 @@ impl Router {
             }
             return read;
         }
+        // Checked first: a 401 below drops the session, yet the dollar figure is stale either way.
+        let reads = self.reads_balance(b).await;
         // Dashboard reads may rotate session cookies, so persist the updates.
         let main = bounded(async {
-            match &b.balance_conn {
-                // Stored cookies carry the rotations `refresh_session` saved, like the client's jar.
-                Some(wc) => match b
-                    .provider
-                    .live_balance_web(wc, &self.session_cookies(&b.label).await)
-                    .await
-                {
-                    Some((balance, updates)) => {
-                        self.refresh_session(b, &updates).await;
-                        Some(balance)
-                    }
-                    None => None,
-                },
-                None => b.provider.live_balance(&b.key, c).await,
+            if !b.provider.kind.balance_session(!b.key.is_empty()) {
+                return b.provider.live_balance(&b.key, c).await;
+            }
+            // Built per read, so a re-login and the rotations `refresh_session` saved take effect.
+            let sess = self.session(&b.label).await?;
+            let wc = web::build_client(&sess.cookies, &sess.headers, b.proxy.as_deref()).ok()?;
+            match b.provider.live_balance_web(&wc, &sess).await {
+                Ok((balance, updates)) => {
+                    self.refresh_session(b, &updates).await;
+                    Some(balance)
+                }
+                // Dropping the dead session puts the login prompt back on the dashboard.
+                Err(Error::Provider { status: 401, .. }) => {
+                    tracing::warn!(
+                        label = %b.label,
+                        "{} dashboard session expired; run `fetchira login {}`",
+                        b.provider.kind.as_str(),
+                        b.label
+                    );
+                    let _ = self.store.delete_session(&b.label).await;
+                    None
+                }
+                Err(_) => None,
             }
         });
         let (bal, dr, search) = tokio::join!(
@@ -1208,7 +1206,7 @@ impl Router {
                     .await;
             }
             // Routing keeps counting the reading down, but its dollar figure is no longer current.
-            None if reads_balance(b) => {
+            None if reads => {
                 let _ = self.store.forget_live_usd(&b.label).await;
             }
             None => {}
@@ -1224,14 +1222,25 @@ impl Router {
         bal
     }
 
-    async fn session_cookies(&self, label: &str) -> Vec<web::Cookie> {
-        match self.store.load_session(label).await {
-            Ok(Some(raw)) => web::parse_session(&raw).cookies,
-            _ => Vec::new(),
+    async fn session(&self, label: &str) -> Option<web::Session> {
+        self.store
+            .load_session(label)
+            .await
+            .ok()
+            .flatten()
+            .map(|raw| web::parse_session(&raw))
+    }
+
+    /// Whether `b`'s balance is readable now; a dashboard login counts only while it is stored.
+    async fn reads_balance(&self, b: &Bucket) -> bool {
+        let keyed = !b.key.is_empty();
+        match b.provider.kind.balance_session(keyed) {
+            true => matches!(self.store.load_session(&b.label).await, Ok(Some(_))),
+            false => matches!(b.conn, Conn::Api(_)) && b.provider.kind.has_live_balance(keyed),
         }
     }
 
-    /// Re-save rotated session cookies so polling keeps the NextAuth session alive.
+    /// Re-save rotated session cookies and storage entries so polling keeps the session alive.
     async fn refresh_session(&self, b: &Bucket, updates: &[(String, String)]) {
         if updates.is_empty() {
             return;
@@ -1247,6 +1256,10 @@ impl Router {
                     c.value = val.clone();
                     changed = true;
                 }
+            }
+            if let Some(v) = sess.storage.get_mut(name).filter(|v| *v != val) {
+                *v = val.clone();
+                changed = true;
             }
         }
         if !changed {
@@ -1641,11 +1654,6 @@ fn human_wait(wait: Duration) -> String {
     human_dur(seconds.min(i64::MAX as u64) as i64)
 }
 
-fn reads_balance(b: &Bucket) -> bool {
-    b.balance_conn.is_some()
-        || (matches!(b.conn, Conn::Api(_)) && b.provider.kind.has_live_balance(!b.key.is_empty()))
-}
-
 /// (db label, quota, pinned, reset) for a bucket+capability.
 fn budget(b: &Bucket, cap: Capability) -> (String, i64, bool, Reset) {
     if b.provider.kind.dr_budget() {
@@ -1929,7 +1937,6 @@ mod tests {
             pinned: false,
             dr_pinned: false,
             proxy: None,
-            balance_conn: None,
         };
         assert_eq!(
             budget(&bucket, Capability::Image),
@@ -1972,6 +1979,201 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn refresh_session_saves_storage_updates() {
+        let _guard = crate::secrets::env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_router_storage_{}_{}.db",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let store = Store::open(path.to_str().expect("temp path"))
+            .await
+            .expect("open store");
+        store
+            .save_session(
+                "keenable-1",
+                "keenable",
+                r#"{"cookies":[],"storage":{"k":"old"}}"#,
+            )
+            .await
+            .expect("save session");
+        let bucket = Bucket {
+            provider: Provider::new(ProviderKind::Keenable),
+            conn: Conn::Api(reqwest::Client::new()),
+            key: "k".into(),
+            label: "keenable-1".into(),
+            quota: 100,
+            reset: Reset::Monthly,
+            dr_quota: 0,
+            dr_reset: Reset::Monthly,
+            pinned: false,
+            dr_pinned: false,
+            proxy: None,
+        };
+        let router = Router::from_parts(vec![bucket], store);
+        router
+            .refresh_session(
+                &router.buckets[0],
+                &[("k".into(), "new".into()), ("sso".into(), "x".into())],
+            )
+            .await;
+        let raw = router
+            .store
+            .load_session("keenable-1")
+            .await
+            .expect("load session")
+            .expect("stored session");
+        let sess = web::parse_session(&raw);
+        assert_eq!(sess.storage.len(), 1);
+        assert_eq!(sess.storage["k"], "new");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rejected_dashboard_session_is_dropped() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _guard = crate::secrets::env_lock();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bff/organization/balance"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bff/organization/balance"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_router_dead_session_{}_{}.db",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let store = Store::open(path.to_str().expect("temp path"))
+            .await
+            .expect("open store");
+        let sess = web::Session {
+            storage: [(
+                providers::keenable::STORAGE_KEY.to_string(),
+                serde_json::json!({"access_token": "a", "expires_at": 9_999_999_999i64})
+                    .to_string(),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        store
+            .save_session(
+                "keenable-1",
+                "keenable",
+                &serde_json::to_string(&sess).expect("session json"),
+            )
+            .await
+            .expect("save session");
+        let bucket = Bucket {
+            provider: Provider::with_base(ProviderKind::Keenable, server.uri()),
+            conn: Conn::Api(reqwest::Client::new()),
+            key: "k".into(),
+            label: "keenable-1".into(),
+            quota: 100,
+            reset: Reset::Monthly,
+            dr_quota: 0,
+            dr_reset: Reset::Monthly,
+            pinned: false,
+            dr_pinned: false,
+            proxy: None,
+        };
+        let router = Router::from_parts(vec![bucket], store);
+        let stored = || async { router.store.load_session("keenable-1").await.expect("load") };
+        assert!(router
+            .fetch_live_balance(&router.buckets[0], "keenable-1")
+            .await
+            .is_none());
+        assert!(stored().await.is_some());
+        assert!(router
+            .fetch_live_balance(&router.buckets[0], "keenable-1")
+            .await
+            .is_none());
+        assert!(stored().await.is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn relogin_after_a_dropped_session_reads_with_its_cookies() {
+        use wiremock::matchers::{header_regex, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _guard = crate::secrets::env_lock();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/credit/balance"))
+            .and(header_regex("cookie", "x_apt_session_code_v2=new"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"data": {"credit_balance": "4.97"}, "code": 0}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/credit/balance"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let path = std::env::temp_dir().join(format!(
+            "fetchira_router_relogin_{}_{}.db",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let store = Store::open(path.to_str().expect("temp path"))
+            .await
+            .expect("open store");
+        let session = |code: &str| {
+            serde_json::json!({"cookies": [
+                {"name": "x_apt_session_code_v2", "value": code, "domain": "127.0.0.1"},
+                {"name": "x_apt_csrf_token_v2", "value": "t", "domain": "127.0.0.1"}
+            ]})
+            .to_string()
+        };
+        store
+            .save_session("octen-1", "octen", &session("old"))
+            .await
+            .expect("save session");
+        let bucket = Bucket {
+            provider: Provider::with_base(ProviderKind::Octen, server.uri()),
+            conn: Conn::Api(reqwest::Client::new()),
+            key: "k".into(),
+            label: "octen-1".into(),
+            quota: 100,
+            reset: Reset::Monthly,
+            dr_quota: 0,
+            dr_reset: Reset::Monthly,
+            pinned: false,
+            dr_pinned: false,
+            proxy: None,
+        };
+        let router = Router::from_parts(vec![bucket], store);
+        let read = || router.fetch_live_balance(&router.buckets[0], "octen-1");
+        assert!(read().await.is_none());
+        assert!(router
+            .store
+            .load_session("octen-1")
+            .await
+            .expect("load")
+            .is_none());
+        router
+            .store
+            .save_session("octen-1", "octen", &session("new"))
+            .await
+            .expect("save session");
+        assert_eq!(read().await.and_then(|b| b.usd), Some(4.97));
+    }
+
+    #[tokio::test]
     async fn http_only_limit_miss_stays_uncached_for_browser_fallback() {
         let path = std::env::temp_dir().join(format!(
             "fetchira_router_limits_{}_{}.db",
@@ -1993,7 +2195,6 @@ mod tests {
             pinned: false,
             dr_pinned: false,
             proxy: None,
-            balance_conn: None,
         };
         let router = Router::from_parts(vec![bucket], store);
         assert!(router

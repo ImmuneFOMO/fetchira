@@ -17,7 +17,7 @@ mod grok_statsig;
 mod grok_web;
 mod hyperbrowser;
 mod jina;
-mod keenable;
+pub(crate) mod keenable;
 mod langsearch;
 mod linkup;
 pub(crate) mod niche;
@@ -276,11 +276,17 @@ impl ProviderKind {
     }
 
     /// Api-key providers whose live balance needs a `fetchira login` dashboard session.
-    pub fn balance_session(self) -> bool {
-        matches!(
-            self,
-            ProviderKind::Parallel | ProviderKind::Exa | ProviderKind::Octen
-        )
+    pub fn balance_session(self, keyed: bool) -> bool {
+        match self {
+            ProviderKind::Parallel | ProviderKind::Exa | ProviderKind::Octen => true,
+            ProviderKind::Keenable => keyed,
+            _ => false,
+        }
+    }
+
+    /// Web providers, and api-key providers whose balance needs a dashboard login, keep a session.
+    pub fn holds_session(self, keyed: bool) -> bool {
+        self.is_web() || self.balance_session(keyed)
     }
 
     /// No quota to count against, only rate limits (reactive 429 cooldowns).
@@ -1185,17 +1191,21 @@ impl Provider {
         }
     }
 
-    /// Live balance for a `balance_session` provider via its dashboard cookies; best-effort.
+    /// Live balance for a `balance_session` provider via its dashboard session; a 401 means the
+    /// session is dead.
     pub async fn live_balance_web(
         &self,
         client: &wreq::Client,
-        cookies: &[crate::web::Cookie],
-    ) -> Option<(LiveBalance, Vec<(String, String)>)> {
+        session: &crate::web::Session,
+    ) -> Result<(LiveBalance, Vec<(String, String)>)> {
         match self.kind {
-            ProviderKind::Parallel => parallel::balance(client).await.ok(),
-            ProviderKind::Exa => exa::balance(client).await.ok(),
-            ProviderKind::Octen => octen::balance(&self.base, client, cookies).await.ok(),
-            _ => None,
+            ProviderKind::Parallel => parallel::balance(client).await,
+            ProviderKind::Exa => exa::balance(client).await,
+            ProviderKind::Octen => octen::balance(&self.base, client, &session.cookies).await,
+            ProviderKind::Keenable => {
+                keenable::balance(&self.base, keenable::AUTH_BASE, client, &session.storage).await
+            }
+            other => Err(Error::Unsupported(other.as_str())),
         }
     }
 

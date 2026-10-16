@@ -21,7 +21,6 @@ fn bucket(kind: ProviderKind, base: &str, label: &str) -> Bucket {
         pinned: true,
         dr_pinned: true,
         proxy: None,
-        balance_conn: None,
     }
 }
 
@@ -2097,10 +2096,7 @@ async fn octen_balance_reads_through_dashboard_session() {
         .save_session("octen-1", "octen", &session.to_string())
         .await
         .unwrap();
-    let b = Bucket {
-        balance_conn: Some(wreq::Client::new()),
-        ..unpinned(ProviderKind::Octen, &dash.uri(), "octen-1")
-    };
+    let b = unpinned(ProviderKind::Octen, &dash.uri(), "octen-1");
     let views = Router::from_parts(vec![b], store)
         .usage_snapshot()
         .await

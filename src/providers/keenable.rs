@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
 use super::{check, fmt_hits, iso_ms, niche, s, Capability, Hit, Input, LiveBalance, Outcome};
@@ -133,6 +135,93 @@ async fn fetch(base: &str, key: &str, client: &reqwest::Client, input: &Input) -
     Ok(out)
 }
 
+pub(super) const AUTH_BASE: &str = "https://caqmfcgrdovyjdhfnwzw.supabase.co";
+pub(crate) const STORAGE_KEY: &str = "sb-caqmfcgrdovyjdhfnwzw-auth-token";
+// Supabase's public anon key; the console bundle hands it to every visitor.
+const ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNhcW1mY2dyZG92eWpkaGZud3p3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwMTc4NTYsImV4cCI6MjA3NTU5Mzg1Nn0.gmf-2JuDTOVL7MAEgMYczSbT1P-PI3X1WOG1SXfhkNg";
+
+/// Console-session balance, sent with the Supabase access token the console keeps in localStorage.
+pub async fn balance(
+    base: &str,
+    auth: &str,
+    client: &wreq::Client,
+    storage: &BTreeMap<String, String>,
+) -> Result<(LiveBalance, Vec<(String, String)>)> {
+    let mut sess: Value = storage
+        .get(STORAGE_KEY)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .ok_or(Error::BadResponse("keenable"))?;
+    let mut updates = Vec::new();
+    if sess["expires_at"].as_i64().unwrap_or(0) <= chrono::Utc::now().timestamp() + 60 {
+        // The rotation is saved only with a successful read; GoTrue still accepts the previous
+        // refresh token, so a lost rotation or a concurrent refresh recovers on the next read.
+        sess = read_json(
+            client
+                .post(format!("{auth}/auth/v1/token?grant_type=refresh_token"))
+                .header("apikey", ANON_KEY)
+                .header("content-type", "application/json")
+                .body(json!({ "refresh_token": sess["refresh_token"] }).to_string())
+                .send()
+                .await?,
+        )
+        .await
+        .map_err(|e| match e {
+            // GoTrue refuses a revoked or reused refresh token with 400: the login is gone.
+            Error::Provider {
+                status: 400, body, ..
+            } => Error::Provider {
+                provider: "keenable",
+                status: 401,
+                body,
+            },
+            e => e,
+        })?;
+        updates.push((STORAGE_KEY.to_string(), sess.to_string()));
+    }
+    let v = read_json(
+        client
+            .get(format!("{base}/bff/organization/balance"))
+            .bearer_auth(sess["access_token"].as_str().unwrap_or_default())
+            .send()
+            .await?,
+    )
+    .await?;
+    Ok((parse_balance(&v, chrono::Utc::now())?, updates))
+}
+
+async fn read_json(resp: wreq::Response) -> Result<Value> {
+    if resp.status().as_u16() != 200 {
+        return Err(Error::Provider {
+            provider: "keenable",
+            status: resp.status().as_u16(),
+            body: resp.text().await.unwrap_or_default(),
+        });
+    }
+    serde_json::from_str(&resp.text().await.unwrap_or_default())
+        .map_err(|_| Error::BadResponse("keenable"))
+}
+
+// The allowance renews on each monthly anniversary of the activation date.
+fn parse_balance(v: &Value, now: chrono::DateTime<chrono::Utc>) -> Result<LiveBalance> {
+    let n = |k: &str| v[k].as_f64().ok_or(Error::BadResponse("keenable"));
+    let total = n("free_credits")? + n("paid_credits")?;
+    let reset_at = v["activation_date"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(|start| {
+            (1..)
+                .filter_map(|m| start.checked_add_months(chrono::Months::new(m)))
+                .find(|d| *d > now)
+        })
+        .map(|d| d.timestamp_millis());
+    Ok(LiveBalance {
+        remaining: (total - n("charged_spendings")?).max(0.0) as i64,
+        total: total as i64,
+        usd: None,
+        reset_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +353,157 @@ mod tests {
             (live.remaining, live.total, live.reset_at),
             (999, 1000, Some(1_791_479_923_005))
         );
+    }
+
+    fn stored(expires_at: i64) -> BTreeMap<String, String> {
+        BTreeMap::from([(
+            STORAGE_KEY.to_string(),
+            json!({"access_token": "old", "refresh_token": "r1", "expires_at": expires_at})
+                .to_string(),
+        )])
+    }
+
+    fn org(activation: &str) -> Value {
+        json!({
+            "org_id": "o", "activation_date": activation, "period_days": 1,
+            "free_credits": 100000, "paid_credits": 0, "search_spendings": 9,
+            "fetch_spendings": 1, "charged_spendings": 10
+        })
+    }
+
+    fn activated_yesterday() -> (String, i64) {
+        let act = (chrono::Utc::now() - chrono::TimeDelta::days(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let renews = act.parse::<chrono::DateTime<chrono::Utc>>().unwrap() + chrono::Months::new(1);
+        (act, renews.timestamp_millis())
+    }
+
+    #[test]
+    fn month_end_activation_renews_on_each_month_end() {
+        let v = org("2026-01-31T10:00:00Z");
+        let at = |now: &str| parse_balance(&v, now.parse().unwrap()).unwrap().reset_at;
+        assert_eq!(at("2026-02-15T00:00:00Z"), iso_ms("2026-02-28T10:00:00Z"));
+        assert_eq!(at("2026-03-01T00:00:00Z"), iso_ms("2026-03-31T10:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn console_balance_renews_monthly_from_activation() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let (act, renews) = activated_yesterday();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bff/organization/balance"))
+            .and(header("authorization", "Bearer old"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(org(&act)))
+            .mount(&server)
+            .await;
+        let fresh = stored(chrono::Utc::now().timestamp() + 3600);
+        let (b, updates) = balance(&server.uri(), &server.uri(), &wreq::Client::new(), &fresh)
+            .await
+            .unwrap();
+        assert_eq!(
+            (b.remaining, b.total, b.usd, b.reset_at),
+            (99_990, 100_000, None, Some(renews))
+        );
+        assert!(updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_console_token_is_refreshed_and_saved() {
+        use wiremock::matchers::{body_json, header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rotated = json!({
+            "access_token": "new", "token_type": "bearer", "expires_in": 3600,
+            "expires_at": 9_999_999_999i64, "refresh_token": "r2", "user": {"id": "u"}
+        });
+        let (act, renews) = activated_yesterday();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/v1/token"))
+            .and(query_param("grant_type", "refresh_token"))
+            .and(header("apikey", ANON_KEY))
+            .and(body_json(json!({"refresh_token": "r1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rotated.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bff/organization/balance"))
+            .and(header("authorization", "Bearer new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(org(&act)))
+            .mount(&server)
+            .await;
+        let (b, updates) = balance(
+            &server.uri(),
+            &server.uri(),
+            &wreq::Client::new(),
+            &stored(0),
+        )
+        .await
+        .unwrap();
+        assert_eq!((b.remaining, b.reset_at), (99_990, Some(renews)));
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, STORAGE_KEY);
+        assert_eq!(
+            serde_json::from_str::<Value>(&updates[0].1).unwrap(),
+            rotated
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_refresh_is_an_expired_login() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/v1/token"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(
+                    json!({"code": 400, "error_code": "refresh_token_already_used"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let out = balance(
+            &server.uri(),
+            &server.uri(),
+            &wreq::Client::new(),
+            &stored(0),
+        )
+        .await;
+        assert!(matches!(out, Err(Error::Provider { status: 401, .. })));
+    }
+
+    #[tokio::test]
+    async fn failed_read_after_refresh_drops_the_rotation() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"access_token": "new", "refresh_token": "r2", "expires_at": 9_999_999_999i64}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bff/organization/balance"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let out = balance(
+            &server.uri(),
+            &server.uri(),
+            &wreq::Client::new(),
+            &stored(0),
+        )
+        .await;
+        assert!(matches!(out, Err(Error::Provider { status: 500, .. })));
     }
 
     #[test]

@@ -229,7 +229,7 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
             a.proxy.as_deref().unwrap_or("direct"),
         );
         if ready
-            && a.provider.balance_session()
+            && a.provider.balance_session(a.api_key.is_some())
             && !matches!(store.load_session(&a.label).await, Ok(Some(_)))
         {
             println!(
@@ -716,7 +716,7 @@ pub async fn record_identity(
 pub async fn backfill_identities(home: &Path, store: &Store) {
     let Ok(cfg) = load_or_empty(home) else { return };
     for a in &cfg.accounts {
-        if !(a.provider.is_web() || a.provider.balance_session()) {
+        if !a.provider.holds_session(a.api_key.is_some()) {
             continue;
         }
         if matches!(store.load_identity(&a.label).await, Ok(Some(_))) {
@@ -741,15 +741,27 @@ pub async fn capture_login(
         .iter()
         .find(|a| a.label == label)
         .with_context(|| format!("no account labelled '{label}'"))?;
-    if !acc.provider.is_web() && !acc.provider.balance_session() {
-        bail!("'{}' is not a web-session provider", acc.provider.as_str());
-    }
+    ensure_session_account(acc)?;
     let kind = acc.provider;
     do_login(home, &cfg, kind, label, browser).await
 }
 
+/// Web accounts, and api-key accounts whose balance needs a dashboard login, can hold a session.
+fn ensure_session_account(acc: &Account) -> anyhow::Result<()> {
+    if acc.provider.holds_session(acc.api_key.is_some()) {
+        return Ok(());
+    }
+    if acc.provider.balance_session(true) {
+        bail!(
+            "'{}' has no api key, so there is no balance to log in for",
+            acc.label
+        );
+    }
+    bail!("'{}' is not a web-session provider", acc.provider.as_str());
+}
+
 /// Validate a session JSON captured elsewhere (cookies exported from any browser) and store it
-/// for an existing web account. Returns the cookie count. Shared by the CLI and web UI.
+/// for an existing web account. Returns the cookie + storage count. Shared by the CLI and web UI.
 pub async fn set_session(home: &Path, label: &str, raw: &str) -> anyhow::Result<usize> {
     let cfg = load_or_empty(home)?;
     let acc = cfg
@@ -759,14 +771,14 @@ pub async fn set_session(home: &Path, label: &str, raw: &str) -> anyhow::Result<
         .with_context(|| {
             format!("no account labelled '{label}' — add one first with `fetchira add <provider> --label {label}`")
         })?;
-    if !acc.provider.is_web() {
-        bail!("'{}' is not a web-session provider", acc.provider.as_str());
-    }
+    ensure_session_account(acc)?;
     let session = web::parse_session(raw);
-    if session.cookies.is_empty() {
-        bail!("no cookies found — expected a cookie array or {{\"cookies\":[…]}}");
+    if !web::has_login(acc.provider, &session) {
+        bail!(
+            "no session found — expected a cookie array or {{\"cookies\":[…],\"storage\":{{…}}}}"
+        );
     }
-    let n = session.cookies.len();
+    let n = session.cookies.len() + session.storage.len();
     open_store(home, &cfg)
         .await?
         .save_session(
@@ -798,7 +810,7 @@ pub async fn session(home: &Path, mut args: impl Iterator<Item = String>) -> any
         }
     };
     let n = set_session(home, &label, &raw).await?;
-    println!("session '{label}' set ({n} cookies)");
+    println!("session '{label}' set ({n} entries)");
     Ok(())
 }
 
@@ -812,15 +824,13 @@ pub async fn login(home: &Path, who: Option<String>) -> anyhow::Result<()> {
         .find(|a| a.label == who)
         .or_else(|| {
             cfg.accounts.iter().find(|a| {
-                (a.provider.is_web() || a.provider.balance_session()) && a.provider.as_str() == who
+                a.provider.holds_session(a.api_key.is_some()) && a.provider.as_str() == who
             })
         })
         .with_context(|| {
             format!("no web account matching '{who}' — add one with `fetchira add {who}`")
         })?;
-    if !acc.provider.is_web() && !acc.provider.balance_session() {
-        bail!("'{}' is not a web-session provider", acc.provider.as_str());
-    }
+    ensure_session_account(acc)?;
     do_login(home, &cfg, acc.provider, &acc.label, None).await
 }
 
@@ -863,10 +873,17 @@ async fn do_login(
         .find(|a| a.label == label)
         .and_then(|a| a.proxy.as_deref());
     record_identity(&store, kind, label, &raw, proxy).await;
-    println!(
-        "captured {} cookies; session '{label}' ready",
-        session.cookies.len()
-    );
+    if session.storage.is_empty() {
+        println!(
+            "captured {} cookies; session '{label}' ready",
+            session.cookies.len()
+        );
+    } else {
+        println!(
+            "session '{label}' ready ({} entries)",
+            session.cookies.len() + session.storage.len()
+        );
+    }
     Ok(())
 }
 
@@ -2286,7 +2303,7 @@ pub fn help() {
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
            fetchira priority [cap]      show or set the provider order per capability (search/read/deep_research/image)\n  \
-           fetchira login <provider|label>  (re)capture a browser session (web providers; exa/parallel/octen balance)\n  \
+           fetchira login <provider|label>  (re)capture a browser session (web providers; exa/parallel/octen/keenable balance)\n  \
            fetchira session <label>     attach a web session by hand (cookies JSON on stdin or --file) — for headless boxes\n  \
            fetchira remote set URL      connect stdio to hosted Fetchira [--key fk_live_*]\n  \
            fetchira remote check        verify endpoint, API key, and version compatibility\n  \
