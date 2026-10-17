@@ -4,6 +4,12 @@
 
 ## Install
 
+**npx** (macOS or Linux with Node.js)
+
+```sh
+npx -y fetchira
+```
+
 **Mac**
 
 ```sh
@@ -22,7 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/ImmuneFOMO/fetchira/main/install.sh
 cargo install --locked --git https://github.com/ImmuneFOMO/fetchira
 ```
 
-`curl | sh` installs the available release archive into `~/.local/bin`. Run
+`npx fetchira` and `curl | sh` install the available release archive into `~/.local/bin`;
+later `npx fetchira` runs start that binary directly. Run
 `export PATH="$HOME/.local/bin:$PATH"` if the command is missing. Release targets are macOS
 arm64/x86_64 and Linux arm64/x86_64 (glibc >= 2.34); older releases may lack an arm64 archive.
 
@@ -100,7 +107,7 @@ The interactive picker installs the selected skill and, for MCP choices, registe
 in the selected clients. CLI only installs shell instructions without registering MCP.
 Restart the selected agent after installation.
 
-You can also paste the snippet for your client. Use the absolute path from `command -v fetchira` (Homebrew: `/opt/homebrew/bin/fetchira` or `/usr/local/bin/fetchira`; `curl | sh`: `$HOME/.local/bin/fetchira`; `cargo install`: `$HOME/.cargo/bin/fetchira`).
+You can also paste the snippet for your client. Use the absolute path from `command -v fetchira` (Homebrew: `/opt/homebrew/bin/fetchira` or `/usr/local/bin/fetchira`; `npx` or `curl | sh`: `$HOME/.local/bin/fetchira`; `cargo install`: `$HOME/.cargo/bin/fetchira`).
 
 ### Agent skills
 

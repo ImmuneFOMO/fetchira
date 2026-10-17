@@ -17,7 +17,13 @@ respective owners.
 
 ## Start locally
 
-Install on macOS with Homebrew:
+Install and open the dashboard with one command (macOS or Linux, needs Node.js):
+
+```sh
+npx -y fetchira
+```
+
+Or install on macOS with Homebrew:
 
 ```sh
 brew install ImmuneFOMO/tap/fetchira
