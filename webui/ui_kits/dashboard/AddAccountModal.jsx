@@ -1,7 +1,7 @@
 /* Add-account modal + guided browser-login flow.
    Key providers → POST the key. Web providers use the local CLI when hosted and the local
    browser flow otherwise. On success the dashboard refreshes. */
-const { Card, Button, Input, Select, Badge, StatusDot } = window.FetchiraDesignSystem_6526df;
+const { Card, Button, Input, Badge, StatusDot } = window.FetchiraDesignSystem_6526df;
 
 const PROVIDER_CATALOG = [
   { id: 'serper', kind: 'key', note: 'Web search API' },
@@ -30,8 +30,86 @@ function Overlay({ children, onClose }) {
 function Field({ label, children }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-lo)' }}>{label}</span>
+      <span className="fx-field-label">{label}</span>
       {children}
+    </div>
+  );
+}
+
+// Native <select> can't show logos, so the provider list is a small listbox of its own.
+function ProviderPicker({ value, options, onChange, disabled }) {
+  const [open, setOpen] = React.useState(false);
+  const [active, setActive] = React.useState(0);
+  const root = React.useRef(null);
+  const sorted = [...options.filter((o) => o.kind !== 'web'), ...options.filter((o) => o.kind === 'web')];
+  const current = sorted.find((o) => o.id === value) || sorted[0];
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => { if (!root.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', away);
+    return () => document.removeEventListener('mousedown', away);
+  }, [open]);
+  React.useEffect(() => {
+    const el = open && document.getElementById(`pp-opt-${active}`);
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }, [open, active]);
+
+  const show = () => { setActive(Math.max(0, sorted.indexOf(current))); setOpen(true); };
+  const pick = (id) => { onChange(id); setOpen(false); };
+  const onKey = (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!open) { show(); return; }
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      setActive((i) => (i + step + sorted.length) % sorted.length);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (open) pick(sorted[active].id); else show();
+    } else if (e.key === 'Escape' || e.key === 'Tab') setOpen(false);
+  };
+
+  return (
+    <div ref={root} style={{ position: 'relative' }}>
+      <button type="button" className="fx-field" disabled={disabled} data-disabled={disabled ? '' : undefined}
+        role="combobox" aria-label="Provider" aria-haspopup="listbox" aria-controls="pp-list" aria-expanded={open} aria-activedescendant={open ? `pp-opt-${active}` : undefined}
+        onClick={() => (open ? setOpen(false) : show())} onKeyDown={onKey}
+        style={{ width: '100%', height: 42, gap: 10, cursor: disabled ? 'default' : 'pointer', textAlign: 'left', color: 'var(--text-hi)' }}>
+        <window.ProviderLogo id={current.id} size={22} />
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 600 }}>{current.id}</span>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'var(--text-lo)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{current.note}</span>
+        {!disabled && <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" style={{ flex: 'none', color: 'var(--text-lo)', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-fast)' }}>
+          <path d="M2 3.5 5 6.5 8 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>}
+      </button>
+      {open && (
+        <div id="pp-list" role="listbox" aria-label="Provider" style={{
+          position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 60, maxHeight: 320, overflowY: 'auto', padding: 4,
+          background: 'var(--surface-2)', border: '1px solid var(--border-strong)', borderRadius: 'var(--r-md)',
+          boxShadow: '0 12px 32px rgba(0,0,0,0.55)', animation: 'fx-log-in var(--dur-fast) var(--ease-out)',
+        }}>
+          {sorted.map((o, i) => (
+            <React.Fragment key={o.id}>
+              {(i === 0 || o.kind !== sorted[i - 1].kind) && (
+                <div className="fx-field-label" aria-hidden="true" style={{ fontSize: 10, padding: i ? '10px 8px 4px' : '6px 8px 4px', color: 'var(--text-faint)' }}>
+                  {o.kind === 'web' ? 'browser login' : 'api key'}
+                </div>
+              )}
+              <div id={`pp-opt-${i}`} role="option" aria-selected={o.id === current.id}
+                onMouseEnter={() => setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(o.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '7px 8px', borderRadius: 'var(--r-sm)', cursor: 'pointer',
+                  background: i === active ? 'var(--surface-3)' : 'transparent',
+                }}>
+                <window.ProviderLogo id={o.id} size={20} />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', whiteSpace: 'nowrap' }}>{o.id}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'var(--text-lo)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{o.note}</span>
+                {o.id === current.id && <span style={{ color: 'var(--lime-500)', fontSize: 12 }}>✓</span>}
+              </div>
+            </React.Fragment>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -173,12 +251,10 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
 
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Field label="Provider">
-            <Select value={providerId} disabled={loginOnly} onChange={(e) => { setProviderId(e.target.value); setTouched(false); setError(null); }}>
-              {catalog.map((p) => <option key={p.id} value={p.id}>{p.id}</option>)}
-            </Select>
+            <ProviderPicker value={providerId} options={catalog} disabled={loginOnly}
+              onChange={(id) => { setProviderId(id); setTouched(false); setError(null); }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
               <Badge tone={isWeb ? 'cyan' : 'accent'} variant="outline">{isWeb ? 'browser login' : 'API key'}</Badge>
-              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{provider.note}</span>
               {!isWeb && provider.signup && (
                 <a href={provider.signup} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--lime-500)', textDecoration: 'none', whiteSpace: 'nowrap' }}>get a free key ↗</a>
               )}
@@ -218,7 +294,7 @@ function AddAccountModal({ onClose, initialProvider, initialLabel = '', loginOnl
               </div>
               <textarea value={sessionJson} onChange={(e) => setSessionJson(e.target.value)} spellCheck={false}
                 placeholder={isWeb ? '[{"name":"sso","value":"…","domain":".grok.com"}]' : '{"cookies":[…],"storage":{…}}'}
-                style={{ width: '100%', minHeight: 76, resize: 'vertical', boxSizing: 'border-box', padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', background: 'var(--surface-sunken, rgba(255,255,255,0.03))', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)' }} />
+                className="fx-textarea" style={{ minHeight: 76 }} />
               <Button variant="ghost" onClick={submitSession} disabled={busy || !sessionJson.trim()} style={{ width: '100%', justifyContent: 'center' }}>{busy ? 'Saving…' : 'Use pasted session'}</Button>
               <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>{hosted ? 'Fallback: paste an exported session if the local browser is unavailable.' : 'Export cookies from any logged-in browser (e.g. a “Cookie Editor” extension → JSON). Works on headless servers.'}</span>
             </Field>

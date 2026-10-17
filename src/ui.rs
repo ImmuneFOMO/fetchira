@@ -1280,6 +1280,7 @@ fn mime_for(path: &str) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("js") | Some("jsx") => "application/javascript; charset=utf-8",
         Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
         Some("json") => "application/json",
         Some("md") => "text/markdown; charset=utf-8",
         Some("woff2") => "font/woff2",

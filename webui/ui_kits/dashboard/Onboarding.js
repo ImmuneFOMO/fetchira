@@ -128,6 +128,9 @@ function KeyProviderCard({
     }, /*#__PURE__*/React.createElement(StatusDot, {
       tone: "ok",
       size: 7
+    }), /*#__PURE__*/React.createElement(window.ProviderLogo, {
+      id: p.id,
+      size: 20
     }), /*#__PURE__*/React.createElement("span", {
       style: {
         fontFamily: 'var(--font-mono)',
@@ -176,7 +179,10 @@ function KeyProviderCard({
       gap: 8,
       minWidth: 0
     }
-  }, /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: p.id,
+    size: 20
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 14,
@@ -291,6 +297,9 @@ function WebProviderCard({
   }, connected && /*#__PURE__*/React.createElement(StatusDot, {
     tone: "ok",
     size: 7
+  }), /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: p.id,
+    size: 20
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',

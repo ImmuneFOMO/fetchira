@@ -176,18 +176,9 @@ function PasteSessionModal({
     spellCheck: false,
     autoFocus: true,
     placeholder: '[{"name":"sso","value":"…","domain":".grok.com"}]',
+    className: "fx-textarea",
     style: {
-      width: '100%',
-      minHeight: 120,
-      resize: 'vertical',
-      boxSizing: 'border-box',
-      padding: '8px 10px',
-      fontFamily: 'var(--font-mono)',
-      fontSize: 12,
-      color: 'var(--text-hi)',
-      background: 'var(--surface-sunken, rgba(255,255,255,0.03))',
-      border: '1px solid var(--border-hairline)',
-      borderRadius: 'var(--r-sm)'
+      minHeight: 120
     }
   }), /*#__PURE__*/React.createElement("span", {
     style: {
@@ -882,9 +873,13 @@ function AccountRow({
       fontSize: 10,
       color: 'var(--text-faint)'
     }
-  }, hasDetail ? open ? '▾' : '▸' : ''), /*#__PURE__*/React.createElement("div", {
+  }, hasDetail ? open ? '▾' : '▸' : ''), /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: r.provider,
+    size: 24
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
-      minWidth: 0
+      minWidth: 0,
+      marginLeft: 2
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {

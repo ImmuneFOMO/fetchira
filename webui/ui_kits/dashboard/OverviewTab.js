@@ -138,11 +138,17 @@ function BurnRadar() {
       }
     }, b.label), /*#__PURE__*/React.createElement("div", {
       style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 5,
         fontFamily: 'var(--font-mono)',
         fontSize: 11,
         color: 'var(--text-faint)'
       }
-    }, b.provider)), /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+      id: b.provider,
+      size: 14
+    }), b.provider)), /*#__PURE__*/React.createElement("div", {
       style: {
         display: 'flex',
         alignItems: 'baseline',
@@ -357,7 +363,10 @@ function RoutingPriority() {
         fontSize: 10,
         color: i === 0 ? 'var(--lime-500)' : 'var(--text-faint)'
       }
-    }, i + 1), p));
+    }, i + 1), /*#__PURE__*/React.createElement(window.ProviderLogo, {
+      id: p,
+      size: 14
+    }), p));
   }), row.capability === 'read' && /*#__PURE__*/React.createElement("span", {
     title: "when every read provider fails or returns empty, the router retries via the browser providers automatically",
     style: {
@@ -372,6 +381,9 @@ function RoutingPriority() {
     disabled: busy,
     title: "add to this capability's routing order",
     style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
       background: 'transparent',
       border: '1px dashed var(--border-faint)',
       borderRadius: 4,
@@ -381,7 +393,10 @@ function RoutingPriority() {
       fontSize: 11,
       color: 'var(--text-faint)'
     }
-  }, "+ ", p)), row.custom && /*#__PURE__*/React.createElement("button", {
+  }, "+ ", /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: p,
+    size: 14
+  }), p)), row.custom && /*#__PURE__*/React.createElement("button", {
     onClick: () => post(row.capability, []),
     disabled: busy,
     style: {
@@ -469,13 +484,19 @@ function CapabilityMatrix() {
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
       fontFamily: 'var(--font-mono)',
       fontSize: 14,
       fontWeight: 600,
       color: 'var(--text-hi)',
       letterSpacing: '-0.01em'
     }
-  }, c.provider), (c.niches || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: c.provider,
+    size: 20
+  }), c.provider), (c.niches || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexWrap: 'wrap',
@@ -666,6 +687,9 @@ function FxProviderCard(p) {
   }, /*#__PURE__*/React.createElement(StatusDot, {
     tone: health,
     size: 7
+  }), /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: p.name,
+    size: 20
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
@@ -981,7 +1005,10 @@ function GhostProviderCard({
       gap: 8,
       flexWrap: 'wrap'
     }
-  }, /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: c.id,
+    size: 20
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 14,

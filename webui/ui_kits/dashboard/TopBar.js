@@ -10,6 +10,45 @@ function fmtCompact(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
   return String(n);
 }
+const LOGOS = new Set(['tavily', 'exa', 'serper', 'parallel', 'keenable', 'openalex', 'tinyfish', 'linkup', 'you', 'octen', 'nimble', 'serpapi', 'langsearch', 'firecrawl', 'steel', 'jina', 'scrapingant', 'zenrows', 'hyperbrowser', 'browserless', 'gemini_web', 'grok_web', 'chatgpt_web', 'gdelt']);
+function ProviderLogo({
+  id,
+  size = 18
+}) {
+  if (LOGOS.has(id)) {
+    const base = window.fxHosted ? '/admin/assets/assets/providers/' : '../../assets/providers/';
+    return /*#__PURE__*/React.createElement("img", {
+      src: `${base}${id}.png`,
+      alt: "",
+      "aria-hidden": "true",
+      width: size,
+      height: size,
+      style: {
+        flex: 'none',
+        display: 'block',
+        width: size,
+        height: size
+      }
+    });
+  }
+  return /*#__PURE__*/React.createElement("span", {
+    "aria-hidden": "true",
+    style: {
+      flex: 'none',
+      display: 'inline-grid',
+      placeItems: 'center',
+      width: size,
+      height: size,
+      borderRadius: '50%',
+      background: 'var(--surface-3)',
+      color: 'var(--text-mid)',
+      fontFamily: 'var(--font-mono)',
+      fontSize: Math.round(size * 0.5),
+      fontWeight: 600,
+      lineHeight: 1
+    }
+  }, (id || '?')[0].toUpperCase());
+}
 function Wordmark() {
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -156,4 +195,5 @@ function TopBar({
 }
 window.TopBar = TopBar;
 window.fmtCompact = fmtCompact;
+window.ProviderLogo = ProviderLogo;
 })();

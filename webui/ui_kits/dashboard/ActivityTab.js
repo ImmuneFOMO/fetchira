@@ -252,12 +252,19 @@ function AttemptRow({
     }
   }, row.capability === 'create_image' ? 'image' : row.capability.replace('_', ' ')), /*#__PURE__*/React.createElement("span", {
     style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      minWidth: 0,
       color: 'var(--text-hi)',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap'
     }
-  }, row.provider, row.account != null ? `-${row.account}` : ''), /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: row.provider,
+    size: 14
+  }), row.provider, row.account != null ? `-${row.account}` : ''), /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'inline-flex',
       alignItems: 'center',
@@ -290,6 +297,9 @@ function AttemptRow({
     full: full
   }));
 }
+
+// health and usage rows carry the account label, not the provider kind
+const kindOf = label => ((window.FX.accounts || []).find(a => a.label === label) || {}).provider || label;
 function HealthRow({
   h
 }) {
@@ -322,11 +332,17 @@ function HealthRow({
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
       fontFamily: 'var(--font-mono)',
       fontSize: 13,
       color: 'var(--text-hi)'
     }
-  }, h.provider), /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: kindOf(h.provider),
+    size: 16
+  }), h.provider), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 11,
@@ -521,11 +537,17 @@ function ActivityTab() {
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
       fontFamily: 'var(--font-mono)',
       fontSize: 12,
       color: 'var(--text-hi)'
     }
-  }, u.provider), /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(window.ProviderLogo, {
+    id: kindOf(u.provider),
+    size: 16
+  }), u.provider), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: 'var(--font-mono)',
       fontSize: 11,

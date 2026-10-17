@@ -56,7 +56,7 @@ function PasteSessionModal({ label, onClose }) {
         <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <textarea value={val} onChange={(e) => setVal(e.target.value)} spellCheck={false} autoFocus
             placeholder={'[{"name":"sso","value":"…","domain":".grok.com"}]'}
-            style={{ width: '100%', minHeight: 120, resize: 'vertical', boxSizing: 'border-box', padding: '8px 10px', fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', background: 'var(--surface-sunken, rgba(255,255,255,0.03))', border: '1px solid var(--border-hairline)', borderRadius: 'var(--r-sm)' }} />
+            className="fx-textarea" style={{ minHeight: 120 }} />
           <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)' }}>Cookie array or {'{"cookies":[…]}'} exported from a logged-in browser.</span>
           {error && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--red-500)', background: 'var(--red-dim)', border: '1px solid rgba(242,85,90,0.3)', borderRadius: 'var(--r-sm)', padding: '8px 10px' }}>{error}</div>}
         </div>
@@ -331,7 +331,8 @@ function AccountRow({ r }) {
         <td style={td}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 10, flexShrink: 0, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>{hasDetail ? (open ? '▾' : '▸') : ''}</span>
-            <div style={{ minWidth: 0 }}>
+            <window.ProviderLogo id={r.provider} size={24} />
+            <div style={{ minWidth: 0, marginLeft: 2 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)', fontWeight: 600 }}>{r.label}</span>
                 {planBadge(r.limits && r.limits.tier)}

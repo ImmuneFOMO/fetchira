@@ -1,5 +1,5 @@
 /* Dismissible getting-started checklist for the local dashboard; hosted uses the key bridge below. */
-const { Card, Button, Badge, StatusDot } = window.FetchiraDesignSystem_6526df;
+const { Card, Button, Badge, StatusDot, Input } = window.FetchiraDesignSystem_6526df;
 
 function apiGet(path) {
   return (window.apiGet ? window.apiGet(path) : fetch(path, { headers: { 'x-fetchira-token': window.FX_TOKEN } }).then((r) => (r.ok ? r.json() : null)))
@@ -53,12 +53,8 @@ function ConnectionSetup({ onReady }) {
         Clear the saved server URL and API key. I have kept the key if I need to reconnect.
       </label>}
       {mode === 'hosted' && <div style={{ display: 'grid', gap: 10 }}>
-        <label style={{ display: 'grid', gap: 5, color: 'var(--text-mid)', fontSize: 12 }}>Server URL
-          <input type="url" required value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://fetchira.example.com/mcp" style={{ width: '100%', boxSizing: 'border-box', padding: '9px 10px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-hi)' }} />
-        </label>
-        <label style={{ display: 'grid', gap: 5, color: 'var(--text-mid)', fontSize: 12 }}>API key
-          <input type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Server API key" style={{ width: '100%', boxSizing: 'border-box', padding: '9px 10px', borderRadius: 'var(--r-sm)', border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-hi)' }} />
-        </label>
+        <Input label="Server URL" type="url" required mono value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://fetchira.example.com/mcp" />
+        <Input label="API key" type="password" autoComplete="off" mono value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Server API key" />
         <span style={{ color: 'var(--text-mid)', fontSize: 12 }}>Leave the key blank to keep it only when the URL is unchanged. Access and compatibility are checked before saving; local accounts are preserved.</span>
       </div>}
     </fieldset>

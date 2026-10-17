@@ -7,6 +7,25 @@ function fmtCompact(n) {
   return String(n);
 }
 
+const LOGOS = new Set([
+  'tavily', 'exa', 'serper', 'parallel', 'keenable', 'openalex', 'tinyfish', 'linkup', 'you', 'octen',
+  'nimble', 'serpapi', 'langsearch', 'firecrawl', 'steel', 'jina', 'scrapingant', 'zenrows',
+  'hyperbrowser', 'browserless', 'gemini_web', 'grok_web', 'chatgpt_web', 'gdelt',
+]);
+
+function ProviderLogo({ id, size = 18 }) {
+  if (LOGOS.has(id)) {
+    const base = window.fxHosted ? '/admin/assets/assets/providers/' : '../../assets/providers/';
+    return <img src={`${base}${id}.png`} alt="" aria-hidden="true" width={size} height={size} style={{ flex: 'none', display: 'block', width: size, height: size }} />;
+  }
+  return (
+    <span aria-hidden="true" style={{
+      flex: 'none', display: 'inline-grid', placeItems: 'center', width: size, height: size, borderRadius: '50%',
+      background: 'var(--surface-3)', color: 'var(--text-mid)', fontFamily: 'var(--font-mono)', fontSize: Math.round(size * 0.5), fontWeight: 600, lineHeight: 1,
+    }}>{(id || '?')[0].toUpperCase()}</span>
+  );
+}
+
 function Wordmark() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -55,3 +74,4 @@ function TopBar({ onAdd }) {
 
 window.TopBar = TopBar;
 window.fmtCompact = fmtCompact;
+window.ProviderLogo = ProviderLogo;

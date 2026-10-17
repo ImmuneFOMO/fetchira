@@ -107,7 +107,7 @@ function AttemptRow({ row, open, full, onToggle }) {
           <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{open ? '▾' : '▸'}</span>
           <span style={{ color: 'var(--text-faint)' }}>{row.time}</span>
           <span style={{ color: capColor, fontWeight: 500 }}>{row.capability === 'create_image' ? 'image' : row.capability.replace('_', ' ')}</span>
-          <span style={{ color: 'var(--text-hi)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.provider}{row.account != null ? `-${row.account}` : ''}</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, color: 'var(--text-hi)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><window.ProviderLogo id={row.provider} size={14} />{row.provider}{row.account != null ? `-${row.account}` : ''}</span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, justifySelf: 'end' }}>
             <span style={{ color: row.ok ? 'var(--text-faint)' : 'var(--red-500)' }}>{row.status}</span>
             <span style={{ color: row.latencyMs > 800 ? 'var(--amber-500)' : 'var(--text-lo)', minWidth: 48, textAlign: 'right' }}>{row.latencyMs}ms</span>
@@ -120,6 +120,9 @@ function AttemptRow({ row, open, full, onToggle }) {
   );
 }
 
+// health and usage rows carry the account label, not the provider kind
+const kindOf = (label) => ((window.FX.accounts || []).find((a) => a.label === label) || {}).provider || label;
+
 function HealthRow({ h }) {
   const tone = h.state === 'exhausted' ? 'out' : h.state === 'needs-login' ? 'off' : 'ok';
   return (
@@ -127,7 +130,7 @@ function HealthRow({ h }) {
       <StatusDot tone={tone} size={8} style={{ marginTop: 3 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)' }}>{h.provider}</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-hi)' }}><window.ProviderLogo id={kindOf(h.provider)} size={16} />{h.provider}</span>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{h.lastSuccess}</span>
         </div>
         {h.lastError && <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: tone === 'out' ? 'var(--red-500)' : 'var(--text-lo)', marginTop: 3, lineHeight: 1.4 }}>{h.lastError}</div>}
@@ -228,7 +231,7 @@ function ActivityTab() {
             {usage.length ? usage.map((u) => (
               <Card key={u.provider} pad={14}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)' }}>{u.provider}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)' }}><window.ProviderLogo id={kindOf(u.provider)} size={16} />{u.provider}</span>
                   <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{u.series.reduce((a, b) => a + b, 0)} total</span>
                 </div>
                 <Sparkline data={u.series} color={u.color} />

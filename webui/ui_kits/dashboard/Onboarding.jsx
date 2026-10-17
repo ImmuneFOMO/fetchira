@@ -60,6 +60,7 @@ function KeyProviderCard({ p, onOpenModal }) {
       <Card accent="ok" pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <StatusDot tone="ok" size={7} />
+          <window.ProviderLogo id={p.id} size={20} />
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)' }}>{p.id}</span>
           <Badge tone="ok" variant="soft">connected ✓</Badge>
         </div>
@@ -75,6 +76,7 @@ function KeyProviderCard({ p, onOpenModal }) {
     <Card pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <window.ProviderLogo id={p.id} size={20} />
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)' }}>{p.id}</span>
           {p.free && <Badge tone="neutral" variant="outline">{p.free}</Badge>}
         </div>
@@ -122,6 +124,7 @@ function WebProviderCard({ p, onOpenModal }) {
     <Card accent={connected ? 'ok' : undefined} pad={16} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         {connected && <StatusDot tone="ok" size={7} />}
+        <window.ProviderLogo id={p.id} size={20} />
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)' }}>{p.id}</span>
         <Badge tone="cyan" variant="outline">browser login</Badge>
         {connected && <Badge tone="ok" variant="soft">connected ✓</Badge>}

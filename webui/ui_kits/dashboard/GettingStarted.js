@@ -9,7 +9,8 @@ const {
   Card,
   Button,
   Badge,
-  StatusDot
+  StatusDot,
+  Input
 } = window.FetchiraDesignSystem_6526df;
 function apiGet(path) {
   return (window.apiGet ? window.apiGet(path) : fetch(path, {
@@ -146,51 +147,23 @@ function ConnectionSetup({
       display: 'grid',
       gap: 10
     }
-  }, /*#__PURE__*/React.createElement("label", {
-    style: {
-      display: 'grid',
-      gap: 5,
-      color: 'var(--text-mid)',
-      fontSize: 12
-    }
-  }, "Server URL", /*#__PURE__*/React.createElement("input", {
+  }, /*#__PURE__*/React.createElement(Input, {
+    label: "Server URL",
     type: "url",
     required: true,
+    mono: true,
     value: endpoint,
     onChange: e => setEndpoint(e.target.value),
-    placeholder: "https://fetchira.example.com/mcp",
-    style: {
-      width: '100%',
-      boxSizing: 'border-box',
-      padding: '9px 10px',
-      borderRadius: 'var(--r-sm)',
-      border: '1px solid var(--border-hairline)',
-      background: 'var(--surface-sunken)',
-      color: 'var(--text-hi)'
-    }
-  })), /*#__PURE__*/React.createElement("label", {
-    style: {
-      display: 'grid',
-      gap: 5,
-      color: 'var(--text-mid)',
-      fontSize: 12
-    }
-  }, "API key", /*#__PURE__*/React.createElement("input", {
+    placeholder: "https://fetchira.example.com/mcp"
+  }), /*#__PURE__*/React.createElement(Input, {
+    label: "API key",
     type: "password",
     autoComplete: "off",
+    mono: true,
     value: apiKey,
     onChange: e => setApiKey(e.target.value),
-    placeholder: "Server API key",
-    style: {
-      width: '100%',
-      boxSizing: 'border-box',
-      padding: '9px 10px',
-      borderRadius: 'var(--r-sm)',
-      border: '1px solid var(--border-hairline)',
-      background: 'var(--surface-sunken)',
-      color: 'var(--text-hi)'
-    }
-  })), /*#__PURE__*/React.createElement("span", {
+    placeholder: "Server API key"
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       color: 'var(--text-mid)',
       fontSize: 12

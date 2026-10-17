@@ -44,7 +44,7 @@ function BurnRadar() {
               <StatusDot tone={tone} size={6} />
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-hi)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{b.label}</div>
-                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>{b.provider}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}><window.ProviderLogo id={b.provider} size={14} />{b.provider}</div>
               </div>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
                 {b.resetWindow && <Badge tone="neutral" variant="outline" uppercase>{b.resetWindow}</Badge>}
@@ -157,6 +157,7 @@ function RoutingPriority() {
                           boxShadow: lift ? '0 2px 8px rgba(0,0,0,0.45)' : 'none',
                         }}>
                         <span style={{ fontSize: 10, color: i === 0 ? 'var(--lime-500)' : 'var(--text-faint)' }}>{i + 1}</span>
+                        <window.ProviderLogo id={p} size={14} />
                         {p}
                       </span>
                     </React.Fragment>
@@ -171,8 +172,8 @@ function RoutingPriority() {
                 )}
                 {row.available.map((p) => (
                   <button key={p} onClick={() => post(row.capability, [...orderOf(row), p])} disabled={busy} title="add to this capability's routing order"
-                    style={{ background: 'transparent', border: '1px dashed var(--border-faint)', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
-                    + {p}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'transparent', border: '1px dashed var(--border-faint)', borderRadius: 4, padding: '3px 9px', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-faint)' }}>
+                    + <window.ProviderLogo id={p} size={14} />{p}
                   </button>
                 ))}
                 {row.custom && (
@@ -212,7 +213,7 @@ function CapabilityMatrix() {
           {caps.map((c) => (
             <div key={c.provider} style={{ breakInside: 'avoid', marginBottom: 14 }}>
             <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>{c.provider}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}><window.ProviderLogo id={c.provider} size={20} />{c.provider}</span>
               {(c.niches || []).length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {c.niches.map((n) => (
@@ -292,6 +293,7 @@ function FxProviderCard(p) {
         <div style={{ minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <StatusDot tone={health} size={7} />
+            <window.ProviderLogo id={p.name} size={20} />
             <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-hi)', letterSpacing: '-0.01em' }}>{p.name}</span>
           </div>
           <div style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-lo)', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.desc}</div>
@@ -426,6 +428,7 @@ function GhostProviderCard({ c, onConnect }) {
   return (
     <Card pad={14} style={{ display: 'flex', flexDirection: 'column', gap: 10, opacity: 0.65, borderStyle: 'dashed' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <window.ProviderLogo id={c.id} size={20} />
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600, color: 'var(--text-mid)' }}>{c.id}</span>
         {c.free && <Badge tone="neutral" variant="outline">{c.free}</Badge>}
       </div>

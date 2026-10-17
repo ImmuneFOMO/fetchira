@@ -572,6 +572,7 @@ async fn hosted_static(uri: axum::http::Uri) -> Response {
                         Some("css") => "text/css; charset=utf-8",
                         Some("js") | Some("jsx") => "application/javascript; charset=utf-8",
                         Some("svg") => "image/svg+xml",
+                        Some("png") => "image/png",
                         _ => "application/octet-stream",
                     },
                 ),

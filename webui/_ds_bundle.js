@@ -504,35 +504,22 @@ function Input({
   containerStyle = {},
   ...rest
 }) {
-  const [focus, setFocus] = React.useState(false);
-  const h = size === 'sm' ? 30 : size === 'lg' ? 40 : 34;
+  const h = size === 'sm' ? 32 : size === 'lg' ? 42 : 38;
   return /*#__PURE__*/React.createElement("label", {
     style: {
       display: 'flex',
       flexDirection: 'column',
       gap: 6,
+      fontWeight: 400,
       ...containerStyle
     }
   }, label && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: 'var(--font-mono)',
-      fontSize: 11,
-      letterSpacing: '0.04em',
-      textTransform: 'uppercase',
-      color: 'var(--text-lo)'
-    }
+    className: "fx-field-label"
   }, label), /*#__PURE__*/React.createElement("span", {
+    className: "fx-field",
+    "data-invalid": invalid ? '' : undefined,
     style: {
-      display: 'flex',
-      alignItems: 'center',
-      height: h,
-      background: 'var(--surface-well)',
-      border: `1px solid ${invalid ? 'var(--red-500)' : focus ? 'var(--lime-500)' : 'var(--border-hairline)'}`,
-      borderRadius: 'var(--r-sm)',
-      boxShadow: focus && !invalid ? 'var(--glow-accent)' : 'none',
-      transition: 'border-color var(--dur-fast), box-shadow var(--dur-fast)',
-      padding: '0 10px',
-      gap: 7
+      height: h
     }
   }, prefix && /*#__PURE__*/React.createElement("span", {
     style: {
@@ -541,27 +528,10 @@ function Input({
       fontSize: 12,
       display: 'inline-flex'
     }
-  }, prefix), /*#__PURE__*/React.createElement("input", _extends({
-    onFocus: e => {
-      setFocus(true);
-      rest.onFocus?.(e);
-    },
-    onBlur: e => {
-      setFocus(false);
-      rest.onBlur?.(e);
-    }
-  }, rest, {
+  }, prefix), /*#__PURE__*/React.createElement("input", _extends({}, rest, {
+    className: "fx-control",
     style: {
-      flex: 1,
-      minWidth: 0,
-      height: '100%',
-      border: 'none',
-      outline: 'none',
-      boxShadow: 'none',
-      background: 'transparent',
-      color: 'var(--text-hi)',
       fontFamily: mono ? 'var(--font-mono)' : 'var(--font-ui)',
-      fontSize: 13,
       letterSpacing: mono ? '0.01em' : 0,
       ...style
     }
@@ -591,65 +561,40 @@ function Select({
   containerStyle = {},
   ...rest
 }) {
-  const [focus, setFocus] = React.useState(false);
-  const h = size === 'sm' ? 30 : size === 'lg' ? 40 : 34;
+  const h = size === 'sm' ? 32 : size === 'lg' ? 42 : 38;
   return /*#__PURE__*/React.createElement("label", {
     style: {
       display: 'flex',
       flexDirection: 'column',
       gap: 6,
+      fontWeight: 400,
       ...containerStyle
     }
   }, label && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontFamily: 'var(--font-mono)',
-      fontSize: 11,
-      letterSpacing: '0.04em',
-      textTransform: 'uppercase',
-      color: 'var(--text-lo)'
-    }
+    className: "fx-field-label"
   }, label), /*#__PURE__*/React.createElement("span", {
+    className: "fx-field",
+    "data-disabled": rest.disabled ? '' : undefined,
     style: {
-      position: 'relative',
-      display: 'flex',
-      height: h,
-      background: 'var(--surface-well)',
-      border: `1px solid ${focus ? 'var(--lime-500)' : 'var(--border-hairline)'}`,
-      borderRadius: 'var(--r-sm)',
-      boxShadow: focus ? 'var(--glow-accent)' : 'none',
-      transition: 'border-color var(--dur-fast)'
+      height: h
     }
-  }, /*#__PURE__*/React.createElement("select", _extends({
-    onFocus: () => setFocus(true),
-    onBlur: () => setFocus(false)
-  }, rest, {
-    style: {
-      flex: 1,
-      height: '100%',
-      appearance: 'none',
-      WebkitAppearance: 'none',
-      border: 'none',
-      outline: 'none',
-      boxShadow: 'none',
-      background: 'transparent',
-      color: 'var(--text-hi)',
-      fontFamily: 'var(--font-ui)',
-      fontSize: 13,
-      padding: '0 28px 0 10px',
-      cursor: 'pointer',
-      ...style
-    }
-  }), children), /*#__PURE__*/React.createElement("span", {
-    style: {
-      position: 'absolute',
-      right: 10,
-      top: '50%',
-      transform: 'translateY(-50%)',
-      pointerEvents: 'none',
-      color: 'var(--text-lo)',
-      fontSize: 10
-    }
-  }, "\u25BE")), hint && /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("select", _extends({}, rest, {
+    className: "fx-control",
+    style: style
+  }), children), /*#__PURE__*/React.createElement("svg", {
+    className: "fx-chevron",
+    width: 10,
+    height: 10,
+    viewBox: "0 0 10 10",
+    fill: "none",
+    "aria-hidden": "true"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M2 3.5 5 6.5 8 3.5",
+    stroke: "currentColor",
+    strokeWidth: 1.4,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }))), hint && /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 11,
       color: 'var(--text-lo)'
