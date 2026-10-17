@@ -13,6 +13,7 @@ usage.db-wal
 
 # build
 /target
+/fetchira-*.tgz
 
 # scratch
 scratchpad/

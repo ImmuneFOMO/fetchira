@@ -89,6 +89,23 @@ run_existing_binary_failure() {
   grep -F "failed to start" "$output" >/dev/null || fail "$mode has no startup error"
 }
 
+run_npm_shim() {
+  mode=npm-shim
+  dst="$TMP_ROOT/dst-$mode"
+  home="$TMP_ROOT/home-$mode"
+  log="$TMP_ROOT/log-$mode"
+  mkdir -p "$home"
+  : > "$log"
+  for pass in install reuse; do
+    env PATH="$STUB_DIR:$PATH" HOME="$home" BIN_DST="$dst" \
+      FETCHIRA_HOME="$home/config" FETCHIRA_VERSION=v0.0.0 \
+      STUB_MODE="$mode" STUB_UNAME_S=Linux STUB_UNAME_M=x86_64 STUB_LOG="$log" \
+      node "$ROOT/npm/fetchira.js" --version >/dev/null 2>&1 || fail "npm shim $pass run failed"
+    [ -x "$dst/fetchira" ] || fail "npm shim did not install fetchira"
+    [ "$(grep -c "tar.xz$" "$log")" -eq 1 ] || fail "npm shim $pass run downloaded again"
+  done
+}
+
 sh -n "$ROOT/install.sh"
 run_success linux-aarch64 Linux aarch64 aarch64-unknown-linux-gnu
 run_success linux-x86_64 Linux x86_64 x86_64-unknown-linux-gnu
@@ -99,5 +116,6 @@ run_failure checksum-missing
 run_failure checksum-tool-failure
 run_failure extract-failure
 run_existing_binary_failure
+run_npm_shim
 
 echo "installer checks passed"

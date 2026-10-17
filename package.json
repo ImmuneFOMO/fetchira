@@ -1,0 +1,11 @@
+{
+  "name": "fetchira",
+  "version": "0.0.0",
+  "description": "Quota-aware web-search/scrape MCP server and CLI that routes across free provider tiers",
+  "license": "Apache-2.0",
+  "repository": "github:ImmuneFOMO/fetchira",
+  "homepage": "https://github.com/ImmuneFOMO/fetchira",
+  "keywords": ["mcp", "web-search", "scraping", "agent", "cli"],
+  "bin": { "fetchira": "npm/fetchira.js" },
+  "files": ["npm", "install.sh"]
+}
