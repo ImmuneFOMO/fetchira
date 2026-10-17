@@ -1,0 +1,26 @@
+# Called by the dist-generated release.yml (publish-jobs in dist-workspace.toml) once the
+# GitHub Release exists. The npm package is only the installer shim around install.sh.
+name: Publish npm
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm version --no-git-tag-version "$(echo "$PLAN" | jq -r '.releases[] | select(.app_name == "fetchira") | .app_version')"
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -12,7 +12,7 @@ installers = ["homebrew"]
 # A GitHub repo to push Homebrew formulas to
 tap = "ImmuneFOMO/homebrew-tap"
 # Publish jobs to run in CI
-publish-jobs = ["homebrew"]
+publish-jobs = ["homebrew", "./publish-npm"]
 # Whether to install an updater program
 install-updater = false
 # Target platforms to build apps for (Rust target-triple syntax)
