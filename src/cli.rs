@@ -842,8 +842,9 @@ async fn do_login(
     browser: Option<String>,
 ) -> anyhow::Result<()> {
     let store = open_store(home, cfg).await?;
+    // A seed keeps the old profile, whose stale cookies would be captured before the user logs in.
     let seed = match store.load_session(label).await {
-        Ok(Some(raw)) => Some(web::parse_session(&raw)),
+        Ok(Some(raw)) if kind == ProviderKind::GrokWeb => Some(web::parse_session(&raw)),
         _ => None,
     };
     if kind == ProviderKind::GrokWeb {
