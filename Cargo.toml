@@ -51,6 +51,9 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 rand = "0.8"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 wiremock = "0.6"
 

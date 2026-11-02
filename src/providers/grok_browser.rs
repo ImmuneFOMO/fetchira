@@ -13,7 +13,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use super::grok_web;
 use super::{uuid4, LiveLimits};
 use crate::error::{Error, Result};
-use crate::web::{detect_browser, Cookie};
+use crate::web::{close, detect_browser, Cookie, CHROME_DISABLE_FEATURES};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -40,6 +40,7 @@ pub async fn limits(cookies: &[Cookie]) -> Result<LiveLimits> {
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
+        .arg(CHROME_DISABLE_FEATURES)
         .arg("--disable-dev-shm-usage")
         .args(headless_arg())
         .arg("--disable-blink-features=AutomationControlled")
@@ -135,8 +136,7 @@ pub async fn limits(cookies: &[Cookie]) -> Result<LiveLimits> {
     })
     .await
     .map_err(|_| Error::Timeout("grok_web: limits browser"));
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    close(&mut child).await;
     let _ = std::fs::remove_dir_all(&profile);
     result?
 }

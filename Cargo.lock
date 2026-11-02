@@ -900,6 +900,7 @@ dependencies = [
  "futures-util",
  "http",
  "inquire",
+ "libc",
  "open",
  "rand 0.8.7",
  "regex",

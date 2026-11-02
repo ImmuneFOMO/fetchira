@@ -13,7 +13,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::{chatgpt_web, uuid4, Capability, Input, OutImage, Outcome};
 use crate::error::{Error, Result};
-use crate::web::{detect_browser, Cookie};
+use crate::web::{close, detect_browser, Cookie, CHROME_DISABLE_FEATURES};
 
 // chatgpt.com generation is gated by an anti-bot defense pure HTTP can't pass (the real browser works,
 // a byte-identical replay 403s "unusual activity"). So we drive a real Chrome over CDP: inject the
@@ -161,6 +161,7 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
+        .arg(CHROME_DISABLE_FEATURES)
         .arg("--disable-dev-shm-usage")
         .args(headless_arg())
         .arg("--disable-blink-features=AutomationControlled")
@@ -206,7 +207,7 @@ pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<O
         Ok(result) => result,
         Err(_) => Err(Error::Timeout("chatgpt_web: browser drive")),
     };
-    let _ = child.kill().await;
+    close(&mut child).await;
     let _ = std::fs::remove_dir_all(&profile);
     out
 }
@@ -227,6 +228,7 @@ pub async fn limits(cookies: &[Cookie]) -> Result<super::LiveLimits> {
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
+        .arg(CHROME_DISABLE_FEATURES)
         .arg("--disable-dev-shm-usage")
         .args(headless_arg())
         .arg("--disable-blink-features=AutomationControlled")
@@ -288,8 +290,7 @@ pub async fn limits(cookies: &[Cookie]) -> Result<super::LiveLimits> {
         }
         Err(Error::BadResponse("chatgpt_web: limits endpoint rejected session"))
     }).await.map_err(|_| Error::Timeout("chatgpt_web: limits browser"));
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    close(&mut child).await;
     let _ = std::fs::remove_dir_all(&profile);
     result?
 }

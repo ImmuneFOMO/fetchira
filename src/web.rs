@@ -198,6 +198,25 @@ pub(crate) fn detect_browser() -> Option<Browser> {
     browser_candidates(None).into_iter().next()
 }
 
+// Chrome honours only the last `--disable-features`. DBSC binds Google cookies to the TPM so they
+// can't be replayed over HTTP; MacAppCodeSignClone leaks a Chrome.app copy per killed macOS run.
+pub(crate) const CHROME_DISABLE_FEATURES: &str =
+    "--disable-features=DeviceBoundSessionCredentials,\
+     StandardDeviceBoundSessionCredentials,MacAppCodeSignClone";
+
+/// SIGKILL leaves the browser's temp dirs behind, so ask it to quit first.
+pub(crate) async fn close(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: `child` is not reaped yet, so the pid still names our browser.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if timeout(Duration::from_secs(3), child.wait()).await.is_ok() {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 #[cfg(test)]
 pub(crate) async fn chromium_profile_cookies(profile: &Path) -> Result<Vec<Cookie>> {
     let browser = detect_browser().ok_or_else(|| Error::Config("no Chrome/Chromium".into()))?;
@@ -213,7 +232,7 @@ pub(crate) async fn chromium_profile_cookies(profile: &Path) -> Result<Vec<Cooki
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
-        .arg("--disable-features=DeviceBoundSessionCredentials,StandardDeviceBoundSessionCredentials")
+        .arg(CHROME_DISABLE_FEATURES)
         .arg("--headless=new")
         .arg("about:blank")
         .stdout(Stdio::null())
@@ -226,8 +245,7 @@ pub(crate) async fn chromium_profile_cookies(profile: &Path) -> Result<Vec<Cooki
         send_cmd(&mut ws, 1, "Network.getAllCookies", Value::Null).await
     }
     .await;
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    close(&mut child).await;
     let res = out?;
     Ok(serde_json::from_value(res["cookies"].clone()).unwrap_or_default())
 }
@@ -427,41 +445,47 @@ pub async fn login(
         if !keys.is_empty() || seed.map(|c| c.is_empty()).unwrap_or(true) {
             let _ = std::fs::remove_dir_all(&profile);
         }
-        let fut = async {
-            match browser.kind {
-                BrowserKind::Chromium => {
-                    capture_chromium(
-                        &browser.bin,
-                        &profile,
-                        url,
-                        domain,
-                        extra,
-                        auth,
-                        check,
-                        keys,
-                        seed,
-                    )
-                    .await
-                }
-                BrowserKind::Firefox => {
-                    capture_firefox(&browser.bin, &profile, url, domain, extra, auth).await
-                }
+        // Apple passkey on grok needs wall-clock for Touch ID; other providers stay at 5 min.
+        let limit = Duration::from_secs(
+            std::env::var("FETCHIRA_LOGIN_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(if extra.contains(&"x.ai") { 600 } else { 300 }),
+        );
+        let res = match browser.kind {
+            BrowserKind::Chromium => {
+                capture_chromium(
+                    &browser.bin,
+                    &profile,
+                    url,
+                    domain,
+                    extra,
+                    auth,
+                    check,
+                    keys,
+                    seed,
+                    limit,
+                )
+                .await
+            }
+            BrowserKind::Firefox => {
+                capture_firefox(&browser.bin, &profile, url, domain, extra, auth, limit).await
             }
         };
-        // Apple passkey on grok needs wall-clock for Touch ID; other providers stay at 5 min.
-        let limit = std::env::var("FETCHIRA_LOGIN_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(if extra.contains(&"x.ai") { 600 } else { 300 });
-        match timeout(Duration::from_secs(limit), fut).await {
-            Ok(Ok(session)) => return Ok(session),
+        // Only a seeded grok re-login reuses its profile; every other login starts empty anyway.
+        if kind != ProviderKind::GrokWeb {
+            let _ = std::fs::remove_dir_all(&profile);
+        }
+        match res {
+            Ok(session) => return Ok(session),
+            // A timeout means the user simply didn't finish, so don't switch on them.
+            Err(Error::Timeout("login")) => return Err(Error::Timeout("login")),
             // A capture error (Chrome's DevTools socket resetting, a dead profile) — try the next
-            // browser. A timeout means the user simply didn't finish, so don't switch on them.
-            Ok(Err(e)) => {
+            // browser.
+            Err(e) => {
                 tracing::warn!(browser = ?browser.kind, error = %e, "browser login failed; trying next");
                 last_err = Some(e);
             }
-            Err(_) => return Err(Error::Timeout("login")),
         }
     }
     Err(last_err.unwrap_or(Error::Timeout("login")))
@@ -478,6 +502,7 @@ async fn capture_chromium(
     login_check: Option<&str>,
     keys: &[&str],
     seed: Option<&[Cookie]>,
+    limit: Duration,
 ) -> Result<Session> {
     // A free ephemeral port — 9222 collides with any other Chrome already exposing a debug port
     // (the user's main browser, an automation instance), which resets the CDP connection.
@@ -501,9 +526,7 @@ async fn capture_chromium(
         .arg("--no-default-browser-check")
         .arg("--disable-logging")
         .arg("--log-level=3")
-        // Without this Chrome binds Google's session to the device TPM key (DBSC), so the exported
-        // cookies can't be replayed over HTTP — /app comes back logged-out and RotateCookies 401s.
-        .arg("--disable-features=DeviceBoundSessionCredentials,StandardDeviceBoundSessionCredentials");
+        .arg(CHROME_DISABLE_FEATURES);
     if grok_mfa {
         cmd.arg("--new-window").arg(launch_url);
     } else {
@@ -522,9 +545,13 @@ async fn capture_chromium(
             "Unlock this Mac and complete Touch ID in the Fetchira Chrome window",
         );
     }
-    let session = capture_login(port, domain, extra, auth, login_check, keys).await;
-    let _ = child.kill().await;
-    session
+    let session = timeout(
+        limit,
+        capture_login(port, domain, extra, auth, login_check, keys),
+    )
+    .await;
+    close(&mut child).await;
+    session.map_err(|_| Error::Timeout("login"))?
 }
 
 const GROK_MFA_URL: &str = "https://accounts.x.ai/mfa/verify?redirect=grok-com";
@@ -777,6 +804,7 @@ async fn capture_firefox(
     domain: &str,
     extra: &[&str],
     auth: &str,
+    limit: Duration,
 ) -> Result<Session> {
     std::fs::create_dir_all(profile).ok();
     let mut child = tokio::process::Command::new(bin)
@@ -793,9 +821,9 @@ async fn capture_firefox(
     let mut src = MozDb {
         path: profile.join("cookies.sqlite"),
     };
-    let session = capture(&mut src, domain, extra, auth).await;
-    let _ = child.kill().await;
-    session
+    let session = timeout(limit, capture(&mut src, domain, extra, auth)).await;
+    close(&mut child).await;
+    session.map_err(|_| Error::Timeout("login"))?
 }
 
 /// A backend that returns the cookies currently scoped to `domain`. CDP polls Chrome; the
