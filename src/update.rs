@@ -76,6 +76,9 @@ fn complete_integrations(home: &Path) -> anyhow::Result<Vec<crate::cli::Integrat
     if std::fs::read_to_string(&marker).ok().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
         return Ok(vec![]);
     }
+    if let Ok(cfg) = crate::cli::load_or_empty(home) {
+        crate::web::remove_unused_profiles(home, &cfg.accounts);
+    }
     let agent_home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

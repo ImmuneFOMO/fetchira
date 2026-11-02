@@ -373,6 +373,38 @@ fn profile_dir(home: &Path, tag: &str, label: &str) -> PathBuf {
     home.join(format!("{tag}-{label}"))
 }
 
+/// Older logins kept a profile per account; only a live grok account still reuses one.
+pub(crate) fn remove_unused_profiles(home: &Path, accounts: &[crate::config::Account]) {
+    for e in std::fs::read_dir(home).into_iter().flatten().flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // FETCHIRA_HOME can point at a shared dir, so only touch what a browser made.
+        let Some((label, mark)) = name
+            .strip_prefix("chrome-")
+            .map(|l| (l, "Local State"))
+            .or_else(|| name.strip_prefix("firefox-").map(|l| (l, "times.json")))
+        else {
+            continue;
+        };
+        if !e.file_type().is_ok_and(|t| t.is_dir())
+            || !e.path().join(mark).is_file()
+            || accounts
+                .iter()
+                .any(|a| a.provider == ProviderKind::GrokWeb && a.label == label)
+        {
+            continue;
+        }
+        // Another fetchira (e.g. an older `ui`) may be mid-login on it; without `ps` we can't tell.
+        let running = crate::instances::command_lines();
+        if running.is_empty() || running.iter().any(|cmd| cmd.contains(name)) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(e.path());
+    }
+}
+
 /// Browsers to try for login. An explicit `pick` (the UI's Chrome/Firefox toggle) is the ONLY
 /// candidate — no silent fallback to the other browser, which surprised users who chose one on
 /// purpose. With no pick, `FETCHIRA_BROWSER=chrome|firefox` pins one, else Chrome then Firefox.
@@ -1353,6 +1385,71 @@ mod tests {
         .unwrap();
         assert_eq!(sess.cookies.len(), 1);
         assert_eq!(sess.cookies[0].name, "JSESSIONID");
+    }
+
+    #[test]
+    fn upgrade_removes_unused_profiles() {
+        let id = std::process::id();
+        let home = std::env::temp_dir().join(format!("fetchira-profiles-{id}"));
+        let name = |d: &str| format!("{d}-t{id}");
+        for d in [
+            "chrome-grok",
+            "firefox-grok",
+            "chrome-grok-old",
+            "chrome-gemini",
+            "firefox-chatgpt",
+            "chrome-mid-login",
+        ] {
+            let mark = if d.starts_with("chrome") {
+                "Local State"
+            } else {
+                "times.json"
+            };
+            std::fs::create_dir_all(home.join(name(d))).unwrap();
+            std::fs::write(home.join(name(d)).join(mark), "").unwrap();
+        }
+        std::fs::create_dir_all(home.join(name("chrome-remote-desktop"))).unwrap();
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        let mut browser = std::process::Command::new("sh")
+            .args(["-c", "read x", &name("chrome-mid-login")])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let acct = |provider, label: &str| crate::config::Account {
+            provider,
+            label: label.into(),
+            api_key: None,
+            proxy: None,
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        };
+        remove_unused_profiles(
+            &home,
+            &[
+                acct(ProviderKind::GrokWeb, &format!("grok-t{id}")),
+                acct(ProviderKind::GeminiWeb, &format!("gemini-t{id}")),
+            ],
+        );
+        let mut left: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        browser.kill().unwrap();
+        browser.wait().unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(
+            left,
+            [
+                name("chrome-grok"),
+                name("chrome-mid-login"),
+                name("chrome-remote-desktop"),
+                name("firefox-grok"),
+                "run".into()
+            ]
+        );
     }
 
     #[test]

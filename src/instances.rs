@@ -516,7 +516,7 @@ struct PsRow {
 
 fn ps_table() -> Vec<PsRow> {
     let Ok(out) = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,args="])
+        .args(["-wwaxo", "pid=,ppid=,args="])
         .output()
     else {
         return Vec::new();
@@ -532,6 +532,10 @@ fn ps_table() -> Vec<PsRow> {
             })
         })
         .collect()
+}
+
+pub(crate) fn command_lines() -> Vec<String> {
+    ps_table().into_iter().map(|r| r.args).collect()
 }
 
 fn is_fetchira(args: &str) -> bool {
