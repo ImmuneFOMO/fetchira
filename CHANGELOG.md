@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.21](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.20...v0.1.21) - 2026-11-03
+
+### Fixed
+
+- *(login)* remove leftover browser profiles on upgrade
+- *(browser)* stop leaking chrome clones and profiles
+
 ## [0.1.20](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.19...v0.1.20) - 2026-10-30
 
 ### Fixed
