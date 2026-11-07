@@ -2,6 +2,8 @@
 
 # Fetchira
 
+Website and docs: [fetchira.dev](https://fetchira.dev)
+
 Web search, page reading, deep research and image generation through one router. Use the
 CLI or connect your agent through MCP. Bring an API key or a supported web session;
 Fetchira routes requests across your configured accounts and providers.
