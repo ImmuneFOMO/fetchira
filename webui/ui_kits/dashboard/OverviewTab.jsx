@@ -62,7 +62,7 @@ function BurnRadar() {
 // Routing priority: the failover chain the router walks per capability. Chips are numbered
 // slots joined by "→" (1 is the default, the rest are failover); drag a chip to reorder —
 // one save on drop. Providers without an account are dimmed (the router skips them live).
-// Saved to fetchira.toml; running MCP servers pick it up on their next start.
+// Saved to fetchira.toml; running MCP servers pick it up within seconds.
 function RoutingPriority() {
   const rows = window.FX.priority || [];
   const [open, setOpen] = React.useState(false);
@@ -186,7 +186,7 @@ function RoutingPriority() {
             </div>
           ))}
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-faint)' }}>
-            drag to reorder — 1 is tried first, the rest are failover · dimmed = no account yet · agents can force one with provider=… · {window.fxHosted ? 'hosted requests use changes immediately' : 'running MCP servers pick changes up on restart'}
+            drag to reorder — 1 is tried first, the rest are failover · dimmed = no account yet · agents can force one with provider=… · {window.fxHosted ? 'hosted requests use changes immediately' : 'running MCP servers pick changes up within seconds'}
           </span>
         </Card>
       )}

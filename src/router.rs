@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -90,12 +90,12 @@ pub struct Router {
     balance: Mutex<HashMap<String, Instant>>,
     // `Some(retention_hours)` records every attempt to the debug log; `None` is disabled.
     debug: Option<i64>,
-    // Overlapping browser processes reset CDP on small VPSes.
-    browser_gate: Arc<tokio::sync::Mutex<()>>,
     // One legacy 429 reconciliation at a time, so callers don't stampede the balance endpoint.
     legacy_recovery_gate: tokio::sync::Mutex<()>,
 }
 
+// Overlapping browser processes reset CDP on small VPSes; process-wide so a rebuilt router shares it.
+static BROWSER_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const LIVE_LIMITS_CACHE: Duration = Duration::from_secs(30);
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 const REJECTED_KEY_COOLDOWN: Duration = Duration::from_secs(300);
@@ -138,7 +138,6 @@ impl Router {
             live_limits: Mutex::new(HashMap::new()),
             balance: Mutex::new(HashMap::new()),
             debug: None,
-            browser_gate: Arc::new(tokio::sync::Mutex::new(())),
             legacy_recovery_gate: tokio::sync::Mutex::new(()),
         }
     }
@@ -151,10 +150,10 @@ impl Router {
 
     /// Web providers with a saved session; `build` skips the session-less accounts.
     pub fn web_providers(&self) -> Vec<ProviderKind> {
-        self.buckets
+        ProviderKind::all()
             .iter()
-            .map(|b| b.provider.kind)
-            .filter(|k| k.is_web())
+            .copied()
+            .filter(|&k| k.is_web() && self.buckets.iter().any(|b| b.provider.kind == k))
             .collect()
     }
 
@@ -259,7 +258,6 @@ impl Router {
             live_limits: Mutex::new(HashMap::new()),
             balance: Mutex::new(HashMap::new()),
             debug,
-            browser_gate: Arc::new(tokio::sync::Mutex::new(())),
             legacy_recovery_gate: tokio::sync::Mutex::new(()),
         })
     }
@@ -468,12 +466,12 @@ impl Router {
                             }) =>
                     {
                         // The HTTP path's per-call bearer breaks on NextAuth rotation mid-poll.
-                        let _browser_gate = self.browser_gate.lock().await;
+                        let _browser_gate = BROWSER_GATE.lock().await;
                         providers::chatgpt_browser::run(cookies, cap, input).await
                     }
                     // OpenAI's anti-bot gate blocks the HTTP turn, so turns drive a real browser.
                     Conn::Web(_, cookies) if b.provider.kind == ProviderKind::ChatgptWeb => {
-                        let _browser_gate = self.browser_gate.lock().await;
+                        let _browser_gate = BROWSER_GATE.lock().await;
                         providers::chatgpt_browser::run(cookies, cap, input).await
                     }
                     Conn::Web(c, _) => b.provider.call_web(c, cap, input, &b.label).await,
@@ -1303,7 +1301,7 @@ impl Router {
             _ => {}
         }
         let _browser_gate = if browser_fallback {
-            Some(self.browser_gate.lock().await)
+            Some(BROWSER_GATE.lock().await)
         } else {
             None
         };

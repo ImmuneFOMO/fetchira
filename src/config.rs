@@ -1,4 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{LazyLock, PoisonError, RwLock};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -219,7 +222,7 @@ pub fn load(path: &str) -> Result<Config> {
 
 /// Config for a home without fetchira.toml. Unset keys get no account, so the router logs no skips.
 pub fn builtin() -> Config {
-    builtin_with(|var| std::env::var(var).ok())
+    builtin_with(env_secret)
 }
 
 fn builtin_with(env: impl Fn(&str) -> Option<String>) -> Config {
@@ -361,11 +364,94 @@ pub fn resolve_db(home: &Path, db_path: &str) -> String {
 /// Resolve `"env:VAR"` against the environment; anything else is returned verbatim.
 pub fn resolve_secret(s: &str) -> Result<String> {
     match s.strip_prefix("env:") {
-        Some(var) => {
-            std::env::var(var).map_err(|_| Error::Config(format!("missing env var {var}")))
-        }
+        Some(var) => env_secret(var).ok_or_else(|| Error::Config(format!("missing env var {var}"))),
         None => crate::secrets::resolve(s).map_err(|e| Error::Config(e.to_string())),
     }
+}
+
+pub fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+#[derive(Default)]
+struct HomeEnv {
+    // Names the startup load copied into the process env, where they keep their old values.
+    loaded: HashSet<String>,
+    vars: HashMap<String, String>,
+}
+
+static HOME_ENV: LazyLock<RwLock<HomeEnv>> = LazyLock::new(Default::default);
+
+impl HomeEnv {
+    fn new(vars: HashMap<String, String>, env: impl Fn(&str) -> Option<String>) -> Self {
+        let loaded = vars.keys().filter(|k| env(k).is_none()).cloned().collect();
+        Self { loaded, vars }
+    }
+
+    fn get(&self, name: &str, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+        (!self.loaded.contains(name))
+            .then(|| env(name))
+            .flatten()
+            .or_else(|| self.vars.get(name).cloned())
+    }
+
+    fn reload(&mut self, (vars, parsed): (HashMap<String, String>, bool)) -> bool {
+        if parsed {
+            self.vars = vars;
+        }
+        parsed
+    }
+}
+
+/// The `.env` up to its first bad line, and whether it parsed to the end.
+fn parse_env(path: &Path) -> (HashMap<String, String>, bool) {
+    let mut vars = HashMap::new();
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => return (vars, e.kind() == std::io::ErrorKind::NotFound),
+    };
+    for item in dotenvy::Iter::new(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes)) {
+        let Ok((k, v)) = item else {
+            return (vars, false);
+        };
+        vars.entry(k).or_insert(v);
+    }
+    (vars, true)
+}
+
+/// Load the home `.env` into the process env without overriding it; returns the file's stamp.
+pub fn load_home_env(path: &Path) -> Option<(SystemTime, u64)> {
+    let stamp = file_stamp(path);
+    let env = HomeEnv::new(parse_env(path).0, |name| std::env::var(name).ok());
+    for (name, v) in env.vars.iter().filter(|(k, _)| env.loaded.contains(*k)) {
+        std::env::set_var(name, v);
+    }
+    *HOME_ENV.write().unwrap_or_else(PoisonError::into_inner) = env;
+    stamp
+}
+
+/// Re-read the home `.env` for `env_secret`; a file that fails to parse keeps the previous keys.
+pub fn reload_home_env(path: &Path) {
+    let parsed = parse_env(path);
+    if !HOME_ENV
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .reload(parsed)
+    {
+        tracing::warn!(
+            "{} does not parse; keeping its previous keys until it changes",
+            path.display()
+        );
+    }
+}
+
+/// A key from the process environment, or from the home `.env` as last read.
+fn env_secret(name: &str) -> Option<String> {
+    HOME_ENV
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(name, |name| std::env::var(name).ok())
 }
 
 #[cfg(test)]
@@ -523,5 +609,55 @@ mod tests {
         });
         assert_eq!(kinds(&cfg), [Keenable, Jina, Openalex, Gdelt]);
         assert_eq!(key(&cfg, Jina), None);
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn home_env_follows_the_file_but_set_variables_win() {
+        let parent = |name: &str| matches!(name, "REAL" | "BOTH").then(|| "parent".to_string());
+        let process = |name: &str| {
+            parent(name).or_else(|| matches!(name, "GONE" | "SAME").then(|| "old".to_string()))
+        };
+        let mut env = HomeEnv::new(
+            vars(&[("BOTH", "old"), ("GONE", "old"), ("SAME", "old")]),
+            parent,
+        );
+        assert_eq!(env.get("REAL", process).as_deref(), Some("parent"));
+        assert_eq!(env.get("BOTH", process).as_deref(), Some("parent"));
+        assert_eq!(env.get("GONE", process).as_deref(), Some("old"));
+        assert_eq!(env.get("ADDED", process), None);
+
+        assert!(env.reload((
+            vars(&[("BOTH", "new"), ("SAME", "new"), ("ADDED", "new")]),
+            true
+        )));
+        assert_eq!(env.get("REAL", process).as_deref(), Some("parent"));
+        assert_eq!(env.get("BOTH", process).as_deref(), Some("parent"));
+        assert_eq!(env.get("GONE", process), None);
+        assert_eq!(env.get("SAME", process).as_deref(), Some("new"));
+        assert_eq!(env.get("ADDED", process).as_deref(), Some("new"));
+
+        assert!(!env.reload((vars(&[("SAME", "half")]), false)));
+        assert_eq!(env.get("SAME", process).as_deref(), Some("new"));
+        assert_eq!(env.get("ADDED", process).as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn parse_env_reads_up_to_the_first_bad_line() {
+        let home = std::env::temp_dir().join(format!("fetchira-env-{}", rand::random::<u64>()));
+        std::fs::create_dir(&home).unwrap();
+        let path = home.join(".env");
+        assert_eq!(parse_env(&path), (HashMap::new(), true));
+        std::fs::write(&path, "\u{feff}A=1\n# note\nA=2\nB=\"two\"\n").unwrap();
+        assert_eq!(parse_env(&path), (vars(&[("A", "1"), ("B", "two")]), true));
+        std::fs::write(&path, "A=1\nB='open\nC=3\n").unwrap();
+        assert_eq!(parse_env(&path), (vars(&[("A", "1")]), false));
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

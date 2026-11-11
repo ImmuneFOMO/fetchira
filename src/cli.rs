@@ -602,8 +602,7 @@ pub const PRIORITY_CAPS: [Capability; 4] = [
 ];
 
 /// Set (or clear, with an empty list) the provider order for one capability. Rejects providers
-/// that don't serve it. Shared by the CLI and web UI. Routers read this at startup, so running
-/// MCP servers keep the old order until restarted.
+/// that don't serve it. Shared by the CLI and web UI.
 pub fn set_priority(home: &Path, cap: Capability, list: Vec<ProviderKind>) -> anyhow::Result<()> {
     if let Some(p) = list.iter().find(|p| !p.supports(cap)) {
         bail!("{} does not serve {}", p.as_str(), cap.as_str());
@@ -661,7 +660,7 @@ pub fn priority(home: &Path, args: impl Iterator<Item = String>) -> anyhow::Resu
     };
     set_priority(home, cap, list)?;
     print_priority(&load_or_builtin(home)?);
-    println!("\nsaved — applies to newly started fetchira processes (restart running MCP servers to pick it up)");
+    println!("\nsaved — running MCP servers pick it up within a few seconds");
     Ok(())
 }
 

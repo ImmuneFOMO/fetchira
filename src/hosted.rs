@@ -250,6 +250,7 @@ async fn rebuild_router(st: &HostedState) {
     if let Ok(router) = Router::build(cfg, st.store.clone()).await {
         let router = Arc::new(router);
         *st.router.write().await = router.clone();
+        crate::mcp::router_swapped();
         spawn_background(st, async move {
             router.warm().await;
         });

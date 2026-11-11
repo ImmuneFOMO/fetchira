@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -8,7 +8,7 @@ use rmcp::model::{
     CallToolResult, Content, Implementation, ListToolsResult, PaginatedRequestParams,
     ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
-use rmcp::service::RequestContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -108,11 +108,15 @@ pub struct Fetchira {
     tool_router: ToolRouter<Self>,
 }
 
-impl Fetchira {
-    pub fn new(router: Arc<Router>) -> Self {
-        Self::new_shared(Arc::new(tokio::sync::RwLock::new(router)))
-    }
+static SWAPS: LazyLock<tokio::sync::watch::Sender<()>> =
+    LazyLock::new(|| tokio::sync::watch::Sender::new(()));
 
+/// Wake every session's tool-list check after the shared router is replaced.
+pub fn router_swapped() {
+    SWAPS.send_replace(());
+}
+
+impl Fetchira {
     pub fn new_shared(router: Arc<tokio::sync::RwLock<Arc<Router>>>) -> Self {
         Self {
             router,
@@ -608,8 +612,32 @@ impl ServerHandler for Fetchira {
         )))
     }
 
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let (router, peer, mut swaps) = (self.router.clone(), context.peer, SWAPS.subscribe());
+        tokio::spawn(async move {
+            let mut web = router.read().await.web_providers();
+            while !peer.is_transport_closed() {
+                // rmcp has no transport-closed future; this caps a closed session's lifetime.
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(60), swaps.changed()).await;
+                let now = router.read().await.web_providers();
+                if now != web {
+                    web = now;
+                    if peer.notify_tool_list_changed().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
             .with_server_info(Implementation::new("fetchira", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Quota-aware router over web-search/scrape providers. Pass `provider` \

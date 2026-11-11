@@ -1,7 +1,10 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
+use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
 use fetchira::cli;
@@ -20,12 +23,80 @@ fn require_no_args(
     Ok(())
 }
 
+type FileStamp = Option<(SystemTime, u64)>;
+
+/// What `login`, `add`, the dashboard and `.env` edits change on disk.
+type Stamp = (FileStamp, FileStamp, Vec<(String, String)>);
+
+/// Rebuild the router when the accounts or keys change on disk.
+async fn reload(
+    home: PathBuf,
+    db: PathBuf,
+    store: Store,
+    router: Arc<RwLock<Arc<Router>>>,
+    mut seen: Stamp,
+) {
+    let (cfg_path, env_path) = (home.join("fetchira.toml"), home.join(".env"));
+    // SQLite keeps the -wal next to the symlink target.
+    let db = std::fs::canonicalize(&db).unwrap_or(db);
+    let mut wal = db.clone().into_os_string();
+    wal.push("-wal");
+    let mut db_seen = None;
+    let mut sessions = seen.2.clone();
+    let watch_env = seen.1.is_some();
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Every tool call writes the db, so the sessions query runs only after it changed.
+        let files = (config::file_stamp(&db), config::file_stamp(Path::new(&wal)));
+        if files.0.is_none() || db_seen != Some(files) {
+            let Ok(now) = store.web_session_stamps().await else {
+                continue;
+            };
+            sessions = now;
+            // A write later in the same mtime tick would leave the stamps unchanged.
+            db_seen = [files.0, files.1]
+                .iter()
+                .flatten()
+                .all(|(t, _)| t.elapsed().is_ok_and(|e| e > Duration::from_secs(2)))
+                .then_some(files);
+        }
+        let cfg = config::file_stamp(&cfg_path);
+        let env = watch_env.then(|| config::file_stamp(&env_path)).flatten();
+        if cfg == seen.0 && env == seen.1 && sessions == seen.2 {
+            continue;
+        }
+        let Ok(_admission) = fetchira::instances::admit_request(&home) else {
+            continue;
+        };
+        if env != seen.1 {
+            config::reload_home_env(&env_path);
+        }
+        let next = async {
+            Ok::<_, anyhow::Error>(
+                Router::build(cli::load_or_builtin(&home)?, store.clone()).await?,
+            )
+        };
+        match next.await {
+            Ok(next) => {
+                *router.write().await = Arc::new(next);
+                fetchira::mcp::router_swapped();
+                seen = (cfg, env, sessions.clone());
+                tracing::info!("accounts reloaded");
+            }
+            Err(e) => {
+                tracing::warn!("account reload failed; keeping the old accounts: {e:#}");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let home = cli::home();
     std::fs::create_dir_all(&home).ok();
     // Only the home .env: agents start fetchira inside projects whose .env is not ours.
-    dotenvy::from_path(home.join(".env")).ok();
+    let env_stamp = config::load_home_env(&home.join(".env"));
 
     // Logs → stderr (stdout is the MCP protocol channel on the serve path). RUST_LOG overrides;
     // default `info`. Initialising here — before the command match — means `ui`/`login` finally
@@ -331,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Default: serve the MCP server over stdio. Logs go to stderr (stdout is the MCP channel).
+    let cfg_stamp = config::file_stamp(&home.join("fetchira.toml"));
     let mut cfg = cli::load_or_builtin(&home)?;
     if cfg.remote.endpoint.is_some() {
         let _run = fetchira::instances::register(&home, "mcp");
@@ -341,8 +413,17 @@ async fn main() -> anyhow::Result<()> {
     }
     cfg.db_path = config::resolve_db(&home, &cfg.db_path);
     let store = Store::open(&cfg.db_path).await?;
-    let router = Router::build(cfg, store).await?;
-    let server = Fetchira::new(Arc::new(router));
+    let db = PathBuf::from(&cfg.db_path);
+    let seen = (
+        cfg_stamp,
+        env_stamp,
+        store.web_session_stamps().await.unwrap_or_default(),
+    );
+    let router = Arc::new(RwLock::new(Arc::new(
+        Router::build(cfg, store.clone()).await?,
+    )));
+    let server = Fetchira::new_shared(router.clone());
+    tokio::spawn(reload(home.clone(), db, store, router, seen));
     // Registry entry for the schema-aware updater ("which tools still run an old fetchira").
     let _run = fetchira::instances::register(&home, "mcp");
     drop(startup_admission);

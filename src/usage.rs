@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::auth;
 use crate::config::Reset;
 use crate::error::{Error, Result};
-use crate::providers::LiveBalance;
+use crate::providers::{LiveBalance, ProviderKind};
 
 tokio::task_local! { pub static HOSTED_REQUEST_ID: String; }
 
@@ -887,6 +887,23 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Label and save time of each web-provider session; balance logins re-save too often to watch.
+    pub async fn web_session_stamps(&self) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query("SELECT label, provider, updated FROM web_session ORDER BY label")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| {
+                let provider: String = r.get("provider");
+                ProviderKind::all()
+                    .iter()
+                    .any(|k| k.is_web() && k.as_str() == provider)
+            })
+            .map(|r| (r.get("label"), r.get("updated")))
+            .collect())
     }
 
     /// Record the account identity (email) captured at login — for the dashboard + dup detection.

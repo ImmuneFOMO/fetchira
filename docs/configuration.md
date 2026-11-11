@@ -19,7 +19,7 @@ whose key variable is set and not blank. The variable is the provider id in uppe
 `_API_KEY`, for example `TAVILY_API_KEY`, `YOU_API_KEY` or `SERPAPI_API_KEY`; it is read only
 for providers that need a key. A keyless provider uses a key only when you add that account
 explicitly with `fetchira add`. Web-session providers are not included. Without a
-`fetchira.toml`, any `<ID>_API_KEY` present in the environment Fetchira is started with becomes
+`fetchira.toml`, any `<ID>_API_KEY` in its home `.env` or in the environment it starts with becomes
 an account and can be spent. The first `fetchira add`, `fetchira priority` or dashboard change
 writes the accounts visible at that moment to `fetchira.toml`; from then on only the file
 counts, so add later keys with `fetchira add`. An existing file with no accounts means no
@@ -69,8 +69,12 @@ fetchira priority search reset
 Capabilities with configurable priority are `search`, `read`, `deep_research`, and `image`.
 Unlisted providers follow the listed ones in built-in order, which ranks providers by public
 search, research and scraping benchmarks; `topic=academic` adds OpenAlex and `topic=news` adds
-GDELT. Restart running MCP/server
-processes after changing configuration through the CLI. Dashboard changes reload its router.
+GDELT. Running local MCP servers pick up accounts, logins, priority, proxies and keys in the
+home `.env` within a few seconds. Variables set in the agent's own environment, a `.env`
+created after the server started, `FETCHIRA_*` settings, `db_path` and `[remote]` still need a
+restart. The dashboard and
+`fetchira server` read `.env` only at start; restart `fetchira server` processes after changing
+their configuration through the CLI. Dashboard changes reload its router.
 
 A `--provider` argument restricts the request to that backend; it does not fall back to a
 different provider. A returned session also pins the account, so a follow-up cannot silently

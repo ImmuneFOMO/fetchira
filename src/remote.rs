@@ -13,7 +13,7 @@ use rmcp::{
     },
     service::{NotificationContext, RequestContext},
     transport::stdio,
-    ErrorData, Peer, RoleClient, RoleServer, Service, ServiceError, ServiceExt,
+    ClientHandler, ErrorData, Peer, RoleClient, RoleServer, Service, ServiceError, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 
@@ -200,7 +200,10 @@ pub async fn validate_config(cfg: &Config) -> anyhow::Result<String> {
 /// from the hosted server's negotiated info instead of being sent a second time upstream.
 pub async fn serve_stdio(cfg: &Config) -> anyhow::Result<()> {
     let _run = crate::instances::register(&crate::cli::home(), "mcp");
-    let remote = ().serve(transport(cfg)?).await?;
+    let local_peer = Arc::new(std::sync::OnceLock::new());
+    let remote = ListChanged(local_peer.clone())
+        .serve(transport(cfg)?)
+        .await?;
     let info = remote
         .peer()
         .peer_info()
@@ -211,10 +214,22 @@ pub async fn serve_stdio(cfg: &Config) -> anyhow::Result<()> {
         info,
     };
     let local = bridge.serve(stdio()).await?;
+    let _ = local_peer.set(local.peer().clone());
     let local_result = local.waiting().await;
     let _ = remote.cancel().await;
     local_result?;
     Ok(())
+}
+
+/// Passes the hosted server's tool-list changes on to the local client.
+struct ListChanged(Arc<std::sync::OnceLock<Peer<RoleServer>>>);
+
+impl ClientHandler for ListChanged {
+    async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
+        if let Some(local) = self.0.get() {
+            let _ = local.notify_tool_list_changed().await;
+        }
+    }
 }
 
 struct StdioBridge {
