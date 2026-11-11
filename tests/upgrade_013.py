@@ -149,8 +149,6 @@ def main():
     parser.add_argument("--binary", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/fetchira")
     binary = parser.parse_args().binary.resolve()
     assert binary.is_file(), "run `cargo build --locked` first"
-    sleep = shutil.which("sleep")
-    assert sleep, "the upgrade fixture needs the standard sleep utility"
 
     with tempfile.TemporaryDirectory(prefix="fetchira-upgrade-013-") as temporary:
         home = Path(temporary)
@@ -177,11 +175,13 @@ def main():
         db.close()
 
         # `instances::running` trusts only a process named fetchira plus this v0.1.13 registry
-        # record. A harmless sleep symlink provides that old-process shape without shipping an
-        # executable from the historical release in every test environment.
+        # record. A tiny compiled sleeper provides that old-process shape without shipping an
+        # executable from the historical release; multicall `sleep` refuses to run as `fetchira`.
         legacy_name = home / "fetchira"
-        legacy_name.symlink_to(sleep)
-        peer = subprocess.Popen([str(legacy_name), "30"])
+        subprocess.run(["cc", "-x", "c", "-", "-o", str(legacy_name)], check=True,
+                       input="#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n",
+                       text=True, capture_output=True, timeout=30)
+        peer = subprocess.Popen([str(legacy_name)])
         try:
             (home / "run").mkdir()
             (home / "run" / f"{peer.pid}.json").write_text(json.dumps({
@@ -222,10 +222,7 @@ def main():
         unknown_dir = home / "unregistered"
         unknown_dir.mkdir()
         unknown_binary = unknown_dir / "fetchira"
-        source = unknown_dir / "peer.c"
-        source.write_text("#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n")
-        subprocess.run(["cc", str(source), "-o", str(unknown_binary)], check=True,
-                       capture_output=True, timeout=30)
+        shutil.copy(legacy_name, unknown_binary)
         unknown = subprocess.Popen([str(unknown_binary), "ui"], cwd=home)
         try:
             config.write_bytes(original_config + b"\n[remote]\nendpoint = 'https://example.test/mcp'\napi_key = 'fk_live_fixture'\n")
