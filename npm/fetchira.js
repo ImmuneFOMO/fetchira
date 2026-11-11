@@ -7,8 +7,8 @@ const path = require("path");
 
 const bin = path.join(process.env.BIN_DST || path.join(homedir(), ".local", "bin"), "fetchira");
 
-function run(cmd, args, stdio) {
-  const { status, error } = spawnSync(cmd, args, { stdio });
+function run(cmd, args, stdio, env = process.env) {
+  const { status, error } = spawnSync(cmd, args, { stdio, env });
   if (error) console.error(error.message);
   return status ?? 1;
 }
@@ -22,7 +22,9 @@ if (!existsSync(bin)) {
     process.exit(1);
   }
   // Closed stdin keeps install.sh from launching `fetchira setup` itself; the hand-off below opens the dashboard.
-  const status = run("sh", [path.join(__dirname, "..", "install.sh")], ["ignore", "inherit", "inherit"]);
+  // stdout is the MCP channel under `npx fetchira serve`, so installer output goes to stderr.
+  const env = { ...process.env, FETCHIRA_VERSION: process.env.FETCHIRA_VERSION || `v${require("../package.json").version}` };
+  const status = run("sh", [path.join(__dirname, "..", "install.sh")], ["ignore", 2, 2], env);
   if (status !== 0) process.exit(status);
 }
 process.exit(run(bin, process.argv.slice(2), "inherit"));

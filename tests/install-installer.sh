@@ -97,13 +97,27 @@ run_npm_shim() {
   mkdir -p "$home"
   : > "$log"
   for pass in install reuse; do
-    env PATH="$STUB_DIR:$PATH" HOME="$home" BIN_DST="$dst" \
-      FETCHIRA_HOME="$home/config" FETCHIRA_VERSION=v0.0.0 \
+    env -u FETCHIRA_VERSION PATH="$STUB_DIR:$PATH" HOME="$home" BIN_DST="$dst" \
+      FETCHIRA_HOME="$home/config" \
       STUB_MODE="$mode" STUB_UNAME_S=Linux STUB_UNAME_M=x86_64 STUB_LOG="$log" \
-      node "$ROOT/npm/fetchira.js" --version >/dev/null 2>&1 || fail "npm shim $pass run failed"
+      node "$ROOT/npm/fetchira.js" --version >"$TMP_ROOT/npm-out-$pass" 2>"$TMP_ROOT/npm-err-$pass" \
+      || fail "npm shim $pass run failed"
     [ -x "$dst/fetchira" ] || fail "npm shim did not install fetchira"
     [ "$(grep -c "tar.xz$" "$log")" -eq 1 ] || fail "npm shim $pass run downloaded again"
   done
+  grep -F "/releases/download/v0.0.0/" "$log" >/dev/null || fail "npm shim did not pin the package version"
+  ! grep -F "/releases/latest" "$log" >/dev/null || fail "npm shim looked up the latest release"
+  grep -F "==>" "$TMP_ROOT/npm-err-install" >/dev/null || fail "npm shim installer output missing from stderr"
+  [ ! -s "$TMP_ROOT/npm-out-install" ] || fail "npm shim leaked installer output to stdout"
+
+  dst="$TMP_ROOT/dst-$mode-env"
+  log="$TMP_ROOT/log-$mode-env"
+  : > "$log"
+  env PATH="$STUB_DIR:$PATH" HOME="$home" BIN_DST="$dst" \
+    FETCHIRA_HOME="$home/config" FETCHIRA_VERSION=v9.9.9 \
+    STUB_MODE="$mode" STUB_UNAME_S=Linux STUB_UNAME_M=x86_64 STUB_LOG="$log" \
+    node "$ROOT/npm/fetchira.js" --version >/dev/null 2>&1 || fail "npm shim env run failed"
+  grep -F "/releases/download/v9.9.9/" "$log" >/dev/null || fail "npm shim ignored FETCHIRA_VERSION"
 }
 
 sh -n "$ROOT/install.sh"
