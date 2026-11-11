@@ -77,6 +77,10 @@ with tempfile.TemporaryFile() as log:
         assert {"search", "read", "deep_research", "browser", "create_image", "usage"} <= {
             tool["name"] for tool in tools["tools"]
         }
+        assert all(
+            tool.get("title") and "readOnlyHint" in tool.get("annotations", {})
+            for tool in tools["tools"]
+        )
         print("PASS initialize + six tools", flush=True)
         if args.check_input_validation:
             for tool, arguments, message in [

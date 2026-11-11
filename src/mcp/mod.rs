@@ -75,8 +75,6 @@ pub struct ReadArgs {
 pub struct BrowserArgs {
     /// The URL to load in a headless browser.
     pub url: String,
-    /// Reserved for multi-step automation; ignored in v1.
-    pub actions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -218,7 +216,15 @@ fn search_input(args: SearchArgs, session: Option<String>) -> Input {
 #[tool_router]
 impl Fetchira {
     #[tool(
-        description = "Web search across quota-aware providers. API providers return ranked title/url/snippet results; web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-up turns. For chatgpt_web this is a full chat turn with web search on by default — `mode=\"chat\"` answers from the model alone. In local stdio mode, attach files with `file` to ask about them. Niche knobs: `topic`, `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls."
+        title = "Web search",
+        description = "Web search across quota-aware providers. API providers return ranked title/url/snippet results; web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-up turns. For chatgpt_web this is a full chat turn with web search on by default — `mode=\"chat\"` answers from the model alone. In local stdio mode, attach files with `file` to ask about them. Niche knobs: `topic`, `recency`, `domains`. Provider-specific extras (scholar/patents/places, structured extract…) → call usage(provider=…) for exact params & example calls.",
+        annotations(
+            title = "Web search",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     pub async fn search(
         &self,
@@ -237,7 +243,15 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Read a URL and return its main content as clean markdown; auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls."
+        title = "Read web page",
+        description = "Read a URL and return its main content as clean markdown; auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls.",
+        annotations(
+            title = "Read web page",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     pub async fn read(
         &self,
@@ -256,7 +270,15 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Deep research over multiple sources (parallel, exa, tavily, tinyfish, linkup, you, gemini_web, grok_web, chatgpt_web); may take minutes. gemini_web and chatgpt_web first return a research PLAN plus a `session`: pass that `session` with query \"start\" to run it, or with a revised request to replace the plan. gemini returns the finished report in the same call; chatgpt runs ~5-30 min after \"start\" — call again with the returned `session` to fetch the report (`model` is ignored there). Knobs: `topic`, `recency`, `domains`, `depth` (\"deep\" is slower/pricier). Provider-specific extras → call usage(provider=…)."
+        title = "Deep research",
+        description = "Deep research over multiple sources (parallel, exa, tavily, tinyfish, linkup, you, gemini_web, grok_web, chatgpt_web); may take minutes. gemini_web and chatgpt_web first return a research PLAN plus a `session`: pass that `session` with query \"start\" to run it, or with a revised request to replace the plan. gemini returns the finished report in the same call; chatgpt runs ~5-30 min after \"start\" — call again with the returned `session` to fetch the report (`model` is ignored there). Knobs: `topic`, `recency`, `domains`, `depth` (\"deep\" is slower/pricier). Provider-specific extras → call usage(provider=…).",
+        annotations(
+            title = "Deep research",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     pub async fn deep_research(
         &self,
@@ -279,7 +301,15 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Load a URL in a headless browser (hyperbrowser, browserless, steel) and return the page as markdown."
+        title = "Render page in headless browser",
+        description = "Load a URL in a headless browser (hyperbrowser, browserless, steel) and return the page as markdown.",
+        annotations(
+            title = "Render page in headless browser",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     pub async fn browser(
         &self,
@@ -297,7 +327,15 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Show remaining free quota per account and provider for the current period, plus each account's assigned proxy. For logged-in web sessions (grok/gemini/chatgpt) also includes live per-tier limits and the selectable model/mode catalog with thinking levels — a locked mode (e.g. grok Expert/Heavy on a lapsed sub) reads 0/0. Pass `provider` for that backend's full capability sheet — its niches, escape-hatch `mode` values, and ready-to-copy example calls."
+        title = "Provider quota and limits",
+        description = "Show remaining free quota per account and provider for the current period, plus each account's assigned proxy. For logged-in web sessions (grok/gemini/chatgpt) also includes live per-tier limits and the selectable model/mode catalog with thinking levels — a locked mode (e.g. grok Expert/Heavy on a lapsed sub) reads 0/0. Pass `provider` for that backend's full capability sheet — its niches, escape-hatch `mode` values, and ready-to-copy example calls.",
+        annotations(
+            title = "Provider quota and limits",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     pub async fn usage(
         &self,
@@ -335,7 +373,15 @@ impl Fetchira {
     }
 
     #[tool(
-        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; in local stdio mode, edit an existing image by passing its absolute path in `file` and describing the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Local stdio and the local hosted bridge save the result and return its path; use `path` to choose the local destination. Direct hosted HTTP returns inline artifacts without writing server paths."
+        title = "Create or edit image",
+        description = "Generate or edit an image via a logged-in web session. For a new image pass `prompt`; in local stdio mode, edit an existing image by passing its absolute path in `file` and describing the changes. To continue editing a ChatGPT-generated image in the same chat, pass the returned `session` back. Local stdio and the local hosted bridge save the result and return its path; use `path` to choose the local destination. Direct hosted HTTP returns inline artifacts without writing server paths.",
+        annotations(
+            title = "Create or edit image",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     pub async fn create_image(
         &self,
@@ -518,6 +564,25 @@ mod tests {
     use crate::providers::OutImage;
     use base64::Engine;
     use rmcp::model::RawContent;
+
+    #[test]
+    fn every_tool_has_title_and_annotations() {
+        let tools = Fetchira::tool_router().list_all();
+        assert_eq!(tools.len(), 6);
+        for tool in &tools {
+            let ann = tool.annotations.as_ref().unwrap();
+            assert!(tool.title.is_some() && ann.title.is_some(), "{}", tool.name);
+            assert!(ann.read_only_hint.is_some(), "{}", tool.name);
+            assert!(ann.destructive_hint.is_some(), "{}", tool.name);
+            assert!(ann.open_world_hint.is_some(), "{}", tool.name);
+        }
+        let hints = |name: &str| {
+            let tool = tools.iter().find(|t| t.name == name).unwrap();
+            tool.annotations.clone().unwrap()
+        };
+        assert_eq!(hints("create_image").destructive_hint, Some(true));
+        assert_eq!(hints("deep_research").read_only_hint, Some(false));
+    }
 
     #[test]
     fn hosted_file_inputs_cannot_read_server_files() {
