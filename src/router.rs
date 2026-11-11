@@ -149,6 +149,15 @@ impl Router {
         self
     }
 
+    /// Web providers with a saved session; `build` skips the session-less accounts.
+    pub fn web_providers(&self) -> Vec<ProviderKind> {
+        self.buckets
+            .iter()
+            .map(|b| b.provider.kind)
+            .filter(|k| k.is_web())
+            .collect()
+    }
+
     pub async fn build(cfg: Config, store: Store) -> Result<Self> {
         let debug = cfg
             .debug_log

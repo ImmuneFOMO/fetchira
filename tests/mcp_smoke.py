@@ -74,14 +74,19 @@ with tempfile.TemporaryFile() as log:
         })
         send(dict(method="notifications/initialized"))
         tools = request("tools/list", {})
-        assert {"search", "read", "deep_research", "browser", "create_image", "usage"} <= {
-            tool["name"] for tool in tools["tools"]
-        }
+        names = {tool["name"] for tool in tools["tools"]}
+        search = next(tool for tool in tools["tools"] if tool["name"] == "search")
+        web = {"gemini_web", "grok_web", "chatgpt_web"} & set(
+            search["inputSchema"]["$defs"]["ProviderKind"]["enum"]
+        )
+        assert names == {"search", "read", "deep_research", "browser", "usage"} | (
+            {"create_image"} if web else set()
+        ), names
         assert all(
             tool.get("title") and "readOnlyHint" in tool.get("annotations", {})
             for tool in tools["tools"]
         )
-        print("PASS initialize + six tools", flush=True)
+        print(f"PASS initialize + {len(names)} tools", flush=True)
         if args.check_input_validation:
             for tool, arguments, message in [
                 ("search", {"query": "input validation", "topic": "blogs"}, "topic must be"),

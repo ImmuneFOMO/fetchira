@@ -60,6 +60,8 @@ fetchira add gemini_web            # web-session provider; a browser opens for l
 fetchira list                     # expect key, keyless or session, not NO KEY / NEEDS LOGIN
 ```
 
+The MCP tool list shows `create_image` and a web provider only after that provider's login; restart the agent after `fetchira login`.
+
 Config lives in `$FETCHIRA_HOME`, otherwise `$XDG_CONFIG_HOME/fetchira` (default `~/.config/fetchira`).
 
 ### Choose providers

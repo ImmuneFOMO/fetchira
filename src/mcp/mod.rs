@@ -5,7 +5,8 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ResourceContents, ServerCapabilities, ServerInfo,
+    CallToolResult, Content, Implementation, ListToolsResult, PaginatedRequestParams,
+    ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer};
@@ -495,6 +496,55 @@ fn inline_artifact(img: &crate::providers::OutImage) -> Content {
     }
 }
 
+/// Web-only parts of the tool descriptions, cut while no web provider is set up.
+const WEB_NOTES: [&str; 6] = [
+    "; web providers (gemini_web, grok_web, chatgpt_web) return a synthesized answer with sources and a `session` token for follow-up turns",
+    " For chatgpt_web this is a full chat turn with web search on by default — `mode=\"chat\"` answers from the model alone.",
+    " In local stdio mode, attach files with `file` to ask about them.",
+    ", gemini_web, grok_web, chatgpt_web",
+    " gemini_web and chatgpt_web first return a research PLAN plus a `session`: pass that `session` with query \"start\" to run it, or with a revised request to replace the plan. gemini returns the finished report in the same call; chatgpt runs ~5-30 min after \"start\" — call again with the returned `session` to fetch the report (`model` is ignored there).",
+    " For logged-in web sessions (grok/gemini/chatgpt) also includes live per-tier limits and the selectable model/mode catalog with thinking levels — a locked mode (e.g. grok Expert/Heavy on a lapsed sub) reads 0/0.",
+];
+
+fn setup_tools(tools: Vec<Tool>, web: &[ProviderKind]) -> Vec<Tool> {
+    tools
+        .into_iter()
+        .filter(|t| t.name != "create_image" || web.iter().any(|p| p.supports(Capability::Image)))
+        .map(|mut t| {
+            let schema = Arc::make_mut(&mut t.input_schema);
+            if let Some(kinds) = schema
+                .get_mut("$defs")
+                .and_then(|d| d.pointer_mut("/ProviderKind/enum"))
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for p in ProviderKind::all()
+                    .iter()
+                    .filter(|p| p.is_web() && !web.contains(p))
+                {
+                    kinds.retain(|k| *k != p.as_str());
+                }
+            }
+            if web.is_empty() {
+                // Only web providers read these.
+                if let Some(props) = schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    for web_only in ["file", "session", "model"] {
+                        props.remove(web_only);
+                    }
+                }
+                if let Some(desc) = &mut t.description {
+                    for note in WEB_NOTES {
+                        *desc = desc.replace(note, "").into();
+                    }
+                }
+            }
+            t
+        })
+        .collect()
+}
+
 fn update_error() -> ErrorData {
     ErrorData::internal_error(
         crate::instances::UPDATING,
@@ -546,12 +596,23 @@ impl ServerHandler for Fetchira {
         }
     }
 
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let web = self.router.read().await.web_providers();
+        Ok(ListToolsResult::with_all_items(setup_tools(
+            self.tool_router.list_all(),
+            &web,
+        )))
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("fetchira", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Quota-aware router over web-search/scrape providers. \
-                 Tools: search, read, deep_research, browser, create_image, usage. Pass `provider` \
+                "Quota-aware router over web-search/scrape providers. Pass `provider` \
                  to restrict routing to a specific backend (quota and retry limits still apply); otherwise \
                  providers are tried in the user's priority order with automatic failover.",
             )
@@ -647,5 +708,40 @@ mod tests {
             panic!("expected session text");
         };
         assert!(text.text.contains("⟦session: steel:test"));
+    }
+
+    #[test]
+    fn tools_without_web_sessions_skip_web_notes() {
+        let tools = setup_tools(Fetchira::tool_router().list_all(), &[]);
+        assert_eq!(tools.len(), 5);
+        assert!(tools.iter().all(|t| t.name != "create_image"));
+        let json = serde_json::to_string(&tools).unwrap();
+        for web in ["_web", "web session", "logged-in", "eb-provider", "`file`"] {
+            assert!(!json.contains(web), "{web}");
+        }
+    }
+
+    #[test]
+    fn tools_follow_each_web_session() {
+        let tools = setup_tools(Fetchira::tool_router().list_all(), &[ProviderKind::GrokWeb]);
+        assert!(tools.iter().any(|t| t.name == "create_image"));
+        for t in tools
+            .iter()
+            .filter(|t| t.input_schema.contains_key("$defs"))
+        {
+            let kinds = t.input_schema["$defs"]["ProviderKind"]["enum"].to_string();
+            assert!(kinds.contains("\"grok_web\""), "{}", t.name);
+            assert!(!kinds.contains("chatgpt_web") && !kinds.contains("gemini_web"));
+            assert!(kinds.contains("\"tavily\""));
+        }
+        let all = [
+            ProviderKind::GeminiWeb,
+            ProviderKind::GrokWeb,
+            ProviderKind::ChatgptWeb,
+        ];
+        assert_eq!(
+            setup_tools(Fetchira::tool_router().list_all(), &all),
+            Fetchira::tool_router().list_all()
+        );
     }
 }

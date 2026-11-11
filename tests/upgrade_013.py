@@ -95,7 +95,7 @@ def wait_for_mcp(process):
     process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode() + b"\n")
     process.stdin.flush()
     tools = request("tools/list", {})
-    assert {"search", "read", "deep_research", "browser", "create_image", "usage"} <= {
+    assert {"search", "read", "deep_research", "browser", "usage"} <= {
         tool["name"] for tool in tools["tools"]
     }
 
