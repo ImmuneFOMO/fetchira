@@ -76,7 +76,7 @@ fn complete_integrations(home: &Path) -> anyhow::Result<Vec<crate::cli::Integrat
     if std::fs::read_to_string(&marker).ok().as_deref() == Some(env!("CARGO_PKG_VERSION")) {
         return Ok(vec![]);
     }
-    if let Ok(cfg) = crate::cli::load_or_empty(home) {
+    if let Ok(cfg) = crate::cli::load_or_builtin(home) {
         crate::web::remove_unused_profiles(home, &cfg.accounts);
     }
     let agent_home = std::env::var_os("HOME")
@@ -377,11 +377,7 @@ pub async fn perform_with_store(
         crate::instances::stop_for_update(home, &[std::process::id()]).await?;
     }
     let bin = crate::cli::installation_binary()?;
-    let cfg = crate::config::load(
-        home.join("fetchira.toml")
-            .to_str()
-            .context("invalid config path")?,
-    )?;
+    let cfg = crate::cli::load_or_builtin(home)?;
     let db = crate::config::resolve_db(home, &cfg.db_path);
     if let Some(store) = store {
         // A closed pool cannot be reopened by dropping maintenance. Restart is required on error.

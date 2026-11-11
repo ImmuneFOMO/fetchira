@@ -1,5 +1,7 @@
 # fetchira config. Copy to fetchira.toml. Lives in the fetchira home dir
 # ($FETCHIRA_HOME or ~/.config/fetchira), so it's found no matter where an MCP client launches the binary.
+# Without it, fetchira uses the keyless providers plus one account per <PROVIDER>_API_KEY that is set
+# (key-based providers only; a keyless provider takes a key only through an explicit account).
 db_path = "usage.db"
 
 # Full request/response debug log (the dashboard's Debug tab). On by default; bounded to the

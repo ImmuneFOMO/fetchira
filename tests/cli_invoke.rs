@@ -235,3 +235,60 @@ fn dotenv_is_read_only_from_home() {
     assert!(row("exa-parent").contains("NO KEY"), "{stdout}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn missing_config_runs_on_builtin_accounts() {
+    let home = std::env::temp_dir().join(format!(
+        "fetchira_builtin_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str], tavily: Option<&str>| -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_fetchira"));
+        cmd.args(args)
+            .env("FETCHIRA_HOME", &home)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env_remove("CODEX_HOME")
+            .env_remove("FETCHIRA_MASTER_KEY")
+            .env_remove("FETCHIRA_MASTER_KEY_FILE")
+            .env_remove("TAVILY_API_KEY")
+            .env("RUST_LOG", "off")
+            .current_dir(&home);
+        if let Some(key) = tavily {
+            cmd.env("TAVILY_API_KEY", key);
+        }
+        cmd.output().unwrap()
+    };
+    let out = run(&["serve"], None);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("set up"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(home.join("usage.db").exists());
+    let out = run(&["list"], None);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("keenable-1"), "{stdout}");
+    assert!(!stdout.contains("tavily"), "{stdout}");
+    let out = run(&["list"], Some("tvly-test"));
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("tavily-1"));
+    let out = run(&["--finish-upgrade"], None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!home.join("fetchira.toml").exists());
+    std::fs::remove_dir_all(home).unwrap();
+}

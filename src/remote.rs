@@ -107,11 +107,7 @@ pub async fn verify(cfg: &Config) -> anyhow::Result<String> {
 
 pub fn set(home: &Path, endpoint: String, api_key: Option<String>) -> anyhow::Result<()> {
     let path = home.join("fetchira.toml");
-    let mut cfg = if path.exists() {
-        config::load(path.to_str().unwrap_or_default())?
-    } else {
-        Config::default()
-    };
+    let mut cfg = crate::cli::load_or_builtin(home)?;
     apply_connection(&mut cfg, &endpoint, api_key)?;
     config::save(&cfg, &path)?;
     println!(

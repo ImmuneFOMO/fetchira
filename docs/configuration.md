@@ -13,6 +13,18 @@ Keys come from the process environment or `$FETCHIRA_HOME/.env` (default
 the working directory or its parents is ignored. Use absolute paths when setting
 `FETCHIRA_HOME` or `XDG_CONFIG_HOME`.
 
+Without `fetchira.toml`, Fetchira uses a built-in config: one keyless account for each
+keyless provider (`keenable`, `jina`, `openalex`, `gdelt`) and one for each API-key provider
+whose key variable is set and not blank. The variable is the provider id in upper case plus
+`_API_KEY`, for example `TAVILY_API_KEY`, `YOU_API_KEY` or `SERPAPI_API_KEY`; it is read only
+for providers that need a key. A keyless provider uses a key only when you add that account
+explicitly with `fetchira add`. Web-session providers are not included. Without a
+`fetchira.toml`, any `<ID>_API_KEY` present in the environment Fetchira is started with becomes
+an account and can be spent. The first `fetchira add`, `fetchira priority` or dashboard change
+writes the accounts visible at that moment to `fetchira.toml`; from then on only the file
+counts, so add later keys with `fetchira add`. An existing file with no accounts means no
+providers. The hosted server does not use the built-in config.
+
 A minimal configuration using an environment-backed key:
 
 ```toml

@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
         Some("--finish-upgrade") => {
             require_no_args(&mut args, "unexpected upgrade arguments")?;
             let _admission = if fetchira::instances::migration_child(&home) { None } else { Some(fetchira::instances::admit_request(&home)?) };
-            let cfg = config::load(home.join("fetchira.toml").to_str().unwrap_or("fetchira.toml"))?;
+            let cfg = cli::load_or_builtin(&home)?;
             if cfg.remote.endpoint.is_none() {
                 let db_path = config::resolve_db(&home, &cfg.db_path);
                 let store = Store::open(&db_path).await?;
@@ -331,9 +331,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Default: serve the MCP server over stdio. Logs go to stderr (stdout is the MCP channel).
-    let cfg_path = home.join("fetchira.toml");
-    let mut cfg = config::load(cfg_path.to_str().unwrap_or("fetchira.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}. Run `fetchira` in a terminal to set up."))?;
+    let mut cfg = cli::load_or_builtin(&home)?;
     if cfg.remote.endpoint.is_some() {
         let _run = fetchira::instances::register(&home, "mcp");
         drop(startup_admission);

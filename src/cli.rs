@@ -94,11 +94,11 @@ fn cfg_path(home: &Path) -> PathBuf {
     home.join("fetchira.toml")
 }
 
-pub(crate) fn load_or_empty(home: &Path) -> anyhow::Result<Config> {
+pub fn load_or_builtin(home: &Path) -> anyhow::Result<Config> {
     let path = cfg_path(home);
     match std::fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(config::builtin()),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }
@@ -161,7 +161,7 @@ pub fn providers() {
 }
 
 pub async fn list(home: &Path) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     if cfg.accounts.is_empty() {
         println!("No accounts yet. Run `fetchira` to set up in the dashboard.");
         return Ok(());
@@ -413,7 +413,7 @@ pub async fn add(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow:
     println!("added {} account '{label}'", kind.as_str());
 
     if kind.is_web() {
-        let cfg = load_or_empty(home)?;
+        let cfg = load_or_builtin(home)?;
         // Best-effort: the account is saved either way. On a headless box with no browser,
         // tell the user how to attach the session by hand.
         match do_login(home, &cfg, kind, &label, None).await {
@@ -445,7 +445,7 @@ pub fn add_account(
 ) -> anyhow::Result<String> {
     let proxy = proxy.and_then(|p| parse_proxy_arg(&p));
     validate_proxy(&proxy)?;
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     let label = match label {
         Some(l) if !l.trim().is_empty() => l.trim().to_string(),
         _ => default_label(&cfg, kind),
@@ -497,7 +497,7 @@ pub async fn remove(home: &Path, label: Option<String>) -> anyhow::Result<()> {
 
 /// Delete an account (config + its DB rows). Shared by the CLI and the web UI.
 pub async fn remove_account(home: &Path, label: &str) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     let before = cfg.accounts.len();
     cfg.accounts.retain(|a| a.label != label);
     if cfg.accounts.len() == before {
@@ -518,7 +518,7 @@ pub async fn rename_account(home: &Path, old: &str, new: &str) -> anyhow::Result
     if new == old {
         return Ok(());
     }
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     if !cfg.accounts.iter().any(|a| a.label == old) {
         bail!("no account labelled '{old}'");
     }
@@ -561,7 +561,7 @@ fn validate_proxy(proxy: &Option<String>) -> anyhow::Result<()> {
 /// the next call. Shared by the CLI and web UI.
 pub async fn set_proxy(home: &Path, label: &str, proxy: Option<String>) -> anyhow::Result<()> {
     validate_proxy(&proxy)?;
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     let acc = cfg
         .accounts
         .iter_mut()
@@ -608,7 +608,7 @@ pub fn set_priority(home: &Path, cap: Capability, list: Vec<ProviderKind>) -> an
     if let Some(p) = list.iter().find(|p| !p.supports(cap)) {
         bail!("{} does not serve {}", p.as_str(), cap.as_str());
     }
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     cfg.priority.set(cap, list);
     config::save(&cfg, &cfg_path(home))?;
     Ok(())
@@ -637,7 +637,7 @@ pub fn priority(home: &Path, args: impl Iterator<Item = String>) -> anyhow::Resu
             .collect::<Vec<_>>()
     });
     let Some(cap_arg) = vals.next() else {
-        print_priority(&load_or_empty(home)?);
+        print_priority(&load_or_builtin(home)?);
         return Ok(());
     };
     let cap = Capability::parse(&cap_arg)
@@ -660,7 +660,7 @@ pub fn priority(home: &Path, args: impl Iterator<Item = String>) -> anyhow::Resu
             .collect::<anyhow::Result<Vec<_>>>()?,
     };
     set_priority(home, cap, list)?;
-    print_priority(&load_or_empty(home)?);
+    print_priority(&load_or_builtin(home)?);
     println!("\nsaved — applies to newly started fetchira processes (restart running MCP servers to pick it up)");
     Ok(())
 }
@@ -672,7 +672,7 @@ pub async fn identity_dup(
     kind: ProviderKind,
     label: &str,
 ) -> anyhow::Result<Option<(String, String)>> {
-    let store = open_store(home, &load_or_empty(home)?).await?;
+    let store = open_store(home, &load_or_builtin(home)?).await?;
     let Some(id) = store.load_identity(label).await? else {
         return Ok(None);
     };
@@ -714,7 +714,9 @@ pub async fn record_identity(
 /// Fill in missing emails for already-logged-in web/dashboard accounts so the UI shows them
 /// without a forced re-login.
 pub async fn backfill_identities(home: &Path, store: &Store) {
-    let Ok(cfg) = load_or_empty(home) else { return };
+    let Ok(cfg) = load_or_builtin(home) else {
+        return;
+    };
     for a in &cfg.accounts {
         if !a.provider.holds_session(a.api_key.is_some()) {
             continue;
@@ -735,7 +737,7 @@ pub async fn capture_login(
     label: &str,
     browser: Option<String>,
 ) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     let acc = cfg
         .accounts
         .iter()
@@ -763,7 +765,7 @@ fn ensure_session_account(acc: &Account) -> anyhow::Result<()> {
 /// Validate a session JSON captured elsewhere (cookies exported from any browser) and store it
 /// for an existing web account. Returns the cookie + storage count. Shared by the CLI and web UI.
 pub async fn set_session(home: &Path, label: &str, raw: &str) -> anyhow::Result<usize> {
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     let acc = cfg
         .accounts
         .iter()
@@ -817,7 +819,7 @@ pub async fn session(home: &Path, mut args: impl Iterator<Item = String>) -> any
 /// `fetchira login <provider|label>` — capture (or re-capture) a web session.
 pub async fn login(home: &Path, who: Option<String>) -> anyhow::Result<()> {
     let who = who.context("usage: fetchira login <provider|label>")?;
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     let acc = cfg
         .accounts
         .iter()
@@ -922,7 +924,7 @@ pub async fn setup(home: &Path) -> anyhow::Result<()> {
         install_tools(home)?;
         return Ok(());
     }
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     if cfg.remote.endpoint.is_some() || cfg.remote.api_key.is_some() {
         let confirmed =
             Confirm::new("Clear the saved hosted server URL and API key and use local accounts?")
@@ -992,7 +994,7 @@ impl std::fmt::Display for SetupMode {
 }
 
 fn use_local_config(home: &Path) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     if cfg.remote.endpoint.is_some() || cfg.remote.api_key.is_some() {
         cfg.remote = Default::default();
         config::save(&cfg, &cfg_path(home))?;
@@ -1027,7 +1029,7 @@ pub async fn configure_remote(
         bail!("hosted endpoint is empty");
     }
     crate::remote::validate_api_key(api_key)?;
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     cfg.remote.endpoint = Some(endpoint.to_string());
     cfg.remote.api_key = Some(api_key.to_string());
     let message = crate::remote::verify(&cfg).await?;
@@ -1046,7 +1048,7 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
     print!("\x1B[2J\x1B[H");
     let _ = std::io::stdout().flush();
     println!("fetchira — your providers\n");
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     if cfg.accounts.is_empty() {
         println!("  (nothing configured yet — pick \"Add an account\" below)\n");
         return Ok(());
@@ -1085,7 +1087,7 @@ async fn print_status(home: &Path) -> anyhow::Result<()> {
 }
 
 async fn add_flow(home: &Path) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     let choices: Vec<PChoice> = ProviderKind::all().iter().map(|&k| PChoice(k)).collect();
     let kind = match Select::new("Add which provider? (Esc to cancel)", choices).prompt() {
         Ok(c) => c.0,
@@ -1204,7 +1206,7 @@ fn host_port(url: &str) -> String {
 
 /// Pick an account, then a new proxy (direct / sticky pool / specific). Esc keeps the current one.
 async fn proxy_flow(home: &Path) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     if cfg.accounts.is_empty() {
         pause("No accounts yet.");
         return Ok(());
@@ -1241,7 +1243,7 @@ async fn proxy_flow(home: &Path) -> anyhow::Result<()> {
 }
 
 async fn login_flow(home: &Path) -> anyhow::Result<()> {
-    let cfg = load_or_empty(home)?;
+    let cfg = load_or_builtin(home)?;
     let web: Vec<(ProviderKind, String)> = cfg
         .accounts
         .iter()
@@ -1268,7 +1270,7 @@ async fn login_flow(home: &Path) -> anyhow::Result<()> {
 }
 
 async fn remove_flow(home: &Path) -> anyhow::Result<()> {
-    let mut cfg = load_or_empty(home)?;
+    let mut cfg = load_or_builtin(home)?;
     if cfg.accounts.is_empty() {
         pause("Nothing to remove.");
         return Ok(());
@@ -2724,6 +2726,46 @@ mod tests {
     fn gdelt_takes_no_key() {
         assert!(!ProviderKind::Gdelt.takes_key());
         assert!(ProviderKind::Openalex.takes_key());
+    }
+
+    #[test]
+    fn first_write_keeps_builtin_accounts_only_outside_hosted() {
+        let _guard = crate::secrets::env_lock();
+        std::env::remove_var("FETCHIRA_MASTER_KEY");
+        std::env::remove_var("FETCHIRA_MASTER_KEY_FILE");
+        let root = std::env::temp_dir().join(format!(
+            "fetchira-builtin-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let labels = |home: PathBuf| -> Vec<String> {
+            add_account(
+                &home,
+                ProviderKind::Serper,
+                Some("mine"),
+                Some("k".into()),
+                None,
+            )
+            .unwrap();
+            load_or_builtin(&home)
+                .unwrap()
+                .accounts
+                .into_iter()
+                .map(|a| a.label)
+                .collect()
+        };
+        std::fs::create_dir_all(root.join("local")).unwrap();
+        std::fs::create_dir_all(root.join("hosted")).unwrap();
+        let local = labels(root.join("local"));
+        std::env::set_var("FETCHIRA_MASTER_KEY", "builtin-test-master");
+        let loaded = config::load_hosted(&root.join("hosted/fetchira.toml"));
+        let hosted = labels(root.join("hosted"));
+        std::env::remove_var("FETCHIRA_MASTER_KEY");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(loaded.unwrap().accounts.is_empty());
+        assert!(local.contains(&"keenable-1".to_string()), "{local:?}");
+        assert_eq!(local.last().map(String::as_str), Some("mine"));
+        assert_eq!(hosted, ["mine"]);
     }
 
     #[tokio::test]

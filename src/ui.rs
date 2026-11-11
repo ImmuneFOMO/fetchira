@@ -62,9 +62,9 @@ struct AppState {
 
 pub async fn run(home: &Path) -> anyhow::Result<()> {
     let startup = crate::instances::admit_request(home)?;
-    // A missing/empty config is fine: the dashboard opens in its onboarding state and the
-    // first `POST /api/account/add` writes fetchira.toml.
-    let cfg = cli::load_or_empty(home)?;
+    // A missing config shows the built-in accounts, an empty one opens onboarding; the first
+    // `POST /api/account/add` writes fetchira.toml.
+    let cfg = cli::load_or_builtin(home)?;
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let inner = build_inner(home, &store).await?;
     // A post-update re-exec passes the old token and port through so the open tab keeps working.
@@ -216,7 +216,7 @@ async fn update_admission(State(st): State<Arc<AppState>>, req: Request, next: N
 /// (Re)build the router + per-account metadata from the on-disk config. Called at startup
 /// and after every mutation so the dashboard reflects the new state immediately.
 async fn build_inner(home: &Path, store: &Store) -> anyhow::Result<Inner> {
-    let cfg = cli::load_or_empty(home)?;
+    let cfg = cli::load_or_builtin(home)?;
     let mut meta = HashMap::new();
     for a in &cfg.accounts {
         meta.insert(
@@ -365,8 +365,8 @@ async fn api_state(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     };
     match built {
         Ok(mut v) => {
-            if let Ok(cfg) = cli::load_or_empty(&st.home) {
-                v["setup"] = setup_snapshot(&cfg);
+            if let Ok(cfg) = cli::load_or_builtin(&st.home) {
+                v["setup"] = setup_snapshot(&st.home, &cfg);
             }
             if let Some(u) = crate::update::ui_banner(&st.home).await {
                 v["update"] = u;
@@ -774,12 +774,13 @@ struct SetupReq {
     clear_remote: bool,
 }
 
-fn setup_snapshot(cfg: &Config) -> Value {
+fn setup_snapshot(home: &Path, cfg: &Config) -> Value {
     let endpoint = cfg.remote.endpoint.clone();
     json!({
         "mode": if endpoint.is_some() { "hosted" } else { "local" },
         "configured": endpoint.is_some() && cfg.remote.api_key.is_some(),
         "endpoint": endpoint,
+        "saved": home.join("fetchira.toml").exists(),
     })
 }
 
@@ -787,8 +788,8 @@ async fn api_setup(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     if let Some(resp) = guard(&st, &headers) {
         return resp;
     }
-    match cli::load_or_empty(&st.home) {
-        Ok(cfg) => Json(setup_snapshot(&cfg)).into_response(),
+    match cli::load_or_builtin(&st.home) {
+        Ok(cfg) => Json(setup_snapshot(&st.home, &cfg)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -803,7 +804,7 @@ async fn api_setup_save(
     }
     match req.mode.as_str() {
         "local" => {
-            let cfg = match cli::load_or_empty(&st.home) {
+            let cfg = match cli::load_or_builtin(&st.home) {
                 Ok(cfg) => cfg,
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
             };
@@ -819,11 +820,11 @@ async fn api_setup_save(
                 return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
             }
             rebuild(&st).await;
-            match cli::load_or_empty(&st.home) {
+            match cli::load_or_builtin(&st.home) {
                 Ok(cfg) => Json(json!({
                     "ok": true,
                     "message": "using local provider accounts",
-                    "setup": setup_snapshot(&cfg),
+                    "setup": setup_snapshot(&st.home, &cfg),
                 }))
                 .into_response(),
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -838,7 +839,7 @@ async fn api_setup_save(
             else {
                 return (StatusCode::BAD_REQUEST, "hosted endpoint is required").into_response();
             };
-            let current = match cli::load_or_empty(&st.home) {
+            let current = match cli::load_or_builtin(&st.home) {
                 Ok(cfg) => cfg,
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
             };
@@ -877,11 +878,11 @@ async fn api_setup_save(
                 }
             };
             rebuild(&st).await;
-            match cli::load_or_empty(&st.home) {
+            match cli::load_or_builtin(&st.home) {
                 Ok(cfg) => Json(json!({
                     "ok": true,
                     "message": message,
-                    "setup": setup_snapshot(&cfg),
+                    "setup": setup_snapshot(&st.home, &cfg),
                 }))
                 .into_response(),
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

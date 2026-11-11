@@ -277,7 +277,7 @@ function UpdateBanner({
   }, "Force update now"))));
 }
 function App() {
-  var _window$FX$setup2;
+  var _window$FX$setup3;
   const [connectionOpen, setConnectionOpen] = React.useState(false);
   const [tab, setTab] = React.useState(new URLSearchParams(location.search).get('tab') || 'overview');
   const [modal, setModal] = React.useState(new URLSearchParams(location.search).get('modal') === 'add');
@@ -319,8 +319,8 @@ function App() {
         window.FX = Object.assign({}, window.FX, await r.json());
         setPhase('live');
         setOnboard(o => {
-          var _window$FX$setup;
-          return o === null ? (window.FX.accounts || []).length === 0 && ((_window$FX$setup = window.FX.setup) === null || _window$FX$setup === void 0 ? void 0 : _window$FX$setup.mode) !== 'hosted' : o;
+          var _window$FX$setup, _window$FX$setup2;
+          return o === null ? ((window.FX.accounts || []).length === 0 || ((_window$FX$setup = window.FX.setup) === null || _window$FX$setup === void 0 ? void 0 : _window$FX$setup.saved) === false) && ((_window$FX$setup2 = window.FX.setup) === null || _window$FX$setup2 === void 0 ? void 0 : _window$FX$setup2.mode) !== 'hosted' : o;
         });
         bump(n => n + 1);
       } catch (e) {
@@ -383,7 +383,7 @@ function App() {
       margin: '0 auto',
       padding: '20px'
     }
-  }, ((_window$FX$setup2 = window.FX.setup) === null || _window$FX$setup2 === void 0 ? void 0 : _window$FX$setup2.mode) === 'hosted' && /*#__PURE__*/React.createElement("div", {
+  }, ((_window$FX$setup3 = window.FX.setup) === null || _window$FX$setup3 === void 0 ? void 0 : _window$FX$setup3.mode) === 'hosted' && /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',

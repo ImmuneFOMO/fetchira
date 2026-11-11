@@ -63,6 +63,7 @@ def main():
                 status, result = request('/api/setup', {'mode': 'hosted', 'endpoint': 'http://example.org/mcp', 'api_key': 'bad'})
                 assert status == 400 and 'API key' in result
                 assert not (home / 'data/fetchira.toml').exists()
+                assert request('/api/setup')[1]['saved'] is False
                 status, result = request('/api/setup', {'mode': 'local'})
                 assert status == 200 and result['setup']['mode'] == 'local', result
                 assert request('/api/install', {'targets': [], 'skill': 'cli'}, token='wrong')[0] == 401

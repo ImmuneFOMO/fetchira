@@ -217,6 +217,34 @@ pub fn load(path: &str) -> Result<Config> {
     toml::from_str(&txt).map_err(|e| Error::Config(format!("parse {path}: {e}")))
 }
 
+/// Config for a home without fetchira.toml. Unset keys get no account, so the router logs no skips.
+pub fn builtin() -> Config {
+    builtin_with(|var| std::env::var(var).ok())
+}
+
+fn builtin_with(env: impl Fn(&str) -> Option<String>) -> Config {
+    let mut cfg = Config::default();
+    for &kind in ProviderKind::all() {
+        let var = format!("{}_API_KEY", kind.as_str().to_uppercase());
+        let api_key = (kind.needs_key() && env(&var).is_some_and(|v| !v.trim().is_empty()))
+            .then(|| format!("env:{var}"));
+        if kind.is_web() || (kind.needs_key() && api_key.is_none()) {
+            continue;
+        }
+        cfg.accounts.push(Account {
+            provider: kind,
+            label: format!("{}-1", kind.as_str()),
+            api_key,
+            proxy: None,
+            quota: None,
+            reset: None,
+            dr_quota: None,
+            dr_reset: None,
+        });
+    }
+    cfg
+}
+
 /// Replace the config atomically; a failed write must preserve the previous credentials.
 pub fn save(cfg: &Config, path: &Path) -> Result<()> {
     if !cfg.remote.is_empty() {
@@ -309,12 +337,13 @@ pub fn load_hosted(path: &Path) -> Result<Config> {
             "FETCHIRA_MASTER_KEY is required for hosted secrets".into(),
         ));
     }
-    let mut cfg = if path.exists() {
+    let exists = path.exists();
+    let mut cfg = if exists {
         load(&path.to_string_lossy())?
     } else {
         Config::default()
     };
-    if protect_hosted_secrets(&mut cfg)? {
+    if !exists || protect_hosted_secrets(&mut cfg)? {
         save(&cfg, path)?;
     }
     Ok(cfg)
@@ -455,5 +484,44 @@ mod tests {
         assert_eq!(cfg.accounts[0].api_key.as_deref(), Some("enc:secret"));
         assert_eq!(cfg.accounts[1].api_key.as_deref(), Some("env:TAVILY_KEY"));
         assert_eq!(cfg.accounts[2].api_key.as_deref(), Some("enc:already"));
+    }
+
+    #[test]
+    fn builtin_adds_keyless_providers_and_set_env_keys() {
+        use ProviderKind::*;
+        let kinds = |cfg: &Config| cfg.accounts.iter().map(|a| a.provider).collect::<Vec<_>>();
+        let key = |cfg: &Config, kind| {
+            let found: Vec<_> = cfg.accounts.iter().filter(|a| a.provider == kind).collect();
+            assert_eq!(found.len(), 1);
+            found[0].api_key.clone()
+        };
+
+        let cfg = builtin_with(|_| None);
+        assert_eq!(kinds(&cfg), [Keenable, Jina, Openalex, Gdelt]);
+        assert!(cfg.accounts.iter().all(|a| a.api_key.is_none()));
+        assert_eq!(cfg.accounts[0].label, "keenable-1");
+        assert!(cfg.priority.is_empty());
+
+        let cfg = builtin_with(|var| {
+            matches!(
+                var,
+                "TAVILY_API_KEY" | "GDELT_API_KEY" | "GEMINI_WEB_API_KEY"
+            )
+            .then(|| "set".into())
+        });
+        assert_eq!(kinds(&cfg), [Tavily, Keenable, Jina, Openalex, Gdelt]);
+        assert_eq!(key(&cfg, Tavily).as_deref(), Some("env:TAVILY_API_KEY"));
+        assert_eq!(cfg.accounts[0].label, "tavily-1");
+        assert_eq!(key(&cfg, Gdelt), None);
+
+        let cfg = builtin_with(|var| (var == "JINA_API_KEY").then(|| "set".into()));
+        assert_eq!(key(&cfg, Jina), None);
+        assert_eq!(cfg.accounts.len(), 4);
+
+        let cfg = builtin_with(|var| {
+            matches!(var, "TAVILY_API_KEY" | "JINA_API_KEY").then(|| " \t".into())
+        });
+        assert_eq!(kinds(&cfg), [Keenable, Jina, Openalex, Gdelt]);
+        assert_eq!(key(&cfg, Jina), None);
     }
 }

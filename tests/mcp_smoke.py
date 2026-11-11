@@ -21,8 +21,8 @@ parser.add_argument(
     help="Require the current server to reject invalid tool parameters",
 )
 args = parser.parse_args()
-if not (args.home / "fetchira.toml").is_file():
-    parser.error("--home must contain a configured fetchira.toml (an empty file tests no providers)")
+if not args.home.is_dir():
+    parser.error("--home must be an existing directory (an empty fetchira.toml tests no providers)")
 env = dict(os.environ, FETCHIRA_HOME=str(args.home.resolve()), HOME=str(args.home.resolve()),
            USERPROFILE=str(args.home.resolve()), XDG_CONFIG_HOME=str(args.home.resolve() / "config"))
 env.pop("CODEX_HOME", None)

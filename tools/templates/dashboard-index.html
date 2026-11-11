@@ -183,7 +183,7 @@ function App() {
         setOnline(true);
         window.FX = Object.assign({}, window.FX, await r.json());
         setPhase('live');
-        setOnboard((o) => o === null ? (window.FX.accounts || []).length === 0 && window.FX.setup?.mode !== 'hosted' : o);
+        setOnboard((o) => o === null ? ((window.FX.accounts || []).length === 0 || window.FX.setup?.saved === false) && window.FX.setup?.mode !== 'hosted' : o);
         bump((n) => n + 1);
       } catch (e) { setOnline(false); setPhase((p) => p === 'loading' ? 'mock' : p); }
     };

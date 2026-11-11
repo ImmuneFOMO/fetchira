@@ -1799,7 +1799,7 @@ pub async fn create_key(
     name: String,
     accounts_manage: bool,
 ) -> anyhow::Result<()> {
-    let cfg = cli::load_or_empty(home)?;
+    let cfg = cli::load_or_builtin(home)?;
     let store = Store::open(&config::resolve_db(home, &cfg.db_path)).await?;
     let mut scopes = vec![auth::Scope::Mcp, auth::Scope::UsageRead];
     if accounts_manage {

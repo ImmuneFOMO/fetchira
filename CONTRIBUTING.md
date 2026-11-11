@@ -29,7 +29,8 @@ After editing `.jsx`, rebuild the checked-in `.js` with `node tools/build_webui.
 both changes. A nonempty webui diff is expected while developing; the final diff check should
 pass after committing the generated files. No npm install or runtime Babel is needed.
 
-For a local MCP smoke check, create an empty `fetchira.toml` in a temporary directory and run:
+For an offline MCP smoke check, create an empty `fetchira.toml` in a temporary directory
+(without it the server uses the built-in config) and run:
 
 ```sh
 python3 tests/mcp_smoke.py --binary target/debug/fetchira --home /absolute/path/to/test-home

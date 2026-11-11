@@ -1342,7 +1342,7 @@ mod tests {
             return crate::web::parse_session(&raw);
         }
         let home = crate::cli::home();
-        let cfg = crate::cli::load_or_empty(&home).unwrap();
+        let cfg = crate::cli::load_or_builtin(&home).unwrap();
         let db = crate::config::resolve_db(&home, &cfg.db_path);
         let store = crate::usage::Store::open(&db).await.expect("store");
         let raw = store

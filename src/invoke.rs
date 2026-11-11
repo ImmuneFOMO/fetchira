@@ -481,7 +481,7 @@ pub async fn run(
         return Ok(());
     }
     let req = parse(command, args.into_iter())?;
-    let cfg = crate::cli::load_or_empty(home)?;
+    let cfg = crate::cli::load_or_builtin(home)?;
     if cfg.remote.endpoint.is_some() {
         let text = run_remote(&cfg, &req).await?;
         println!("{text}");
