@@ -328,7 +328,7 @@ impl Fetchira {
 
     #[tool(
         title = "Provider quota and limits",
-        description = "Show remaining free quota per account and provider for the current period, plus each account's assigned proxy. For logged-in web sessions (grok/gemini/chatgpt) also includes live per-tier limits and the selectable model/mode catalog with thinking levels — a locked mode (e.g. grok Expert/Heavy on a lapsed sub) reads 0/0. Pass `provider` for that backend's full capability sheet — its niches, escape-hatch `mode` values, and ready-to-copy example calls.",
+        description = "Show remaining quota per account and provider for the current period, plus each account's assigned proxy. For logged-in web sessions (grok/gemini/chatgpt) also includes live per-tier limits and the selectable model/mode catalog with thinking levels — a locked mode (e.g. grok Expert/Heavy on a lapsed sub) reads 0/0. Pass `provider` for that backend's full capability sheet — its niches, escape-hatch `mode` values, and ready-to-copy example calls.",
         annotations(
             title = "Provider quota and limits",
             read_only_hint = true,
@@ -550,7 +550,7 @@ impl ServerHandler for Fetchira {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("fetchira", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Quota-aware router over free web-search/scrape providers. \
+                "Quota-aware router over web-search/scrape providers. \
                  Tools: search, read, deep_research, browser, create_image, usage. Pass `provider` \
                  to restrict routing to a specific backend (quota and retry limits still apply); otherwise \
                  providers are tried in the user's priority order with automatic failover.",

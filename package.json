@@ -2,7 +2,7 @@
   "name": "fetchira",
   "version": "0.0.0",
   "mcpName": "io.github.ImmuneFOMO/fetchira",
-  "description": "Quota-aware web-search/scrape MCP server and CLI that routes across free provider tiers",
+  "description": "Quota-aware MCP server and CLI for web search, page reading and deep research across many providers",
   "license": "Apache-2.0",
   "repository": "github:ImmuneFOMO/fetchira",
   "homepage": "https://fetchira.dev",
