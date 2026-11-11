@@ -8,9 +8,10 @@ Fetchira uses `$FETCHIRA_HOME`, otherwise `$XDG_CONFIG_HOME/fetchira`, otherwise
 `~/.config/fetchira`. The directory holds `fetchira.toml`, `usage.db`, captured sessions,
 image outputs and update state. A relative `db_path` is resolved inside that directory.
 
-Environment variables already set in the process take precedence over `.env`. Fetchira
-loads its home `.env` first, then fills unset variables from a `.env` found from the current
-working directory. Use absolute paths when setting `FETCHIRA_HOME` or `XDG_CONFIG_HOME`.
+Keys come from the process environment or `$FETCHIRA_HOME/.env` (default
+`~/.config/fetchira/.env`); variables already set in the process take precedence. A `.env` in
+the working directory or its parents is ignored. Use absolute paths when setting
+`FETCHIRA_HOME` or `XDG_CONFIG_HOME`.
 
 A minimal configuration using an environment-backed key:
 

@@ -24,9 +24,8 @@ fn require_no_args(
 async fn main() -> anyhow::Result<()> {
     let home = cli::home();
     std::fs::create_dir_all(&home).ok();
-    // Prefer the home .env, then fall back to one in the working directory.
+    // Only the home .env: agents start fetchira inside projects whose .env is not ours.
     dotenvy::from_path(home.join(".env")).ok();
-    dotenvy::dotenv().ok();
 
     // Logs → stderr (stdout is the MCP protocol channel on the serve path). RUST_LOG overrides;
     // default `info`. Initialising here — before the command match — means `ui`/`login` finally

@@ -183,3 +183,55 @@ fn one_shot_contract_without_live_providers() {
     assert!(!out.stderr.is_empty());
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[test]
+fn dotenv_is_read_only_from_home() {
+    let root = std::env::temp_dir().join(format!(
+        "fetchira_dotenv_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let home = root.join("home");
+    let cwd = root.join("project").join("sub");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(root.join(".env"), "FETCHIRA_TEST_PARENT_KEY=leaked\n").unwrap();
+    std::fs::write(cwd.join(".env"), "FETCHIRA_TEST_PARENT_KEY=leaked\n").unwrap();
+    std::fs::write(home.join(".env"), "FETCHIRA_TEST_HOME_KEY=kept\n").unwrap();
+    std::fs::write(
+        home.join("fetchira.toml"),
+        "[[account]]\nprovider = 'exa'\nlabel = 'exa-home'\napi_key = 'env:FETCHIRA_TEST_HOME_KEY'\n\n\
+         [[account]]\nprovider = 'exa'\nlabel = 'exa-parent'\napi_key = 'env:FETCHIRA_TEST_PARENT_KEY'\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_fetchira"))
+        .arg("list")
+        .env("FETCHIRA_HOME", &home)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env_remove("CODEX_HOME")
+        .env_remove("FETCHIRA_TEST_HOME_KEY")
+        .env_remove("FETCHIRA_TEST_PARENT_KEY")
+        .env("RUST_LOG", "off")
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = |label: &str| {
+        stdout
+            .lines()
+            .find(|l| l.split_whitespace().nth(1) == Some(label))
+            .unwrap_or_default()
+    };
+    assert!(row("exa-home").contains(" key "), "{stdout}");
+    assert!(row("exa-parent").contains("NO KEY"), "{stdout}");
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -19,7 +19,7 @@ db_path = "usage.db"
 # search = ["grok_web", "serper", "tavily"]
 # deep_research = ["gemini_web", "parallel"]
 
-# --- Key-based providers (api_key = literal or "env:VAR" resolved from .env) ---
+# --- Key-based providers (api_key = literal or "env:VAR" from the process env or $FETCHIRA_HOME/.env) ---
 [[account]]
 provider = "serper"
 label = "serper-1"
