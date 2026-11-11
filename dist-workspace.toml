@@ -20,6 +20,10 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux
 # Which actions to run on pull requests
 pr-run-mode = "plan"
 
+# dist 0.32 defaults this target to macos-14, which GitHub no longer runs.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 # Ship the checked-in schema-version file as a release asset so the updater can detect a
 # DB-schema-breaking release before swapping the binary (see src/update.rs::fetch_schema).
 [[dist.extra-artifacts]]
