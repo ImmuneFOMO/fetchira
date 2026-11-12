@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::config::{resolve_secret, Config, Priority, Reset};
 use crate::error::{Error, Result};
 use crate::httptrace;
+use crate::mcp::switched_off;
 use crate::providers::{
     self, order_for, Capability, FeatureLimit, Input, LiveBalance, LiveLimits, LiveQuota,
     ModelInfo, OutImage, Provider, ProviderKind,
@@ -157,7 +158,8 @@ impl Router {
             .collect()
     }
 
-    pub async fn build(cfg: Config, store: Store) -> Result<Self> {
+    pub async fn build(mut cfg: Config, store: Store) -> Result<Self> {
+        cfg.accounts.retain(|a| !switched_off(a.provider.as_str()));
         let debug = cfg
             .debug_log
             .enabled

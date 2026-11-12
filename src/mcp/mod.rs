@@ -111,6 +111,34 @@ pub struct Fetchira {
 static SWAPS: LazyLock<tokio::sync::watch::Sender<()>> =
     LazyLock::new(|| tokio::sync::watch::Sender::new(()));
 
+/// Tool and provider names switched off by `FETCHIRA_DISABLE`.
+pub static DISABLED: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let names = disabled(&std::env::var("FETCHIRA_DISABLE").unwrap_or_default());
+    let unknown: Vec<_> = names
+        .iter()
+        .filter(|n| {
+            !ProviderKind::all().iter().any(|p| p.as_str() == n.as_str())
+                && !Fetchira::tool_router().has_route(n)
+        })
+        .collect();
+    if !unknown.is_empty() {
+        tracing::warn!("ignoring unknown FETCHIRA_DISABLE names {unknown:?}");
+    }
+    names
+});
+
+pub fn switched_off(name: &str) -> bool {
+    DISABLED.iter().any(|d| d == name)
+}
+
+fn disabled(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 /// Wake every session's tool-list check after the shared router is replaced.
 pub fn router_swapped() {
     SWAPS.send_replace(());
@@ -120,8 +148,14 @@ impl Fetchira {
     pub fn new_shared(router: Arc<tokio::sync::RwLock<Arc<Router>>>) -> Self {
         Self {
             router,
-            tool_router: Self::tool_router(),
+            tool_router: Self::tools(&DISABLED),
         }
+    }
+
+    fn tools(names: &[String]) -> ToolRouter<Self> {
+        names.iter().fold(Self::tool_router(), |tools, name| {
+            tools.with_disabled(name.clone())
+        })
     }
 
     async fn run(
@@ -347,6 +381,12 @@ impl Fetchira {
         Parameters(args): Parameters<UsageArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(p) = args.provider.filter(|p| switched_off(p.as_str())) {
+            return Err(ErrorData::invalid_params(
+                format!("provider {} is switched off", p.as_str()),
+                None,
+            ));
+        }
         let cancellation = context.ct.clone();
         let router = self.router.read().await.clone();
         let future = router.usage_snapshot();
@@ -771,5 +811,23 @@ mod tests {
             setup_tools(Fetchira::tool_router().list_all(), &all),
             Fetchira::tool_router().list_all()
         );
+    }
+
+    #[test]
+    fn disable_list_is_trimmed() {
+        assert_eq!(
+            disabled(" create_image, grok_web ,,"),
+            ["create_image", "grok_web"]
+        );
+        assert!(disabled("").is_empty());
+    }
+
+    #[test]
+    fn disabled_tools_are_hidden_and_refused() {
+        let tools = Fetchira::tools(&disabled("create_image,grok_web"));
+        assert!(!tools.has_route("create_image") && tools.has_route("search"));
+        let listed = setup_tools(tools.list_all(), &[ProviderKind::GrokWeb]);
+        assert_eq!(listed.len(), 5);
+        assert!(listed.iter().all(|t| t.name != "create_image"));
     }
 }

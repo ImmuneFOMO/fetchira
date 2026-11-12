@@ -144,7 +144,19 @@ fn cleanup_stale_profiles() {
     }
 }
 
+fn foreign_img_poll(cap: Capability, session: Option<&str>) -> bool {
+    !matches!(cap, Capability::Image) && session.is_some_and(|s| s.starts_with("img|poll|"))
+}
+
 pub async fn run(cookies: &[Cookie], cap: Capability, input: &Input) -> Result<Outcome> {
+    // A switched-off create_image must not be reachable through another tool's session.
+    if foreign_img_poll(cap, input.session.as_deref()) && crate::mcp::switched_off("create_image") {
+        return Err(Error::Provider {
+            provider: "chatgpt_web",
+            status: 400,
+            body: "image session belongs to create_image".into(),
+        });
+    }
     let query = input.query.as_deref().unwrap_or_default().to_string();
     let search = matches!(cap, Capability::Search) && chatgpt_web::web_search_on(input);
     let browser = detect_browser()
@@ -2274,9 +2286,10 @@ fn login_err() -> Error {
 mod tests {
     use super::{
         ax_exact_backend, composer_backend_node, conversation_image_source_after_query,
-        conversation_image_sources, conversation_list_cids, conversation_query_time, norm,
-        normalize_conversation_cid, parse_img_poll, percent_decode, percent_encode,
-        sediment_download_url, stored_query_matches, trusted_estuary_source, without_known_cids,
+        conversation_image_sources, conversation_list_cids, conversation_query_time,
+        foreign_img_poll, norm, normalize_conversation_cid, parse_img_poll, percent_decode,
+        percent_encode, sediment_download_url, stored_query_matches, trusted_estuary_source,
+        without_known_cids, Capability,
     };
 
     #[test]
@@ -2305,6 +2318,16 @@ mod tests {
         assert_eq!(parsed.1, query);
         assert!(parse_img_poll(Some("img|poll|not-a-uuid|q")).is_err());
         assert!(parse_img_poll(Some("dr|poll|abc")).unwrap().is_none());
+    }
+
+    #[test]
+    fn img_poll_is_foreign_outside_create_image() {
+        let poll = Some("img|poll|cid|q");
+        assert!(foreign_img_poll(Capability::Search, poll));
+        assert!(foreign_img_poll(Capability::DeepResearch, poll));
+        assert!(!foreign_img_poll(Capability::Image, poll));
+        assert!(!foreign_img_poll(Capability::Search, Some("dr|poll|cid")));
+        assert!(!foreign_img_poll(Capability::Search, None));
     }
 
     #[test]

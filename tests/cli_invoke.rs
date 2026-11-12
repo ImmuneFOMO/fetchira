@@ -247,7 +247,7 @@ fn missing_config_runs_on_builtin_accounts() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&home).unwrap();
-    let run = |args: &[&str], tavily: Option<&str>| -> Output {
+    let run = |args: &[&str], tavily: Option<&str>, disable: &str| -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_fetchira"));
         cmd.args(args)
             .env("FETCHIRA_HOME", &home)
@@ -261,6 +261,7 @@ fn missing_config_runs_on_builtin_accounts() {
             .env_remove("FETCHIRA_MASTER_KEY")
             .env_remove("FETCHIRA_MASTER_KEY_FILE")
             .env_remove("TAVILY_API_KEY")
+            .env("FETCHIRA_DISABLE", disable)
             .env("RUST_LOG", "off")
             .current_dir(&home);
         if let Some(key) = tavily {
@@ -268,27 +269,83 @@ fn missing_config_runs_on_builtin_accounts() {
         }
         cmd.output().unwrap()
     };
-    let out = run(&["serve"], None);
+    let out = run(&["serve"], None, "");
     assert!(
         !String::from_utf8_lossy(&out.stderr).contains("set up"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(home.join("usage.db").exists());
-    let out = run(&["list"], None);
+    let out = run(&["list"], None, "");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("keenable-1"), "{stdout}");
     assert!(!stdout.contains("tavily"), "{stdout}");
-    let out = run(&["list"], Some("tvly-test"));
+    let out = run(&["list"], Some("tvly-test"), "");
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("tavily-1"));
-    let out = run(&["--finish-upgrade"], None);
+    let out = run(&["list"], Some("tvly-test"), "tavily");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains("tavily-1") && l.contains("disabled")),
+        "{stdout}"
+    );
+    let out = run(
+        &["search", "q", "--provider", "tavily"],
+        Some("tvly-test"),
+        "tavily",
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("has no available account"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run(&["--finish-upgrade"], None, "");
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!home.join("fetchira.toml").exists());
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn disable_refuses_a_remote_endpoint() {
+    let home = std::env::temp_dir().join(format!(
+        "fetchira_remote_off_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("fetchira.toml"),
+        "[remote]\nendpoint = 'http://127.0.0.1:9/mcp'\napi_key = 'k'\n",
+    )
+    .unwrap();
+    for args in [vec!["serve"], vec!["search", "q"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_fetchira"))
+            .args(&args)
+            .env("FETCHIRA_HOME", &home)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("FETCHIRA_DISABLE", "create_image")
+            .env_remove("CODEX_HOME")
+            .env("RUST_LOG", "off")
+            .current_dir(&home)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("FETCHIRA_DISABLE does not apply"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     std::fs::remove_dir_all(home).unwrap();
 }

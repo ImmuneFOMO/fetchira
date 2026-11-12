@@ -26,6 +26,12 @@ parser.add_argument(
     help="On a home without fetchira.toml, add and remove an offline exa key in .env and a grok_web "
     "session, and require the running server to follow",
 )
+parser.add_argument(
+    "--check-disable",
+    action="store_true",
+    help="On a home without fetchira.toml, save an offline grok_web session and require "
+    "FETCHIRA_DISABLE=create_image,grok_web to hide and refuse both",
+)
 args = parser.parse_args()
 if not args.home.is_dir():
     parser.error("--home must be an existing directory (an empty fetchira.toml tests no providers)")
@@ -36,6 +42,16 @@ if args.check_live_reload:
     env.pop("EXA_API_KEY", None)
     assert not (args.home / ".env").exists(), "--check-live-reload needs a home without .env"
     (args.home / ".env").write_text("")
+if args.check_disable:
+    assert not (args.home / "fetchira.toml").exists(), "--check-disable needs a home without fetchira.toml"
+    (args.home / "fetchira.toml").write_text('[[account]]\nprovider = "grok_web"\nlabel = "grok-off"\n')
+    session = args.home / "grok-off.json"
+    session.write_text(json.dumps([{"name": "sso", "value": "offline", "domain": ".grok.com"}]))
+    subprocess.run(
+        [str(args.binary.resolve()), "session", "grok-off", "--file", str(session)],
+        cwd=args.home.resolve(), env=env, check=True, capture_output=True,
+    )
+    env["FETCHIRA_DISABLE"] = "create_image, grok_web"
 
 with tempfile.TemporaryFile() as log:
     process = subprocess.Popen(
@@ -120,6 +136,21 @@ with tempfile.TemporaryFile() as log:
                 error = request("tools/call", {"name": tool, "arguments": arguments}, expected_error=True)
                 assert error["code"] == -32602 and "local stdio" in error["message"]
             print("PASS hosted file inputs rejected for search/research/image", flush=True)
+        if args.check_disable:
+            assert "create_image" not in names and not web, (names, web)
+            error = request(
+                "tools/call",
+                {"name": "create_image", "arguments": {"prompt": "disabled"}},
+                expected_error=True,
+            )
+            assert error["code"] == -32602 and "tool not found" in error["message"], error
+            error = request(
+                "tools/call",
+                {"name": "usage", "arguments": {"provider": "grok_web"}},
+                expected_error=True,
+            )
+            assert error["code"] == -32602 and "switched off" in error["message"], error
+            print("PASS FETCHIRA_DISABLE hides create_image and grok_web and refuses the call", flush=True)
         request("tools/call", {"name": "usage", "arguments": {}})
         print("PASS usage", flush=True)
         for provider, tool, arguments in [

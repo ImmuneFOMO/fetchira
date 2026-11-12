@@ -85,6 +85,11 @@ nothing. An explicit `quota` (or, for deep research, `dr_quota`) caps a live bal
 hold back a paid one; set `reset`/`dr_reset` to match your plan. A forced provider still obeys
 these limits.
 
+`FETCHIRA_DISABLE=create_image,grok_web` switches off MCP tools and providers by name: a listed
+tool is left out of the tool list and its calls are refused, and a listed provider is never
+routed to, even with a saved key or session. Unknown names are logged as a warning. It cannot be
+combined with a `[remote]` endpoint.
+
 Dollar balances are real balances; the displayed `≈` call counts are estimates that vary by
 operation and plan. Steel requests use its proxy: the Launch plan requires a paid $10 deposit
 to enable it, even with free credits ([Steel pricing](https://docs.steel.dev/overview/pricinglimits)).

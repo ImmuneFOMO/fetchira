@@ -405,6 +405,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg_stamp = config::file_stamp(&home.join("fetchira.toml"));
     let mut cfg = cli::load_or_builtin(&home)?;
     if cfg.remote.endpoint.is_some() {
+        // The hosted server builds its own tool list, so the switch cannot hold through the bridge.
+        anyhow::ensure!(
+            fetchira::mcp::DISABLED.is_empty(),
+            "FETCHIRA_DISABLE does not apply to a [remote] endpoint"
+        );
         let _run = fetchira::instances::register(&home, "mcp");
         drop(startup_admission);
         tracing::info!("{}", fetchira::remote::verify(&cfg).await?);

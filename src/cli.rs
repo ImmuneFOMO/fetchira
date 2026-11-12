@@ -7,6 +7,7 @@ use inquire::{Confirm, MultiSelect, Password, Select, Text};
 use serde_json::{json, Value};
 
 use crate::config::{self, Account, Config};
+use crate::mcp::switched_off;
 use crate::providers::{order_for, Capability, ProviderKind};
 use crate::usage::{period_key, Store};
 use crate::web;
@@ -188,7 +189,9 @@ pub async fn list(home: &Path) -> anyhow::Result<()> {
     for a in &accounts {
         let main = mains.get(a.label.as_str());
         let ready = main.is_some();
-        let cred = if a.provider.is_web() {
+        let cred = if switched_off(a.provider.as_str()) {
+            "disabled"
+        } else if a.provider.is_web() {
             if ready {
                 "session"
             } else {
@@ -717,7 +720,7 @@ pub async fn backfill_identities(home: &Path, store: &Store) {
         return;
     };
     for a in &cfg.accounts {
-        if !a.provider.holds_session(a.api_key.is_some()) {
+        if !a.provider.holds_session(a.api_key.is_some()) || switched_off(a.provider.as_str()) {
             continue;
         }
         if matches!(store.load_identity(&a.label).await, Ok(Some(_))) {

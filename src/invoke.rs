@@ -483,6 +483,10 @@ pub async fn run(
     let req = parse(command, args.into_iter())?;
     let cfg = crate::cli::load_or_builtin(home)?;
     if cfg.remote.endpoint.is_some() {
+        anyhow::ensure!(
+            crate::mcp::DISABLED.is_empty(),
+            "FETCHIRA_DISABLE does not apply to a [remote] endpoint"
+        );
         let text = run_remote(&cfg, &req).await?;
         println!("{text}");
         return Ok(());
