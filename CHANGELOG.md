@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.23](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.22...v0.1.23) - 2026-11-12
+
+### Added
+
+- *(serve)* pick up new logins, accounts and keys without a restart
+- *(mcp)* list only the tools and providers that are set up
+- *(mcp)* add tool titles and annotations
+- *(serve)* run without fetchira.toml on keyless providers and env keys
+
+### Fixed
+
+- *(npm)* keep installer output off stdout and pin the version
+- *(security)* stop loading .env from the working directory
+
+### Other
+
+- run the legacy peer fixture without renaming sleep
+- build the arm64 macOS release on macos-15
+- drop free-tier wording from descriptions
+
 ## [0.1.22](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.21...v0.1.22) - 2026-11-07
 
 ### Other
