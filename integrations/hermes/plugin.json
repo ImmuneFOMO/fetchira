@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fetchira",
+  "description": "Web search, page reading and deep research through the local fetchira MCP server, routed across the providers you hold keys for and four that need none.",
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "fetchira": {
+          "requires": { "app": true },
+          "timeout": 420,
+          "app": {
+            "darwin": { "presence": "executable", "location": [{ "kind": "command", "name": "fetchira" }] },
+            "linux": { "presence": "executable", "location": [{ "kind": "command", "name": "fetchira" }] }
+          }
+        }
+      },
+      "config_schema": {
+        "serper_api_key": { "type": "secret", "env": "SERPER_API_KEY" },
+        "tavily_api_key": { "type": "secret", "env": "TAVILY_API_KEY" },
+        "exa_api_key": { "type": "secret", "env": "EXA_API_KEY" },
+        "firecrawl_api_key": { "type": "secret", "env": "FIRECRAWL_API_KEY" },
+        "parallel_api_key": { "type": "secret", "env": "PARALLEL_API_KEY" },
+        "steel_api_key": { "type": "secret", "env": "STEEL_API_KEY" },
+        "tinyfish_api_key": { "type": "secret", "env": "TINYFISH_API_KEY" },
+        "linkup_api_key": { "type": "secret", "env": "LINKUP_API_KEY" },
+        "you_api_key": { "type": "secret", "env": "YOU_API_KEY" },
+        "octen_api_key": { "type": "secret", "env": "OCTEN_API_KEY" },
+        "nimble_api_key": { "type": "secret", "env": "NIMBLE_API_KEY" },
+        "serpapi_api_key": { "type": "secret", "env": "SERPAPI_API_KEY" },
+        "langsearch_api_key": { "type": "secret", "env": "LANGSEARCH_API_KEY" },
+        "scrapingant_api_key": { "type": "secret", "env": "SCRAPINGANT_API_KEY" },
+        "zenrows_api_key": { "type": "secret", "env": "ZENROWS_API_KEY" },
+        "hyperbrowser_api_key": { "type": "secret", "env": "HYPERBROWSER_API_KEY" },
+        "browserless_api_key": { "type": "secret", "env": "BROWSERLESS_API_KEY" }
+      }
+    }
+  }
+}
