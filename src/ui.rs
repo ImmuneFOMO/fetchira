@@ -108,7 +108,7 @@ pub async fn run(home: &Path) -> anyhow::Result<()> {
 
     // Fresh update check at launch, then every 15 min while the UI runs — the daily throttle
     // would otherwise hide a release published after the last passive check.
-    {
+    if crate::config::managed_by().is_none() {
         let h = home.to_path_buf();
         tokio::spawn(async move {
             loop {
@@ -1101,6 +1101,9 @@ async fn api_update_status(State(st): State<Arc<AppState>>, headers: HeaderMap) 
 async fn api_update_impl(st: Arc<AppState>, headers: HeaderMap, force: bool) -> Response {
     if let Some(r) = guard_mut(&st, &headers) {
         return r;
+    }
+    if let Err(error) = crate::update::require_unmanaged() {
+        return (StatusCode::CONFLICT, error.to_string()).into_response();
     }
     let binary = match cli::installation_binary() {
         Ok(binary) => binary,

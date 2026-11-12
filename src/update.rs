@@ -52,9 +52,20 @@ pub fn refresh_skills(home: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A plugin host that runs this install owns its updates and the agent files around it.
+pub fn require_unmanaged() -> anyhow::Result<()> {
+    if let Some(host) = crate::config::managed_by() {
+        anyhow::bail!("{host} manages this Fetchira install; update it through {host}");
+    }
+    Ok(())
+}
+
 /// Finish migrations even when the previous updater only replaced the executable.
 /// No prompts or stdout: this also runs before an agent's MCP handshake.
 pub fn finish_upgrade_on_start(home: &Path) {
+    if crate::config::managed_by().is_some() {
+        return;
+    }
     if let Err(error) = complete_integrations(home) {
         eprintln!("Agent upgrade: {error}");
     }
@@ -276,6 +287,9 @@ async fn fetch_latest(client: &reqwest::Client) -> anyhow::Result<(String, Versi
 /// Latest version if it's newer than the running one, throttled to one network check a day
 /// (falls back to the cached value on a fresh window or a network error).
 async fn newer_available(home: &Path) -> Option<Version> {
+    if crate::config::managed_by().is_some() {
+        return None;
+    }
     let cache = read_cache(home);
     let fresh = now_secs().saturating_sub(cache.checked_at) < CHECK_INTERVAL;
     let latest = if fresh {
@@ -499,6 +513,7 @@ pub async fn wait_idle(home: &Path) -> anyhow::Result<()> {
 
 /// `fetchira update [--when-idle]` — the CLI face of `perform`.
 pub async fn run(home: &Path, mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    require_unmanaged()?;
     let selected = args.next();
     if selected.as_deref() == Some("--recover") {
         anyhow::ensure!(args.next().is_none(), "usage: fetchira update --recover");

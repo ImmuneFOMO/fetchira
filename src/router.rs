@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use serde::Serialize;
 
-use crate::config::{resolve_secret, Config, Priority, Reset};
+use crate::config::{managed_by, resolve_secret, Config, Priority, Reset};
 use crate::error::{Error, Result};
 use crate::httptrace;
 use crate::mcp::switched_off;
@@ -160,9 +160,7 @@ impl Router {
 
     pub async fn build(mut cfg: Config, store: Store) -> Result<Self> {
         cfg.accounts.retain(|a| !switched_off(a.provider.as_str()));
-        let debug = cfg
-            .debug_log
-            .enabled
+        let debug = (cfg.debug_log.enabled && managed_by().is_none())
             .then_some(cfg.debug_log.retention_hours);
         let priority = cfg.priority.clone();
         // The proxy list download blocks the MCP handshake, so only when an assignment is missing.

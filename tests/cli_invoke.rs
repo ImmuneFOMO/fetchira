@@ -207,37 +207,44 @@ fn dotenv_is_read_only_from_home() {
          [[account]]\nprovider = 'exa'\nlabel = 'exa-parent'\napi_key = 'env:FETCHIRA_TEST_PARENT_KEY'\n",
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_fetchira"))
-        .arg("list")
-        .env("FETCHIRA_HOME", &home)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .env_remove("CODEX_HOME")
-        .env_remove("FETCHIRA_TEST_HOME_KEY")
-        .env_remove("FETCHIRA_TEST_PARENT_KEY")
-        .env("RUST_LOG", "off")
-        .current_dir(&cwd)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let row = |label: &str| {
+    let list = |host: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_fetchira"))
+            .arg("list")
+            .env("FETCHIRA_HOME", &home)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("FETCHIRA_MANAGED_BY", host)
+            .env_remove("CODEX_HOME")
+            .env_remove("FETCHIRA_TEST_HOME_KEY")
+            .env_remove("FETCHIRA_TEST_PARENT_KEY")
+            .env("RUST_LOG", "off")
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let row = |stdout: &str, label: &str| {
         stdout
             .lines()
             .find(|l| l.split_whitespace().nth(1) == Some(label))
             .unwrap_or_default()
+            .to_string()
     };
-    assert!(row("exa-home").contains(" key "), "{stdout}");
-    assert!(row("exa-parent").contains("NO KEY"), "{stdout}");
+    let stdout = list("");
+    assert!(row(&stdout, "exa-home").contains(" key "), "{stdout}");
+    assert!(row(&stdout, "exa-parent").contains("NO KEY"), "{stdout}");
+    let stdout = list("hermes");
+    assert!(row(&stdout, "exa-home").contains("NO KEY"), "{stdout}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn missing_config_runs_on_builtin_accounts() {
+#[tokio::test]
+async fn missing_config_runs_on_builtin_accounts() {
     let home = std::env::temp_dir().join(format!(
         "fetchira_builtin_{}_{}",
         std::process::id(),
@@ -247,7 +254,7 @@ fn missing_config_runs_on_builtin_accounts() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&home).unwrap();
-    let run = |args: &[&str], tavily: Option<&str>, disable: &str| -> Output {
+    let run = |args: &[&str], tavily: Option<&str>, disable: &str, host: &str| -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_fetchira"));
         cmd.args(args)
             .env("FETCHIRA_HOME", &home)
@@ -262,6 +269,7 @@ fn missing_config_runs_on_builtin_accounts() {
             .env_remove("FETCHIRA_MASTER_KEY_FILE")
             .env_remove("TAVILY_API_KEY")
             .env("FETCHIRA_DISABLE", disable)
+            .env("FETCHIRA_MANAGED_BY", host)
             .env("RUST_LOG", "off")
             .current_dir(&home);
         if let Some(key) = tavily {
@@ -269,22 +277,22 @@ fn missing_config_runs_on_builtin_accounts() {
         }
         cmd.output().unwrap()
     };
-    let out = run(&["serve"], None, "");
+    let out = run(&["serve"], None, "", "");
     assert!(
         !String::from_utf8_lossy(&out.stderr).contains("set up"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(home.join("usage.db").exists());
-    let out = run(&["list"], None, "");
+    let out = run(&["list"], None, "", "");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("keenable-1"), "{stdout}");
     assert!(!stdout.contains("tavily"), "{stdout}");
-    let out = run(&["list"], Some("tvly-test"), "");
+    let out = run(&["list"], Some("tvly-test"), "", "");
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("tavily-1"));
-    let out = run(&["list"], Some("tvly-test"), "tavily");
+    let out = run(&["list"], Some("tvly-test"), "tavily", "");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout
@@ -296,13 +304,37 @@ fn missing_config_runs_on_builtin_accounts() {
         &["search", "q", "--provider", "tavily"],
         Some("tvly-test"),
         "tavily",
+        "",
     );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("has no available account"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = run(&["--finish-upgrade"], None, "");
+    let store = fetchira::usage::Store::open(home.join("usage.db").to_str().unwrap())
+        .await
+        .unwrap();
+    let out = run(
+        &["search", "q", "--provider", "tavily"],
+        Some("tvly-test"),
+        "",
+        "hermes",
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("api.tavily.com"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(store.max_debug_id().await.unwrap(), 0);
+    run(
+        &["search", "q", "--provider", "tavily"],
+        Some("tvly-test"),
+        "",
+        "",
+    );
+    assert!(store.max_debug_id().await.unwrap() > 0);
+    drop(store);
+    let out = run(&["--finish-upgrade"], None, "", "");
     assert!(
         out.status.success(),
         "{}",

@@ -369,6 +369,13 @@ pub fn resolve_secret(s: &str) -> Result<String> {
     }
 }
 
+/// The plugin host that runs this install, from `FETCHIRA_MANAGED_BY`.
+pub fn managed_by() -> Option<String> {
+    std::env::var("FETCHIRA_MANAGED_BY")
+        .ok()
+        .filter(|host| !host.is_empty())
+}
+
 pub fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
     let m = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
     Some((m.modified().ok()?, m.len()))

@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path(__file__).resolve().parents[1] / 'target/debug/fetchira')
     source = parser.parse_args().binary.resolve()
-    for mode in ('serve', 'bare', 'ui', 'finish'):
+    for mode in ('serve', 'bare', 'ui', 'finish', 'host'):
         with tempfile.TemporaryDirectory(prefix='fetchira-auto-upgrade-') as temporary:
             home = Path(temporary).resolve()
             data = home / 'data'
@@ -61,6 +61,20 @@ command = "/user/other"
             assert (skill / 'SKILL.md').read_text() == 'old instructions'
             processes = []
             try:
+                if mode == 'host':
+                    env['FETCHIRA_MANAGED_BY'] = 'hermes'
+                    update = subprocess.run([str(stable), 'update'], env=env, cwd=home,
+                                            capture_output=True, text=True, timeout=15)
+                    assert update.returncode and 'hermes' in update.stderr, update
+                    processes.append(subprocess.Popen([str(stable), 'serve'], env=env, cwd=home,
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0))
+                    wait_for_mcp(processes[0])
+                    assert not (data / 'agent-upgrade-complete').exists()
+                    assert registration.read_text() == before_registration
+                    assert (skill / 'SKILL.md').read_text() == 'old instructions'
+                    assert not (home / '.agents').exists()
+                    print('PASS FETCHIRA_MANAGED_BY: update refused, serve leaves agent files alone', flush=True)
+                    continue
                 if mode in ('serve', 'bare'):
                     # Two agents start together; both must get a clean MCP handshake.
                     for _ in range(2):

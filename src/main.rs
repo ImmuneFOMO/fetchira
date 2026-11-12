@@ -96,7 +96,11 @@ async fn main() -> anyhow::Result<()> {
     let home = cli::home();
     std::fs::create_dir_all(&home).ok();
     // Only the home .env: agents start fetchira inside projects whose .env is not ours.
-    let env_stamp = config::load_home_env(&home.join(".env"));
+    // A plugin host hands keys over in the environment, so no file is read under it.
+    let env_stamp = config::managed_by()
+        .is_none()
+        .then(|| config::load_home_env(&home.join(".env")))
+        .flatten();
 
     // Logs → stderr (stdout is the MCP protocol channel on the serve path). RUST_LOG overrides;
     // default `info`. Initialising here — before the command match — means `ui`/`login` finally

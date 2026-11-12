@@ -149,6 +149,12 @@ Homebrew launchers are repaired, and your CLI/MCP choices and other server setti
 No separate migration command is needed. Already-running agents load the new executable when
 restarted; active work is not terminated. Use **Setup & agents** to deliberately change integrations.
 
+A plugin host that runs Fetchira sets `FETCHIRA_MANAGED_BY` to its name in the environment it
+starts Fetchira with, and owns updates: then `fetchira update` and the dashboard **Update** refuse,
+Fetchira does not check for or announce new releases, starting Fetchira leaves agent skills,
+launchers and MCP configs alone, the home `.env` is not read, and the request debug log stays off
+whatever `[debug_log]` says.
+
 To stop using Fetchira, remove its MCP entry from the clients you configured, remove the
 installed Fetchira skill folder, and uninstall the binary using its installation method.
 Keep the data directory until you have saved any sessions, images or backups you need.
