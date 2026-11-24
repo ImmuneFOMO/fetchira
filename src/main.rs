@@ -191,13 +191,47 @@ async fn main() -> anyhow::Result<()> {
             return fetchira::invoke::run(&home, command, args).await;
         }
         Some("install") => {
-            match args.next().as_deref() {
-                Some("--refresh") => {
-                    require_no_args(&mut args, "usage: fetchira install [--refresh]")?;
-                    return fetchira::update::refresh_skills(&home);
+            let usage = "usage: fetchira install [--refresh | (--mcp | --cli | --both) [--agents detected|all|NAME,...] [--remove-mcp]]";
+            let mut skill = None;
+            let mut agents = None;
+            let mut remove_mcp = false;
+            let mut refresh = false;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--mcp" | "--cli" | "--both" if skill.is_none() => {
+                        skill = Some(match flag.as_str() {
+                            "--mcp" => cli::Integration::Mcp,
+                            "--cli" => cli::Integration::Cli,
+                            _ => cli::Integration::Both,
+                        });
+                    }
+                    "--agents" if agents.is_none() => {
+                        agents = Some(args.next().ok_or_else(|| anyhow::anyhow!(usage))?);
+                    }
+                    "--remove-mcp" if !remove_mcp => remove_mcp = true,
+                    "--refresh" if !refresh => refresh = true,
+                    _ => anyhow::bail!(usage),
                 }
-                Some(_) => anyhow::bail!("usage: fetchira install [--refresh]"),
-                None => {}
+            }
+            if refresh {
+                if skill.is_some() || agents.is_some() || remove_mcp {
+                    anyhow::bail!(usage);
+                }
+                return fetchira::update::refresh_skills(&home);
+            }
+            if let Some(skill) = skill {
+                if remove_mcp && !matches!(skill, cli::Integration::Cli) {
+                    anyhow::bail!("--remove-mcp requires --cli");
+                }
+                return cli::install_tools_with_options(
+                    &home,
+                    skill,
+                    agents.as_deref().unwrap_or("detected"),
+                    remove_mcp,
+                );
+            }
+            if agents.is_some() || remove_mcp {
+                anyhow::bail!(usage);
             }
             return cli::install_tools(&home);
         }

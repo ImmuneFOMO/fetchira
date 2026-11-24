@@ -1305,7 +1305,7 @@ async fn remove_flow(home: &Path) -> anyhow::Result<()> {
 // ── Register the MCP server into coding tools ──────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-enum Integration {
+pub enum Integration {
     Both,
     Mcp,
     Cli,
@@ -1539,6 +1539,115 @@ pub fn install_tools(config_home: &Path) -> anyhow::Result<()> {
         println!("\nRestart the agent to load the selected integrations.");
     }
     Ok(())
+}
+
+pub fn install_tools_with_options(
+    config_home: &Path,
+    integration: Integration,
+    agents: &str,
+    remove_mcp: bool,
+) -> anyhow::Result<()> {
+    let skill = match integration {
+        Integration::Both => crate::skills::SkillVariant::Both,
+        Integration::Mcp => crate::skills::SkillVariant::Mcp,
+        Integration::Cli => crate::skills::SkillVariant::Cli,
+        Integration::Skip => bail!("select an integration to install"),
+    };
+    let targets = resolve_install_targets(
+        &mcp_target_list(),
+        agents,
+        skill == crate::skills::SkillVariant::Cli,
+    )?;
+    if targets.is_empty() {
+        bail!("no agents detected; select targets with --agents NAME,...");
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME is required to install agent skills")?;
+    let results = install_integrations_with_options(
+        &home,
+        config_home,
+        &installation_binary()?,
+        &targets,
+        Some(skill),
+        remove_mcp,
+    )?;
+    for result in &results {
+        println!(
+            "  {} {:14} {}",
+            if result.ok { "✓" } else { "✗" },
+            result.name,
+            result.msg
+        );
+    }
+    if results.iter().any(|result| {
+        !result.ok
+            || (skill == crate::skills::SkillVariant::Cli
+                && result.msg.starts_with("skipped:")
+                && result.msg.ends_with("does not exist"))
+    }) {
+        bail!("some integrations failed; see results above");
+    }
+    if !results
+        .iter()
+        .any(|result| !result.msg.starts_with("skipped:"))
+    {
+        bail!("no integrations installed; selected agent directories must exist");
+    }
+    println!("\nRestart the agent to load the selected integrations.");
+    Ok(())
+}
+
+fn resolve_install_targets(
+    targets: &[McpTarget],
+    agents: &str,
+    skill_only: bool,
+) -> anyhow::Result<Vec<String>> {
+    let targets: Vec<_> = targets
+        .iter()
+        .filter(|target| !skill_only || agent_skill_supported(target.name))
+        .collect();
+    let slug = |name: &str| name.to_ascii_lowercase().replace(' ', "-");
+    let agents = agents.trim();
+    if agents.eq_ignore_ascii_case("detected") || agents.eq_ignore_ascii_case("all") {
+        let has_installed = targets.iter().any(|target| target.installed);
+        return Ok(targets
+            .iter()
+            .filter(|target| {
+                agents.eq_ignore_ascii_case("all")
+                    || if has_installed {
+                        target.installed
+                    } else {
+                        target.present
+                    }
+            })
+            .map(|target| target.name.to_string())
+            .collect());
+    }
+    let mut chosen = Vec::new();
+    for name in agents.split(',').map(str::trim) {
+        let target = targets
+            .iter()
+            .find(|target| {
+                target.name.eq_ignore_ascii_case(name)
+                    || slug(target.name) == name.to_ascii_lowercase()
+            })
+            .with_context(|| {
+                format!(
+                    "unknown install target '{name}'; valid targets: {}",
+                    targets
+                        .iter()
+                        .map(|target| slug(target.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        if !chosen.iter().any(|name| name == target.name) {
+            chosen.push(target.name.to_string());
+        }
+    }
+    Ok(chosen)
 }
 
 fn choose_install_targets(skill_only: bool) -> anyhow::Result<Vec<String>> {
@@ -2303,7 +2412,7 @@ pub fn help() {
            fetchira setup               guided setup: pick providers, enter keys, log in\n  \
            fetchira providers           list all available providers\n  \
            fetchira list                show your accounts + remaining quota\n  \
-         fetchira install             choose agent integration (--refresh: update existing skills and launchers)\n  \
+         fetchira install [--refresh | (--mcp | --cli | --both) [--agents detected|all|NAME,...] [--remove-mcp]]\n  \
            fetchira add <provider>      add an account  [--label L] [--key K] [--proxy pool|URL]\n  \
            fetchira remove <label>      delete an account\n  \
            fetchira proxy <label>       set an account's proxy  (direct | pool | http://user:pass@host:port)\n  \
@@ -2331,6 +2440,40 @@ pub fn help() {
 mod tests {
     use super::*;
     use crate::config::Reset;
+
+    #[test]
+    fn install_targets_accept_slugs_and_follow_detection_defaults() {
+        let home = Path::new("/nonexistent-fetchira-targets");
+        let mut targets = mcp_targets(home, home, home, home);
+        for target in &mut targets {
+            target.present = target.name == "Cursor";
+            target.installed = target.name == "Codex CLI";
+        }
+        assert_eq!(
+            resolve_install_targets(&targets, "detected", false).unwrap(),
+            ["Codex CLI"]
+        );
+        assert_eq!(
+            resolve_install_targets(&targets, "CoDeX-cLi,Claude Code,codex-cli", false).unwrap(),
+            ["Codex CLI", "Claude Code"]
+        );
+        assert!(resolve_install_targets(&targets, "opencode", true).is_err());
+        assert!(resolve_install_targets(&targets, "detected,cursor", false).is_err());
+        assert!(resolve_install_targets(&targets, "", false).is_err());
+        assert_eq!(
+            resolve_install_targets(&targets, "all", true)
+                .unwrap()
+                .len(),
+            4
+        );
+        for target in &mut targets {
+            target.installed = false;
+        }
+        assert_eq!(
+            resolve_install_targets(&targets, "detected", false).unwrap(),
+            ["Cursor"]
+        );
+    }
 
     #[cfg(unix)]
     #[test]

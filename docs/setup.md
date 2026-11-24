@@ -105,6 +105,21 @@ After configuring local or hosted access, choose how your agents invoke Fetchira
 fetchira install
 ```
 
+For unattended installation:
+
+```sh
+fetchira install --mcp --agents detected
+fetchira install --both --agents codex-cli,cursor
+fetchira install --cli --agents cursor
+```
+
+Choose one mode: `--mcp`, `--cli`, or `--both`. `--agents` accepts `detected` (the default),
+`all`, or comma-separated names/slugs such as `"Claude Code,codex-cli"`, case-insensitively.
+`detected` selects existing Fetchira registrations if any exist, otherwise present clients.
+CLI mode accepts only skill-supported clients. `--remove-mcp` requires `--cli` and removes
+selected Fetchira registrations only after their skills install successfully. Other servers
+are preserved. See the [agent setup guide](AGENT_SETUP.md).
+
 The interactive picker installs the selected skill and, for MCP choices, registers the server
 in the selected clients. CLI only installs shell instructions without registering MCP.
 Restart the selected agent after installation.
@@ -213,11 +228,13 @@ Give an agent the provider name and an API key through your normal secret-handli
 Use `fetchira add PROVIDER --key 'KEY'`; omitting `--key` prompts interactively.
 For a web provider, `fetchira add PROVIDER` opens login and waits for completion.
 
-Use the client registration command or configuration above. Setup is optional for MCP: a
-client or plugin host can start `fetchira serve` before any setup, and it runs on the keyless
+Use `fetchira install --mcp --agents detected` or the client configuration above. Setup is
+optional for MCP: a client or plugin host can start `fetchira serve` before any setup, and it
+runs on the keyless
 providers plus any `<PROVIDER>_API_KEY` in its environment (see
-[Configuration](configuration.md#files-and-environment)). `fetchira install` and
-`fetchira setup` are interactive terminal commands. Bare `fetchira` opens the dashboard in
-a terminal and waits for MCP messages when stdin is piped; an agent should use an explicit
+[Configuration](configuration.md#files-and-environment)). Bare `fetchira install` and
+`fetchira setup` are interactive terminal commands; mode flags skip the install prompts.
+Bare `fetchira` opens the dashboard in a terminal and waits for MCP messages when stdin is
+piped; an agent should use an explicit
 command. Restart the client after registration, then ask it to search a current topic using
 Fetchira and check that the tool returns a result.
