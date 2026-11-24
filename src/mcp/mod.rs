@@ -283,7 +283,7 @@ impl Fetchira {
 
     #[tool(
         title = "Read web page",
-        description = "Read a URL and return its main content as clean markdown; auto-escalates to a headless browser when the plain read comes back empty. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls.",
+        description = "Read a known URL and return its main content as markdown; the default for page extraction. Falls back to a headless browser on failed or empty reads unless a provider is forced. Provider-specific extras via `mode` (crawl, structured extract, screenshot…) → call usage(provider=…) for exact params & example calls.",
         annotations(
             title = "Read web page",
             read_only_hint = true,
@@ -341,7 +341,7 @@ impl Fetchira {
 
     #[tool(
         title = "Render page in headless browser",
-        description = "Load a URL in a headless browser (hyperbrowser, browserless, steel) and return the page as markdown.",
+        description = "Render a JavaScript-heavy URL immediately as markdown; use read for ordinary extraction. Requires a configured browser provider (hyperbrowser, browserless or steel) and consumes its quota; fetch only, no clicks or automation.",
         annotations(
             title = "Render page in headless browser",
             read_only_hint = true,
