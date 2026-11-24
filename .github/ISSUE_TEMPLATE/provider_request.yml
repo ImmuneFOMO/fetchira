@@ -1,0 +1,46 @@
+name: Provider request
+description: Ask for a new search, reading, research or image provider.
+labels: [provider]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Provider
+      placeholder: Example Search
+    validations:
+      required: true
+  - type: input
+    id: docs
+    attributes:
+      label: API docs
+      placeholder: https://docs.example.com/api
+    validations:
+      required: true
+  - type: dropdown
+    id: tools
+    attributes:
+      label: Capabilities
+      multiple: true
+      options:
+        - Search
+        - Read page
+        - Deep research
+        - Image generation
+        - Browser session
+    validations:
+      required: true
+  - type: textarea
+    id: quota
+    attributes:
+      label: Free tier and limits
+      description: Free quota, rate limits and how usage or reset time can be read from the API.
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Auth
+      options:
+        - API key
+        - Web session login
+        - Other
+    validations:
+      required: true
