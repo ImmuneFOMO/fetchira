@@ -58,6 +58,22 @@ the matching skill in your selected agents. Restart the agent after installation
 
 ![Local dashboard](docs/dashboard.png)
 
+## If you're an AI agent
+
+Follow the [agent setup guide](docs/AGENT_SETUP.md) to install the binary, configure providers,
+and connect the user's clients without terminal prompts:
+
+```sh
+fetchira providers
+fetchira install --mcp --agents detected
+fetchira usage
+```
+
+Supply API keys through a protected environment; never ask for secrets in chat. The user
+completes web-session logins. Restart selected clients and verify a short search.
+For teams, an administrator runs `fetchira server` and issues access keys; teammates connect
+with `fetchira remote set URL --key KEY` and use the host's subscriptions and quota.
+
 ## Choose a guide
 
 | I want to… | Guide |
