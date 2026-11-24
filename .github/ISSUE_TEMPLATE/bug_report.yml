@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in the CLI, MCP server, dashboard or hosted server does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste API keys, `fk_live_` access keys, cookies or session files. Redact them as `***`.
+        Security issues go through a [private advisory](https://github.com/ImmuneFOMO/fetchira/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. fetchira add serper --key '***'
+        2. fetchira search "latest Rust release"
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or logs
+      description: Error text, MCP client log or the failing request from `fetchira usage`.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Fetchira version
+      description: Output of `fetchira --version`.
+      placeholder: fetchira 0.1.25
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Where it runs
+      multiple: true
+      options:
+        - CLI
+        - MCP (local)
+        - MCP (hosted server)
+        - Local dashboard (fetchira ui)
+        - Hosted admin
+        - Docker image
+        - Installer (npx, Homebrew, install.sh)
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider
+      description: Provider name from `fetchira providers`, if the issue is provider-specific.
+      placeholder: serper, gemini_web, tavily...
+  - type: input
+    id: env
+    attributes:
+      label: OS and agent client
+      placeholder: macOS 15 arm64, Claude Code 2.x
+    validations:
+      required: true
