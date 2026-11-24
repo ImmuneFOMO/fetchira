@@ -213,7 +213,10 @@ pub async fn serve_stdio(cfg: &Config) -> anyhow::Result<()> {
         peer: remote.peer().clone(),
         info,
     };
-    let local = bridge.serve(stdio()).await?;
+    let (input, output) = stdio();
+    let local = bridge
+        .serve(crate::mcp::stdio(input, output).await?)
+        .await?;
     let _ = local_peer.set(local.peer().clone());
     let local_result = local.waiting().await;
     let _ = remote.cancel().await;

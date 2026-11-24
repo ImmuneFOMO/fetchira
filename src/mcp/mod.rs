@@ -19,6 +19,51 @@ use crate::invoke::{
 use crate::providers::{Capability, Input, ProviderKind};
 use crate::router::Router;
 
+// Reject discovery without closing the stream so clients can fall back to initialize.
+pub async fn stdio<R, W>(
+    input: R,
+    mut output: W,
+) -> std::io::Result<(impl tokio::io::AsyncRead + Unpin, W)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use rmcp::model::{ClientJsonRpcMessage, ClientRequest};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let mut input = BufReader::new(input);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if input.read_until(b'\n', &mut line).await? == 0 {
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        match serde_json::from_slice::<ClientJsonRpcMessage>(&line) {
+            Ok(ClientJsonRpcMessage::Request(req)) => {
+                if matches!(req.request, ClientRequest::InitializeRequest(_)) {
+                    break;
+                }
+                let reply = if matches!(req.request, ClientRequest::PingRequest(_)) {
+                    serde_json::json!({"jsonrpc": "2.0", "id": req.id, "result": {}})
+                } else {
+                    serde_json::json!({"jsonrpc": "2.0", "id": req.id,
+                        "error": {"code": -32601, "message": "Method not found"}})
+                };
+                let mut reply = serde_json::to_vec(&reply)?;
+                reply.push(b'\n');
+                output.write_all(&reply).await?;
+                output.flush().await?;
+            }
+            Ok(ClientJsonRpcMessage::Notification(_)) => {}
+            _ => break,
+        }
+    }
+    Ok((std::io::Cursor::new(line).chain(input), output))
+}
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SearchArgs {
     /// The search query (or a follow-up message when `session` is set). Optional only when polling a
@@ -693,6 +738,74 @@ mod tests {
     use crate::providers::OutImage;
     use base64::Engine;
     use rmcp::model::RawContent;
+
+    #[tokio::test]
+    async fn stdio_probe_falls_back_to_initialize() {
+        use rmcp::ServiceExt;
+        use serde_json::{json, Value};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        struct TestServer;
+        impl ServerHandler for TestServer {}
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for probe in [false, true] {
+                let (client, server) = tokio::io::duplex(4096);
+                let (input, output) = tokio::io::split(server);
+                let server = tokio::spawn(async move {
+                    TestServer
+                        .serve(stdio(input, output).await.unwrap())
+                        .await
+                        .unwrap()
+                });
+                let (input, mut output) = tokio::io::split(client);
+                let mut input = BufReader::new(input);
+                let mut requests = Vec::new();
+                if probe {
+                    requests.push(json!({"jsonrpc":"2.0","method":"notifications/test"}));
+                    requests.push(json!({"jsonrpc":"2.0","id":0,"method":"ping"}));
+                    requests.push(json!({"jsonrpc":"2.0","id":"probe","method":"server/discover"}));
+                }
+                requests.extend([
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                        "protocolVersion":"2025-11-25","capabilities":{},
+                        "clientInfo":{"name":"test","version":"1"}}}),
+                    json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                    json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+                ]);
+                for request in requests {
+                    output
+                        .write_all(format!("{request}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                let mut replies = Vec::new();
+                for _ in 0..if probe { 4 } else { 2 } {
+                    let mut line = String::new();
+                    input.read_line(&mut line).await.unwrap();
+                    replies.push(serde_json::from_str::<Value>(&line).unwrap());
+                }
+                if probe {
+                    assert_eq!(
+                        replies.remove(0),
+                        json!({"jsonrpc":"2.0","id":0,"result":{}})
+                    );
+                    let error = replies.remove(0);
+                    assert_eq!(error["id"], "probe");
+                    assert_eq!(error["error"]["code"], -32601);
+                }
+                assert_eq!(replies[0]["id"], 1);
+                assert_eq!(replies[0]["result"]["protocolVersion"], "2025-11-25");
+                assert_eq!(replies[1]["id"], 2);
+                assert_eq!(replies[1]["result"]["tools"], json!([]));
+                drop(output);
+                drop(input);
+                server.await.unwrap().cancel().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn every_tool_has_title_and_annotations() {

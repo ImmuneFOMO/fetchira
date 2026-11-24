@@ -475,6 +475,11 @@ async fn main() -> anyhow::Result<()> {
         "fetchira ready; serving MCP over stdio (home: {})",
         home.display()
     );
-    server.serve(stdio()).await?.waiting().await?;
+    let (input, output) = stdio();
+    server
+        .serve(fetchira::mcp::stdio(input, output).await?)
+        .await?
+        .waiting()
+        .await?;
     Ok(())
 }
