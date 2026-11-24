@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.25...v0.1.26) - 2026-11-24
+
+### Other
+
+- add provider request template
+- add feature request template
+- add bug report template
+- add issue template config
+- add pull request template
+- add accessibility statement
+- add code of conduct
+
 ## [0.1.25](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.24...v0.1.25) - 2026-11-24
 
 ### Fixed
