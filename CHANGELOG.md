@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.24](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.23...v0.1.24) - 2026-11-24
+
+### Added
+
+- *(mcp)* clarify read and browser selection
+- *(install)* support unattended agent integration
+- *(hermes)* add the Hermes plugin package
+- *(serve)* add FETCHIRA_MANAGED_BY for installs run by a plugin host
+- *(serve)* add FETCHIRA_DISABLE to switch off tools and providers
+
+### Other
+
+- add unattended agent setup guide
+- run the MCP smoke checks
+
 ## [0.1.23](https://github.com/ImmuneFOMO/fetchira/compare/v0.1.22...v0.1.23) - 2026-11-12
 
 ### Added
